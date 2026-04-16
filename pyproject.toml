@@ -36,6 +36,9 @@ dev = [
     "ruff",
     "mypy",
 ]
+bench = [
+    "pytest-codspeed>=3.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/langchain-ai/quickjs-wasm"
