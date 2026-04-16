@@ -100,11 +100,19 @@ def test_js_catches_hosterror_and_reads_name_and_message() -> None:
             )
 
 
-# TODO(spec): throwing a non-Error primitive from JS (e.g. `throw 'x'`)
-# lands in JSError with an empty message. quickjs.wit §5 says the thrown
-# primitive's coerced string form should appear as `message`, but the
-# shim doesn't coerce today. Either (a) the shim does the coercion when
-# building the msgpack record, or (b) the spec is updated to reflect
-# "message is whatever QuickJS exposes, which may be empty for
-# non-Error throws." Deferred — no v0.1 acceptance assertion exercises
-# this branch.
+def test_non_error_throw_coerces_to_jserror() -> None:
+    """§10.1: `throw 'x'` / `throw 42` surface as JSError(name='Error',
+    message=<coerced string>, stack=None). The shim coerces via ToString."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError) as s_exc:
+                ctx.eval("throw 'bare string'")
+            assert s_exc.value.name == "Error"
+            assert s_exc.value.message == "bare string"
+            assert s_exc.value.stack is None
+
+            with pytest.raises(JSError) as n_exc:
+                ctx.eval("throw 42")
+            assert n_exc.value.name == "Error"
+            assert n_exc.value.message == "42"
+            assert n_exc.value.stack is None

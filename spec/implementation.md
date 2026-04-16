@@ -198,6 +198,8 @@ int32_t qjs_exception_to_msgpack(uint32_t ctx, uint32_t exc_slot,
                                  uint32_t *out_ptr, uint32_t *out_len);
 ```
 
+If the exception value is not an object with a `.name` property (i.e. the JS side did `throw 'x'` or `throw 42`), `qjs_exception_to_msgpack` encodes `name = "Error"` and `message = ToString(exception)`; `stack` is `null`. §10.1 covers how this surfaces on the Python side.
+
 The scratch buffer is per-context, grows in place via `realloc` when a value exceeds current capacity, and starts at 64 KB. There is no separate malloc-and-return path for large values — the single ownership model (scratch owned by shim, invalidated on next marshaling call on this context) applies uniformly. Callers never free marshaling output.
 
 ```c
@@ -546,6 +548,8 @@ When QuickJS returns an exception status (`qjs_eval` returns 1), the bridge call
 - `InterruptError` / `TimeoutError` if `name == "InternalError"` and message contains the interrupt marker
 - `MemoryLimitError` if `name == "InternalError"` and message contains the OOM marker (QuickJS emits a specific string for `JS_ATOM_out_of_memory`)
 - `JSError` otherwise, populated with `name`, `message`, `stack`
+
+When JS throws a non-`Error` value (e.g. `throw 'x'` or `throw 42`), the shim coerces the thrown value to a string via `ToString` and surfaces it as `JSError(name='Error', message=<coerced string>, stack=None)`. The JS-side distinction between thrown `Error` instances and thrown primitives is not preserved on the Python side — callers that need to round-trip arbitrary non-Error throws should use `eval_handle` and inspect the thrown value directly.
 
 ### 10.2 From Python host functions to JS
 

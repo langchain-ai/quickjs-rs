@@ -1053,6 +1053,40 @@ static int32_t encode_exc_field(ShimContext *c, DynBuf *b, int32_t off,
     return off;
 }
 
+/* Encode a {name, message, stack} record for an exception that isn't a
+ * JS Error-like object — i.e. `throw 'x'` or `throw 42`. §10.1 / §6.2:
+ * name = "Error", message = ToString(exc), stack = null. */
+static int32_t encode_exc_coerced(ShimContext *c, DynBuf *b, int32_t off,
+                                  JSValueConst exc) {
+    static const char *NAME_KEY = "name";
+    static const char *NAME_VAL = "Error";
+    static const char *MSG_KEY = "message";
+    static const char *STACK_KEY = "stack";
+
+    off = encode_str_bytes(b, off, (const uint8_t *)NAME_KEY, strlen(NAME_KEY));
+    if (off < 0) return -1;
+    off = encode_str_bytes(b, off, (const uint8_t *)NAME_VAL, strlen(NAME_VAL));
+    if (off < 0) return -1;
+
+    off = encode_str_bytes(b, off, (const uint8_t *)MSG_KEY, strlen(MSG_KEY));
+    if (off < 0) return -1;
+    size_t slen;
+    const char *s = JS_ToCStringLen(c->ctx, &slen, exc);
+    if (!s) {
+        JSValue swallowed = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, swallowed);
+        off = buf_write_u8(b, off, 0xc0);
+    } else {
+        off = encode_str_bytes(b, off, (const uint8_t *)s, slen);
+        JS_FreeCString(c->ctx, s);
+    }
+    if (off < 0) return -1;
+
+    off = encode_str_bytes(b, off, (const uint8_t *)STACK_KEY, strlen(STACK_KEY));
+    if (off < 0) return -1;
+    return buf_write_u8(b, off, 0xc0);
+}
+
 QJS_EXPORT int32_t qjs_exception_to_msgpack(uint32_t ctx_id, uint32_t exc_slot,
                                             uint32_t *out_ptr, uint32_t *out_len) {
     ShimContext *c = ctx_lookup(ctx_id);
@@ -1062,12 +1096,21 @@ QJS_EXPORT int32_t qjs_exception_to_msgpack(uint32_t ctx_id, uint32_t exc_slot,
     JSValue exc = c->slots[exc_slot].value;
     int32_t off = encode_map_header(&c->scratch, 0, 3);
     if (off < 0) return -1;
-    off = encode_exc_field(c, &c->scratch, off, exc, "name");
-    if (off < 0) return -1;
-    off = encode_exc_field(c, &c->scratch, off, exc, "message");
-    if (off < 0) return -1;
-    off = encode_exc_field(c, &c->scratch, off, exc, "stack");
-    if (off < 0) return -1;
+
+    /* §10.1 / §6.2: non-object throws (`throw 'x'`, `throw 42`) coerce
+     * to JSError(name="Error", message=ToString(exc), stack=null) rather
+     * than being treated as a missing-.name Error. */
+    if (!JS_IsObject(exc)) {
+        off = encode_exc_coerced(c, &c->scratch, off, exc);
+        if (off < 0) return -1;
+    } else {
+        off = encode_exc_field(c, &c->scratch, off, exc, "name");
+        if (off < 0) return -1;
+        off = encode_exc_field(c, &c->scratch, off, exc, "message");
+        if (off < 0) return -1;
+        off = encode_exc_field(c, &c->scratch, off, exc, "stack");
+        if (off < 0) return -1;
+    }
 
     c->scratch.len = (uint32_t)off;
     *out_ptr = (uint32_t)(uintptr_t)c->scratch.data;
