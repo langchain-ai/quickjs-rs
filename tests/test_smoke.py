@@ -103,6 +103,22 @@ def test_smoke_primitives() -> None:
             assert js_excinfo.value.message == "bad thing"
             assert js_excinfo.value.stack is not None
 
+            # Memory limit: unbounded allocation trips JS_ATOM_out_of_memory,
+            # surfaced as MemoryLimitError.
+            with pytest.raises(MemoryLimitError):
+                ctx.eval(
+                    "let a = []; while(true) a.push(new Array(1e6).fill(0))"
+                )
+
+            # Timeout: infinite loop terminates within the configured
+            # deadline. Context uses its default 5 s budget; this test
+            # drops it to something short so pytest doesn't sit for 5 s
+            # of wall time on every run.
+            ctx.timeout = 0.2
+            with pytest.raises(TimeoutError):
+                ctx.eval("while(true){}")
+            ctx.timeout = 5.0
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:

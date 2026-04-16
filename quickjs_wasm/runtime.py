@@ -52,6 +52,7 @@ class Runtime:
             ctx.close()
         self._contexts.clear()
         self._bridge.runtime_free(self._rt_id)
+        self._bridge.close()
         self._closed = True
 
     def new_context(self, *, timeout: float = 5.0) -> Context:

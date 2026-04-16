@@ -11,6 +11,8 @@ here — the public API is responsible for surfacing the error.
 
 from __future__ import annotations
 
+import threading
+import time
 import traceback
 from collections.abc import Callable
 from importlib import resources
@@ -19,6 +21,13 @@ from typing import Any
 import wasmtime
 
 from quickjs_wasm import _msgpack
+
+# Cadence at which the engine epoch ticks. Every Context.eval sets an
+# epoch deadline in ticks — timeout_seconds / _EPOCH_TICK_SECONDS — so the
+# wasmtime side traps at roughly the same wall-clock moment the QuickJS
+# host_interrupt would. §9: this is the backup path in case a C-level
+# loop in QuickJS's own code ever bypasses the interrupt hook.
+_EPOCH_TICK_SECONDS = 0.05
 
 _WASM_FILE = "quickjs.wasm"
 
@@ -45,24 +54,31 @@ class Bridge:
     """
 
     def __init__(self) -> None:
-        self._engine = wasmtime.Engine()
+        engine_config = wasmtime.Config()
+        engine_config.epoch_interruption = True
+        self._engine = wasmtime.Engine(engine_config)
         self._module = _load_module(self._engine)
 
         config = wasmtime.WasiConfig()
         self._store = wasmtime.Store(self._engine)
         self._store.set_wasi(config)
+        # Initialize the store's epoch deadline to "effectively never"
+        # so module load and one-off shim calls don't trap. Context.eval
+        # overwrites this around each user-facing call.
+        self._store.set_epoch_deadline(1 << 32)
 
         linker = wasmtime.Linker(self._engine)
         linker.define_wasi()
 
-        # env::host_interrupt — always return 0 (no interrupt) until
-        # per-context timeouts land. §6.3 / §7.3 timeout semantics arrive
-        # with a later assertion.
+        # host_interrupt: QuickJS calls this periodically during execution.
+        # We return 1 when the per-context deadline has elapsed, which
+        # makes QuickJS throw an uncatchable InternalError("interrupted")
+        # that the Python side recognizes as TimeoutError. §7.3, §9.
         linker.define_func(
             "env",
             "host_interrupt",
             wasmtime.FuncType([], [wasmtime.ValType.i32()]),
-            lambda: 0,
+            self._host_interrupt_check,
         )
 
         # env::host_call — dispatched when JS calls a host-registered
@@ -88,6 +104,20 @@ class Bridge:
         # after consumption so a second eval can't see a stale cause.
         self._last_host_exception: BaseException | None = None
 
+        # Per-call deadline in monotonic seconds. Set by Context.eval at
+        # entry; host_interrupt compares time.monotonic() to this value.
+        # None means "no deadline" (e.g. shim bookkeeping calls).
+        self._deadline: float | None = None
+
+        # Daemon thread that increments the engine epoch at _EPOCH_TICK_SECONDS
+        # cadence. Without this, set_epoch_deadline would never fire since
+        # nothing else advances the engine's epoch counter.
+        self._shutdown = threading.Event()
+        self._epoch_thread = threading.Thread(
+            target=self._tick_epoch, name="quickjs-wasm-epoch", daemon=True
+        )
+        self._epoch_thread.start()
+
         self._instance = linker.instantiate(self._store, self._module)
 
         exports = self._instance.exports(self._store)
@@ -98,6 +128,34 @@ class Bridge:
             if fn is None:
                 raise RuntimeError(f"quickjs.wasm is missing export {name!r}")
             self._exports[name] = fn  # type: ignore[assignment]
+
+    def close(self) -> None:
+        """Stop the epoch-ticker thread. Runtime.close() calls this."""
+        self._shutdown.set()
+
+    def _tick_epoch(self) -> None:
+        while not self._shutdown.wait(_EPOCH_TICK_SECONDS):
+            self._engine.increment_epoch()
+
+    def _host_interrupt_check(self) -> int:
+        deadline = self._deadline
+        if deadline is None:
+            return 0
+        return 1 if time.monotonic() >= deadline else 0
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Set the wall-clock deadline seen by host_interrupt, plus the
+        wasmtime epoch deadline as a backup path §9 mandates."""
+        self._deadline = deadline
+        if deadline is None:
+            self._store.set_epoch_deadline(1 << 32)
+            return
+        remaining = max(deadline - time.monotonic(), 0.0)
+        # Round up and add one tick of slack so the wall-clock check
+        # normally fires first (producing the nicer InterruptError path)
+        # and the epoch trap is reserved for genuine bypass cases.
+        ticks = int(remaining / _EPOCH_TICK_SECONDS) + 2
+        self._store.set_epoch_deadline(ticks)
 
     # ---- Memory helpers -------------------------------------------------
 

@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, overload
 
+import wasmtime
+
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
-from quickjs_wasm.errors import HostError, JSError, MarshalError, QuickJSError
+from quickjs_wasm.errors import (
+    HostError,
+    JSError,
+    MarshalError,
+    MemoryLimitError,
+    QuickJSError,
+    TimeoutError,
+)
 from quickjs_wasm.globals import Globals
 
 if TYPE_CHECKING:
@@ -70,7 +80,36 @@ class Context:
         # through the host_call trampoline, so nested behavior is
         # unchanged.
         self._bridge.take_last_host_exception()
-        status, slot = self._bridge.eval(self._ctx_id, code, flags)
+
+        # §7.3: timeout is measured from the start of each eval /
+        # eval_handle / Handle.call call. host_interrupt checks the
+        # deadline; wasmtime's epoch deadline is a backup for C-level
+        # loops inside QuickJS (§9).
+        deadline = time.monotonic() + self._timeout
+        self._bridge.set_deadline(deadline)
+        try:
+            status, slot = self._bridge.eval(self._ctx_id, code, flags)
+        except wasmtime.Trap as trap:
+            # Two legitimate traps land here: (a) the epoch-deadline
+            # backup path §9 mandates — fires only when QuickJS's own
+            # interrupt hook didn't notice a deadline had passed; and
+            # (b) wasm-level stack exhaustion, when a JS recursion
+            # frame expanded the C stack past the configured wasm
+            # data-stack limit before JS_CHECK_STACK_OVERFLOW could
+            # catch it. Distinguish by checking whether the wall-clock
+            # deadline actually elapsed.
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"JS evaluation exceeded {self._timeout}s "
+                    f"(epoch trap: {trap})"
+                ) from None
+            raise JSError(
+                "InternalError",
+                f"wasm trap during JS evaluation: {trap}",
+                None,
+            ) from None
+        finally:
+            self._bridge.set_deadline(None)
         if status < 0:
             raise QuickJSError(f"shim error from qjs_eval: status={status}")
         if status == 1:
@@ -95,9 +134,11 @@ class Context:
     def _raise_from_exception_slot(self, exc_slot: int) -> None:
         """Extract {name, message, stack} off a JS exception and raise.
 
-        Routes HostError-named exceptions to HostError with the original
-        Python exception attached as __cause__ (§10.2), so round-trips
-        through JS preserve Python-side debugging info.
+        Routes:
+        - InternalError containing "out of memory" → MemoryLimitError (§10.1)
+        - InternalError containing "interrupted" → TimeoutError (§10.1)
+        - name == "HostError" → HostError with __cause__ threaded (§10.2)
+        - everything else → JSError with name/message/stack preserved
         """
         status, payload = self._bridge.exception_to_msgpack(
             self._ctx_id, exc_slot
@@ -120,12 +161,20 @@ class Context:
         if not isinstance(message, str):
             message = str(message)
         stack_str: str | None = stack if isinstance(stack, str) else None
+
+        # §10.1 InternalError routing — quickjs-ng emits fixed strings for
+        # both OOM and interrupt, confirmed against the pinned submodule:
+        # quickjs.c:8082 ("out of memory") and quickjs.c:8167 ("interrupted").
+        if name == "InternalError":
+            if "out of memory" in message:
+                raise MemoryLimitError(message)
+            if "interrupted" in message:
+                raise TimeoutError(message)
+
         if name == "HostError":
             cause = self._bridge.take_last_host_exception()
             err = HostError(name, message, stack_str)
             if cause is not None:
-                # Use `raise ... from cause` so __cause__ is set without us
-                # having to touch attributes directly.
                 raise err from cause
             raise err
         raise JSError(name, message, stack_str)
