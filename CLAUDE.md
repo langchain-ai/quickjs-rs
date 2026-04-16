@@ -261,6 +261,91 @@ that "focused tests already cover this" — that reasoning produced
 two production-quality bugs that would have shipped if v0.2 had
 tagged without §13.2 integrated.
 
+## Benchmarks
+
+Performance benchmarks live in `benchmarks/`, separate from correctness tests in `tests/`.
+The authoritative spec is `spec/benchmarks.md`.
+
+**Benchmarks are not tests.** They measure time, not correctness. No assertions, no pass/fail
+logic. If a benchmark's measured value changes, that's information — not a failure.
+
+**Benchmarks are not optional.** Any change to the shim, bridge, marshaling, or eval pipeline
+should be checked against benchmarks locally before committing. Not "run benchmarks and prove
+it didn't regress" (wall-time variance makes that unreliable locally) — rather "run benchmarks,
+look at the numbers, and note any surprising changes in the commit body."
+
+### Commands
+
+```bash
+# Run all benchmarks
+pytest benchmarks/ --codspeed
+
+# Run a specific file
+pytest benchmarks/test_startup.py --codspeed
+
+# Run without codspeed (dry-run, no timing output)
+pytest benchmarks/
+```
+
+### When to write a new benchmark
+
+Add a benchmark when:
+- A new public API method is added (eval_async got its own benchmarks in v0.2)
+- A new marshaling path is added (bytes, bigint each got benchmarks)
+- A performance-sensitive code path is refactored (the benchmark pins the before/after)
+- A user reports a performance issue (the benchmark reproduces and tracks the fix)
+
+Do not add a benchmark for:
+- Error paths (error handling speed is not performance-critical)
+- One-time operations (module loading, function registration — unless startup cost is the concern)
+- Niche type combinations (benchmark the representative cases, not every permutation)
+
+### Benchmark naming
+
+Use `bench_` prefix, not `test_`. This makes benchmarks visually distinct from correctness tests
+in output and file listings. The function name describes what's measured:
+
+- `bench_eval_fibonacci_30` — what operation, what workload
+- `bench_marshal_dict_flat_100` — what layer, what shape, what size
+- `bench_host_call_100x_loop` — what crossing, what pattern, what scale
+
+### Benchmark code patterns
+
+Setup belongs outside the `benchmark()` call:
+
+```python
+# GOOD — only the eval is measured
+def bench_eval_json_parse(benchmark, ctx):
+    code = "JSON.parse('{\"a\": 1}')"
+    benchmark(ctx.eval, code)
+
+# BAD — context creation is measured alongside eval
+def bench_eval_json_parse(benchmark):
+    rt = Runtime()
+    ctx = rt.new_context()
+    benchmark(ctx.eval, "JSON.parse('{\"a\": 1}')")
+```
+
+Use fixtures from `benchmarks/conftest.py` for shared setup (runtime, context, pre-registered
+host functions). Benchmarks should be fast to write — if the fixture doesn't exist for your
+case, add it to conftest.
+
+### Relationship to spec
+
+`spec/benchmarks.md` §8 has order-of-magnitude targets for each benchmark category. If a
+benchmark lands outside its expected range, either the range is wrong (update the spec) or
+the implementation has an unexpected cost center (investigate before committing). The spec
+is the reference for "does this number look right."
+
+### CI
+
+Benchmarks run in CI via CodSpeedHQ/action on every push to main and every PR. Results are
+tracked on CodSpeed for regression detection. The workflow is `.github/workflows/benchmarks.yml`.
+
+Do not modify the CI workflow to skip benchmarks or change the measurement mode without
+updating `spec/benchmarks.md` §6. The mode (`walltime`) is a deliberate choice — see §6 for
+the rationale.
+
 ## File map
 
 ```
