@@ -66,3 +66,11 @@ files = ["quickjs_wasm"]
 testpaths = ["tests"]
 filterwarnings = ["error::ResourceWarning"]
 asyncio_mode = "auto"
+# Collect both test_ (correctness) and bench_ (benchmark) functions.
+# Filenames stay `test_*.py` per spec/benchmarks.md §3; function
+# names use `bench_` per CLAUDE.md "Benchmark naming" to visually
+# distinguish benchmarks from correctness tests. Benchmarks live
+# in benchmarks/ (outside testpaths); tests/ has no bench_
+# functions, so the expanded pattern doesn't change correctness-
+# test collection.
+python_functions = ["test_*", "bench_*"]
