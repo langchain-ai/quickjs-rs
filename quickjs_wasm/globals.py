@@ -1,24 +1,118 @@
-"""Globals proxy. See spec/implementation.md §7.2."""
+"""Globals proxy. See spec/implementation.md §7.2, §7.3."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from quickjs_wasm import _msgpack
+from quickjs_wasm._msgpack import Undefined
+from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
+
 if TYPE_CHECKING:
+    from quickjs_wasm._bridge import Bridge
     from quickjs_wasm.handle import Handle
 
 
 class Globals:
-    """Dict-like proxy for the JS global object."""
+    """Dict-like proxy for the JS global object.
+
+    Reads and writes go through qjs_get_prop / qjs_set_prop against the
+    global object slot. Reads marshal the value out as a Python value;
+    writes accept Python values or Handles.
+
+    Each __getitem__ / __setitem__ refreshes against the live global —
+    §7.3: "Reads perform get-global each time (no caching)".
+    """
+
+    def __init__(self, bridge: Bridge, ctx_id: int) -> None:
+        self._bridge = bridge
+        self._ctx_id = ctx_id
+
+    def _global_slot(self) -> int:
+        slot = self._bridge.get_global_object(self._ctx_id)
+        if slot == 0:
+            raise QuickJSError("failed to acquire global object")
+        return slot
 
     def __getitem__(self, key: str) -> Any:
-        raise NotImplementedError
+        global_slot = self._global_slot()
+        try:
+            status, value_slot = self._bridge.get_prop(self._ctx_id, global_slot, key)
+            if status < 0:
+                raise QuickJSError(f"shim error from qjs_get_prop: status={status}")
+            if status == 1:
+                self._bridge.slot_drop(self._ctx_id, value_slot)
+                # TODO(exceptions): surface JS exception as JSError once
+                # qjs_exception_to_msgpack is wired in a later commit.
+                raise JSError("Error", "exception reading global (stack not yet wired)")
+            try:
+                mp_status, payload = self._bridge.to_msgpack(self._ctx_id, value_slot)
+                if mp_status < 0:
+                    raise MarshalError(
+                        f"global {key!r} holds a value not yet marshalable"
+                    )
+                decoded = _msgpack.decode(payload)
+                if isinstance(decoded, Undefined):
+                    return None
+                return decoded
+            finally:
+                self._bridge.slot_drop(self._ctx_id, value_slot)
+        finally:
+            self._bridge.slot_drop(self._ctx_id, global_slot)
 
     def __setitem__(self, key: str, value: Handle | Any) -> None:
-        raise NotImplementedError
+        from quickjs_wasm.handle import Handle as _Handle  # avoid cycle
+
+        global_slot = self._global_slot()
+        try:
+            if isinstance(value, _Handle):
+                raise NotImplementedError(
+                    "Handle-valued assignment lands with handle support (§7.2)"
+                )
+            try:
+                payload = _msgpack.encode(value)
+            except TypeError as exc:
+                raise MarshalError(str(exc)) from exc
+            status, val_slot = self._bridge.from_msgpack(self._ctx_id, payload)
+            if status < 0:
+                raise MarshalError(
+                    f"shim error from qjs_from_msgpack: status={status}"
+                )
+            try:
+                rc = self._bridge.set_prop(self._ctx_id, global_slot, key, val_slot)
+                if rc < 0:
+                    raise QuickJSError(f"shim error from qjs_set_prop: status={rc}")
+                if rc == 1:
+                    raise JSError("Error", f"failed to set global {key!r}")
+            finally:
+                self._bridge.slot_drop(self._ctx_id, val_slot)
+        finally:
+            self._bridge.slot_drop(self._ctx_id, global_slot)
 
     def __contains__(self, key: str) -> bool:
-        raise NotImplementedError
+        # Minimal semantic: a global is present if get returns anything
+        # other than the "undefined" JS sentinel. That matches
+        # `typeof x !== 'undefined'`. JS also distinguishes "has own property"
+        # from "resolves to undefined" — we stay with the pragmatic version
+        # here since §7.2 only commits to dict-like semantics.
+        global_slot = self._global_slot()
+        try:
+            status, value_slot = self._bridge.get_prop(self._ctx_id, global_slot, key)
+            if status < 0:
+                raise QuickJSError(f"shim error from qjs_get_prop: status={status}")
+            if status == 1:
+                self._bridge.slot_drop(self._ctx_id, value_slot)
+                raise JSError("Error", "exception testing global (stack not yet wired)")
+            try:
+                mp_status, payload = self._bridge.to_msgpack(self._ctx_id, value_slot)
+                if mp_status < 0:
+                    # Holds a non-marshalable value — present but opaque.
+                    return True
+                return not isinstance(_msgpack.decode(payload), Undefined)
+            finally:
+                self._bridge.slot_drop(self._ctx_id, value_slot)
+        finally:
+            self._bridge.slot_drop(self._ctx_id, global_slot)
 
     def get_handle(self, key: str) -> Handle:
-        raise NotImplementedError
+        raise NotImplementedError("get_handle lands with handle support (§7.2).")

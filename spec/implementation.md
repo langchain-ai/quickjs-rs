@@ -492,6 +492,8 @@ Values cross the shim boundary as MessagePack. We use standard types plus three 
 | `Array` | `array` |
 | plain `Object` | `map` with `str` keys (insertion-ordered) |
 
+Sparse arrays are encoded densely; holes become `undefined`. This matches `JSON.stringify` and is the natural mapping given msgpack has no notion of a hole. Callers that need to distinguish holes from explicit `undefined` should use `eval_handle` and traverse the object directly.
+
 Python side:
 
 | Python type | Marshal to JS as |

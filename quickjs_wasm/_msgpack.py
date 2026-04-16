@@ -13,6 +13,9 @@ from __future__ import annotations
 import struct
 from typing import Any
 
+JS_SAFE_INT_MIN = -(2**53) + 1
+JS_SAFE_INT_MAX = (2**53) - 1
+
 
 class Undefined:
     """Sentinel for JS `undefined`. Use the module-level ``UNDEFINED`` instance.
@@ -42,6 +45,156 @@ def decode(data: bytes) -> Any:
     if offset != len(data):
         raise ValueError(f"trailing {len(data) - offset} bytes after decoded value")
     return value
+
+
+def encode(value: Any) -> bytes:
+    """Encode a Python value to MessagePack per §8's Python-side table.
+
+    Raises TypeError (caller wraps as MarshalError) for types that aren't
+    representable: sets, custom classes, datetimes, dict keys that aren't
+    strings, etc. v0.1 has no ``default=`` hook (§8).
+    """
+    buf = bytearray()
+    _encode_at(buf, value)
+    return bytes(buf)
+
+
+def _encode_at(buf: bytearray, value: Any) -> None:
+    if value is None:
+        buf.append(0xC0)
+        return
+    if isinstance(value, Undefined):
+        buf.extend(b"\xc7\x00\x00")
+        return
+    if isinstance(value, bool):  # bool before int — bool is a subclass
+        buf.append(0xC3 if value else 0xC2)
+        return
+    if isinstance(value, int):
+        if JS_SAFE_INT_MIN <= value <= JS_SAFE_INT_MAX:
+            # §8: safe-range ints marshal as JS number (float64 on the wire).
+            _encode_float(buf, float(value))
+        else:
+            _encode_bigint(buf, value)
+        return
+    if isinstance(value, float):
+        _encode_float(buf, value)
+        return
+    if isinstance(value, str):
+        _encode_str(buf, value)
+        return
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        _encode_bin(buf, bytes(value))
+        return
+    if isinstance(value, (list, tuple)):
+        _encode_array(buf, value)
+        return
+    if isinstance(value, dict):
+        _encode_map(buf, value)
+        return
+    raise TypeError(
+        f"value of type {type(value).__name__!r} is not marshalable to JS per §8"
+    )
+
+
+def _encode_float(buf: bytearray, value: float) -> None:
+    buf.append(0xCB)
+    buf.extend(struct.pack(">d", value))
+
+
+def _encode_str(buf: bytearray, value: str) -> None:
+    body = value.encode("utf-8")
+    n = len(body)
+    if n <= 31:
+        buf.append(0xA0 | n)
+    elif n <= 0xFF:
+        buf.append(0xD9)
+        buf.append(n)
+    elif n <= 0xFFFF:
+        buf.append(0xDA)
+        buf.extend(n.to_bytes(2, "big"))
+    elif n <= 0xFFFFFFFF:
+        buf.append(0xDB)
+        buf.extend(n.to_bytes(4, "big"))
+    else:
+        raise ValueError("string exceeds msgpack str32 limit")
+    buf.extend(body)
+
+
+def _encode_bin(buf: bytearray, body: bytes) -> None:
+    n = len(body)
+    if n <= 0xFF:
+        buf.append(0xC4)
+        buf.append(n)
+    elif n <= 0xFFFF:
+        buf.append(0xC5)
+        buf.extend(n.to_bytes(2, "big"))
+    elif n <= 0xFFFFFFFF:
+        buf.append(0xC6)
+        buf.extend(n.to_bytes(4, "big"))
+    else:
+        raise ValueError("bytes exceed msgpack bin32 limit")
+    buf.extend(body)
+
+
+def _encode_bigint(buf: bytearray, value: int) -> None:
+    body = str(value).encode("utf-8")
+    n = len(body)
+    if n in (1, 2, 4, 8, 16):
+        type_code = {1: 0xD4, 2: 0xD5, 4: 0xD6, 8: 0xD7, 16: 0xD8}[n]
+        buf.append(type_code)
+        buf.append(0x01)
+    elif n <= 0xFF:
+        buf.append(0xC7)
+        buf.append(n)
+        buf.append(0x01)
+    elif n <= 0xFFFF:
+        buf.append(0xC8)
+        buf.extend(n.to_bytes(2, "big"))
+        buf.append(0x01)
+    elif n <= 0xFFFFFFFF:
+        buf.append(0xC9)
+        buf.extend(n.to_bytes(4, "big"))
+        buf.append(0x01)
+    else:
+        raise ValueError("bigint decimal exceeds ext32 body limit")
+    buf.extend(body)
+
+
+def _encode_array(buf: bytearray, items: Any) -> None:
+    n = len(items)
+    if n <= 15:
+        buf.append(0x90 | n)
+    elif n <= 0xFFFF:
+        buf.append(0xDC)
+        buf.extend(n.to_bytes(2, "big"))
+    elif n <= 0xFFFFFFFF:
+        buf.append(0xDD)
+        buf.extend(n.to_bytes(4, "big"))
+    else:
+        raise ValueError("array exceeds msgpack array32 limit")
+    for item in items:
+        _encode_at(buf, item)
+
+
+def _encode_map(buf: bytearray, items: dict[Any, Any]) -> None:
+    n = len(items)
+    if n <= 15:
+        buf.append(0x80 | n)
+    elif n <= 0xFFFF:
+        buf.append(0xDE)
+        buf.extend(n.to_bytes(2, "big"))
+    elif n <= 0xFFFFFFFF:
+        buf.append(0xDF)
+        buf.extend(n.to_bytes(4, "big"))
+    else:
+        raise ValueError("map exceeds msgpack map32 limit")
+    for key, val in items.items():
+        if not isinstance(key, str):
+            raise TypeError(
+                f"dict key must be str per §8, got {type(key).__name__!r}"
+            )
+        _encode_str(buf, key)
+        _encode_at(buf, val)
 
 
 _FIXEXT_LENGTHS = {0xD4: 1, 0xD5: 2, 0xD6: 4, 0xD7: 8, 0xD8: 16}

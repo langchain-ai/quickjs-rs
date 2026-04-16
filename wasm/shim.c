@@ -647,6 +647,9 @@ static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
         /* §8: functions in eval results are not marshalable — they must be
          * held as handles instead. Same for Promises (drive them first) and
          * typed arrays other than Uint8Array (already handled above). */
+        /* TODO(handles): §8 recommends surfacing "use eval_handle" in the
+         * resulting MarshalError message. Wording lands when eval_handle is
+         * a real API to point at. */
         if (JS_IsFunction(c->ctx, v)) return -1;
         if (JS_IsPromise(v)) return -1;
         if (JS_GetTypedArrayType(v) >= 0) return -1;
@@ -654,6 +657,8 @@ static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
     }
     if (tag == JS_TAG_SYMBOL) {
         /* §8: symbols are not marshalable in eval results. */
+        /* TODO(handles): same as above — error copy polish lands with
+         * eval_handle. */
         return -1;
     }
     /* Unknown tag. */
@@ -674,12 +679,341 @@ QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* MessagePack decode (host → JS)                                      */
+/* ------------------------------------------------------------------ */
+
+static uint64_t be_load_u64(const uint8_t *p) {
+    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
+           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
+           ((uint64_t)p[6] << 8)  |  (uint64_t)p[7];
+}
+
+typedef struct DecCursor {
+    const uint8_t *data;
+    uint32_t len;
+    uint32_t off;
+    bool error;
+} DecCursor;
+
+static bool dec_need(DecCursor *c, uint32_t n) {
+    if (c->error) return false;
+    if (c->off + n > c->len) { c->error = true; return false; }
+    return true;
+}
+
+static uint8_t dec_u8(DecCursor *c) {
+    if (!dec_need(c, 1)) return 0;
+    return c->data[c->off++];
+}
+
+static uint32_t dec_u16(DecCursor *c) {
+    if (!dec_need(c, 2)) return 0;
+    uint32_t v = ((uint32_t)c->data[c->off] << 8) | c->data[c->off + 1];
+    c->off += 2;
+    return v;
+}
+
+static uint32_t dec_u32(DecCursor *c) {
+    if (!dec_need(c, 4)) return 0;
+    uint32_t v = ((uint32_t)c->data[c->off] << 24) |
+                 ((uint32_t)c->data[c->off + 1] << 16) |
+                 ((uint32_t)c->data[c->off + 2] << 8) |
+                 c->data[c->off + 3];
+    c->off += 4;
+    return v;
+}
+
+static const uint8_t *dec_take(DecCursor *c, uint32_t n) {
+    if (!dec_need(c, n)) return NULL;
+    const uint8_t *p = c->data + c->off;
+    c->off += n;
+    return p;
+}
+
+/* Decode a BigInt by calling the BigInt global as a constructor with the
+ * decimal string as its argument. See user note in the commit thread:
+ * this is simpler than walking the decimal ourselves and matches JS
+ * semantics precisely (sign, leading zeros, overflow). */
+static JSValue decode_bigint(JSContext *ctx, const char *decimal, size_t len) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue bigint_ctor = JS_GetPropertyStr(ctx, global, "BigInt");
+    JS_FreeValue(ctx, global);
+    if (JS_IsException(bigint_ctor)) return bigint_ctor;
+    JSValue arg = JS_NewStringLen(ctx, decimal, len);
+    if (JS_IsException(arg)) {
+        JS_FreeValue(ctx, bigint_ctor);
+        return arg;
+    }
+    JSValue result = JS_Call(ctx, bigint_ctor, JS_UNDEFINED, 1, &arg);
+    JS_FreeValue(ctx, arg);
+    JS_FreeValue(ctx, bigint_ctor);
+    return result;
+}
+
+static JSValue decode_value(ShimContext *c, DecCursor *cur, int depth);
+
+#define DEC_MAX_DEPTH MARSHAL_MAX_DEPTH
+
+static JSValue decode_ext(ShimContext *c, DecCursor *cur, uint32_t len) {
+    uint8_t ext_type = dec_u8(cur);
+    const uint8_t *body = dec_take(cur, len);
+    if (cur->error) return JS_EXCEPTION;
+    if (ext_type == 0) { /* undefined */
+        if (len != 0) { cur->error = true; return JS_EXCEPTION; }
+        return JS_UNDEFINED;
+    }
+    if (ext_type == 1) { /* bigint: UTF-8 decimal */
+        return decode_bigint(c->ctx, (const char *)body, len);
+    }
+    cur->error = true;
+    return JS_EXCEPTION;
+}
+
+static JSValue decode_array(ShimContext *c, DecCursor *cur, uint32_t count, int depth) {
+    JSValue arr = JS_NewArray(c->ctx);
+    if (JS_IsException(arr)) return arr;
+    for (uint32_t i = 0; i < count; i++) {
+        JSValue elem = decode_value(c, cur, depth + 1);
+        if (JS_IsException(elem)) {
+            JS_FreeValue(c->ctx, arr);
+            return elem;
+        }
+        if (JS_SetPropertyUint32(c->ctx, arr, i, elem) < 0) {
+            /* JS_SetPropertyUint32 consumes `elem` on both success and
+             * failure paths. */
+            JS_FreeValue(c->ctx, arr);
+            return JS_EXCEPTION;
+        }
+    }
+    return arr;
+}
+
+static JSValue decode_str_value(JSContext *ctx, DecCursor *cur, uint32_t len) {
+    const uint8_t *body = dec_take(cur, len);
+    if (cur->error) return JS_EXCEPTION;
+    return JS_NewStringLen(ctx, (const char *)body, len);
+}
+
+static JSValue decode_map(ShimContext *c, DecCursor *cur, uint32_t count, int depth) {
+    JSValue obj = JS_NewObject(c->ctx);
+    if (JS_IsException(obj)) return obj;
+    for (uint32_t i = 0; i < count; i++) {
+        /* Key: must be a msgpack str per §8. Read it inline so we can use
+         * JS_SetPropertyStr which takes a NUL-terminated C string. */
+        uint8_t kb = dec_u8(cur);
+        uint32_t klen;
+        if (kb >= 0xa0 && kb <= 0xbf) {
+            klen = kb & 0x1f;
+        } else if (kb == 0xd9) {
+            klen = dec_u8(cur);
+        } else if (kb == 0xda) {
+            klen = dec_u16(cur);
+        } else if (kb == 0xdb) {
+            klen = dec_u32(cur);
+        } else {
+            cur->error = true;
+            JS_FreeValue(c->ctx, obj);
+            return JS_EXCEPTION;
+        }
+        const uint8_t *kbody = dec_take(cur, klen);
+        if (cur->error) {
+            JS_FreeValue(c->ctx, obj);
+            return JS_EXCEPTION;
+        }
+        /* JS_SetPropertyStr needs a NUL-terminated key. Copy into a small
+         * scratch buffer. Keys shouldn't be huge in practice (agent
+         * payloads), so stack-alloc up to 256 bytes and heap beyond. */
+        char stack_buf[256];
+        char *kcopy = klen < sizeof(stack_buf) ? stack_buf :
+                                                 (char *)malloc((size_t)klen + 1);
+        if (!kcopy) {
+            JS_FreeValue(c->ctx, obj);
+            return JS_EXCEPTION;
+        }
+        memcpy(kcopy, kbody, klen);
+        kcopy[klen] = '\0';
+
+        JSValue val = decode_value(c, cur, depth + 1);
+        if (JS_IsException(val)) {
+            if (kcopy != stack_buf) free(kcopy);
+            JS_FreeValue(c->ctx, obj);
+            return val;
+        }
+        int rc = JS_SetPropertyStr(c->ctx, obj, kcopy, val);
+        if (kcopy != stack_buf) free(kcopy);
+        if (rc < 0) {
+            JS_FreeValue(c->ctx, obj);
+            return JS_EXCEPTION;
+        }
+    }
+    return obj;
+}
+
+static JSValue decode_value(ShimContext *c, DecCursor *cur, int depth) {
+    if (depth > DEC_MAX_DEPTH) { cur->error = true; return JS_EXCEPTION; }
+    uint8_t b = dec_u8(cur);
+    if (cur->error) return JS_EXCEPTION;
+
+    /* positive fixint */
+    if (b < 0x80) return JS_NewInt32(c->ctx, (int32_t)b);
+    /* fixmap */
+    if (b >= 0x80 && b <= 0x8f) {
+        return decode_map(c, cur, b & 0x0f, depth);
+    }
+    /* fixarray */
+    if (b >= 0x90 && b <= 0x9f) {
+        return decode_array(c, cur, b & 0x0f, depth);
+    }
+    /* fixstr */
+    if (b >= 0xa0 && b <= 0xbf) {
+        return decode_str_value(c->ctx, cur, b & 0x1f);
+    }
+
+    switch (b) {
+        case 0xc0: return JS_NULL;
+        case 0xc2: return JS_FALSE;
+        case 0xc3: return JS_TRUE;
+
+        case 0xc4: { /* bin 8 */
+            uint32_t n = dec_u8(cur);
+            const uint8_t *body = dec_take(cur, n);
+            if (cur->error) return JS_EXCEPTION;
+            return JS_NewUint8ArrayCopy(c->ctx, body, n);
+        }
+        case 0xc5: {
+            uint32_t n = dec_u16(cur);
+            const uint8_t *body = dec_take(cur, n);
+            if (cur->error) return JS_EXCEPTION;
+            return JS_NewUint8ArrayCopy(c->ctx, body, n);
+        }
+        case 0xc6: {
+            uint32_t n = dec_u32(cur);
+            const uint8_t *body = dec_take(cur, n);
+            if (cur->error) return JS_EXCEPTION;
+            return JS_NewUint8ArrayCopy(c->ctx, body, n);
+        }
+
+        case 0xc7: { /* ext 8 */
+            uint32_t n = dec_u8(cur);
+            return decode_ext(c, cur, n);
+        }
+        case 0xc8: {
+            uint32_t n = dec_u16(cur);
+            return decode_ext(c, cur, n);
+        }
+        case 0xc9: {
+            uint32_t n = dec_u32(cur);
+            return decode_ext(c, cur, n);
+        }
+
+        case 0xca: { /* float32 — not emitted by shim but msgpack-legal */
+            const uint8_t *p = dec_take(cur, 4);
+            if (cur->error) return JS_EXCEPTION;
+            uint32_t bits = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+            union { uint32_t u; float f; } conv;
+            conv.u = bits;
+            return JS_NewFloat64(c->ctx, (double)conv.f);
+        }
+        case 0xcb: { /* float64 */
+            const uint8_t *p = dec_take(cur, 8);
+            if (cur->error) return JS_EXCEPTION;
+            union { uint64_t u; double d; } conv;
+            conv.u = be_load_u64(p);
+            return JS_NewFloat64(c->ctx, conv.d);
+        }
+
+        /* uint 8/16/32/64 — Python int outside safe range goes through
+         * ext1 bigint, but inside range uses float64. We still accept
+         * these for robustness (other producers may emit them). */
+        case 0xcc: return JS_NewInt32(c->ctx, (int32_t)dec_u8(cur));
+        case 0xcd: return JS_NewInt32(c->ctx, (int32_t)dec_u16(cur));
+        case 0xce: {
+            uint32_t n = dec_u32(cur);
+            return JS_NewInt64(c->ctx, (int64_t)n);
+        }
+        case 0xcf: {
+            const uint8_t *p = dec_take(cur, 8);
+            if (cur->error) return JS_EXCEPTION;
+            uint64_t n = be_load_u64(p);
+            /* Numbers outside safe-integer range should have come through
+             * as bigint; if someone emits a large uint64, best-effort
+             * convert via f64 (lossy but defined). */
+            return JS_NewFloat64(c->ctx, (double)n);
+        }
+        /* int 8/16/32/64 */
+        case 0xd0: return JS_NewInt32(c->ctx, (int8_t)dec_u8(cur));
+        case 0xd1: return JS_NewInt32(c->ctx, (int16_t)dec_u16(cur));
+        case 0xd2: return JS_NewInt32(c->ctx, (int32_t)dec_u32(cur));
+        case 0xd3: {
+            const uint8_t *p = dec_take(cur, 8);
+            if (cur->error) return JS_EXCEPTION;
+            uint64_t u = be_load_u64(p);
+            int64_t n = (int64_t)u;
+            return JS_NewInt64(c->ctx, n);
+        }
+        /* negative fixint */
+
+        /* fixext 1/2/4/8/16 */
+        case 0xd4: return decode_ext(c, cur, 1);
+        case 0xd5: return decode_ext(c, cur, 2);
+        case 0xd6: return decode_ext(c, cur, 4);
+        case 0xd7: return decode_ext(c, cur, 8);
+        case 0xd8: return decode_ext(c, cur, 16);
+
+        /* str 8/16/32 */
+        case 0xd9: return decode_str_value(c->ctx, cur, dec_u8(cur));
+        case 0xda: return decode_str_value(c->ctx, cur, dec_u16(cur));
+        case 0xdb: return decode_str_value(c->ctx, cur, dec_u32(cur));
+
+        /* array 16/32 */
+        case 0xdc: return decode_array(c, cur, dec_u16(cur), depth);
+        case 0xdd: return decode_array(c, cur, dec_u32(cur), depth);
+
+        /* map 16/32 */
+        case 0xde: return decode_map(c, cur, dec_u16(cur), depth);
+        case 0xdf: return decode_map(c, cur, dec_u32(cur), depth);
+    }
+
+    /* negative fixint */
+    if (b >= 0xe0) return JS_NewInt32(c->ctx, (int32_t)(int8_t)b);
+
+    cur->error = true;
+    return JS_EXCEPTION;
+}
+
 QJS_EXPORT int32_t qjs_from_msgpack(uint32_t ctx_id,
                                     uint32_t data_ptr, uint32_t data_len,
                                     uint32_t *out_slot) {
-    (void)ctx_id; (void)data_ptr; (void)data_len;
-    if (out_slot) *out_slot = 0;
-    return -1; /* Not yet implemented. */
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot) return -1;
+    *out_slot = 0;
+
+    DecCursor cur = {
+        .data = (const uint8_t *)(uintptr_t)data_ptr,
+        .len = data_len,
+        .off = 0,
+        .error = false,
+    };
+    JSValue v = decode_value(c, &cur, 0);
+    if (cur.error || JS_IsException(v)) {
+        if (!JS_IsException(v)) JS_FreeValue(c->ctx, v);
+        else JS_FreeValue(c->ctx, JS_GetException(c->ctx));
+        return -1;
+    }
+    if (cur.off != cur.len) {
+        JS_FreeValue(c->ctx, v);
+        return -1; /* trailing bytes */
+    }
+    uint32_t slot = slot_alloc(c, v);
+    if (slot == 0) {
+        JS_FreeValue(c->ctx, v);
+        return -1;
+    }
+    *out_slot = slot;
+    return 0;
 }
 
 QJS_EXPORT int32_t qjs_exception_to_msgpack(uint32_t ctx_id, uint32_t exc_slot,
@@ -695,24 +1029,91 @@ QJS_EXPORT int32_t qjs_exception_to_msgpack(uint32_t ctx_id, uint32_t exc_slot,
 /* ------------------------------------------------------------------ */
 
 QJS_EXPORT int32_t qjs_get_global_object(uint32_t ctx_id, uint32_t *out_slot) {
-    (void)ctx_id;
-    if (out_slot) *out_slot = 0;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot) return -1;
+    *out_slot = 0;
+    JSValue global = JS_GetGlobalObject(c->ctx);
+    if (JS_IsException(global)) return -1;
+    uint32_t slot = slot_alloc(c, global);
+    if (slot == 0) {
+        JS_FreeValue(c->ctx, global);
+        return -1;
+    }
+    *out_slot = slot;
+    return 0;
+}
+
+/* Helper: copy (key_ptr, key_len) into a NUL-terminated stack/heap buffer.
+ * Returns NULL on OOM; caller must free if *on_heap is true. */
+static char *key_to_cstr(uint32_t key_ptr, uint32_t key_len,
+                        char *stack_buf, size_t stack_cap, bool *on_heap) {
+    const char *src = (const char *)(uintptr_t)key_ptr;
+    char *dst;
+    if (key_len < stack_cap) {
+        dst = stack_buf;
+        *on_heap = false;
+    } else {
+        dst = (char *)malloc((size_t)key_len + 1);
+        if (!dst) return NULL;
+        *on_heap = true;
+    }
+    if (key_len > 0) memcpy(dst, src, key_len);
+    dst[key_len] = '\0';
+    return dst;
 }
 
 QJS_EXPORT int32_t qjs_get_prop(uint32_t ctx_id, uint32_t obj_slot,
                                 uint32_t key_ptr, uint32_t key_len,
                                 uint32_t *out_slot) {
-    (void)ctx_id; (void)obj_slot; (void)key_ptr; (void)key_len;
-    if (out_slot) *out_slot = 0;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot || !slot_valid(c, obj_slot)) return -1;
+    *out_slot = 0;
+
+    char stack_key[256];
+    bool on_heap = false;
+    char *key = key_to_cstr(key_ptr, key_len, stack_key, sizeof(stack_key), &on_heap);
+    if (!key) return -1;
+
+    JSValue obj = c->slots[obj_slot].value;
+    JSValue v = JS_GetPropertyStr(c->ctx, obj, key);
+    if (on_heap) free(key);
+
+    if (JS_IsException(v)) {
+        JSValue exc = JS_GetException(c->ctx);
+        uint32_t slot = slot_alloc(c, exc);
+        if (slot == 0) { JS_FreeValue(c->ctx, exc); return -1; }
+        *out_slot = slot;
+        return 1;
+    }
+    uint32_t slot = slot_alloc(c, v);
+    if (slot == 0) { JS_FreeValue(c->ctx, v); return -1; }
+    *out_slot = slot;
+    return 0;
 }
 
 QJS_EXPORT int32_t qjs_set_prop(uint32_t ctx_id, uint32_t obj_slot,
                                 uint32_t key_ptr, uint32_t key_len,
                                 uint32_t val_slot) {
-    (void)ctx_id; (void)obj_slot; (void)key_ptr; (void)key_len; (void)val_slot;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !slot_valid(c, obj_slot) || !slot_valid(c, val_slot)) return -1;
+
+    char stack_key[256];
+    bool on_heap = false;
+    char *key = key_to_cstr(key_ptr, key_len, stack_key, sizeof(stack_key), &on_heap);
+    if (!key) return -1;
+
+    JSValue obj = c->slots[obj_slot].value;
+    /* JS_SetPropertyStr consumes the value, so dup first — the slot still
+     * owns its original reference. */
+    JSValue v = JS_DupValue(c->ctx, c->slots[val_slot].value);
+    int rc = JS_SetPropertyStr(c->ctx, obj, key, v);
+    if (on_heap) free(key);
+    if (rc < 0) {
+        JSValue exc = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, exc);
+        return 1;
+    }
+    return 0;
 }
 
 QJS_EXPORT int32_t qjs_get_prop_u32(uint32_t ctx_id, uint32_t obj_slot,

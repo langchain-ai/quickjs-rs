@@ -158,6 +158,75 @@ class Bridge:
         finally:
             self.free(out_ptr)
 
+    def from_msgpack(self, ctx: int, payload: bytes) -> tuple[int, int]:
+        """Return (status, slot). status: 0 ok, <0 shim error."""
+        data_ptr = self.malloc(len(payload)) if payload else 0
+        if payload and data_ptr == 0:
+            raise MemoryError("guest OOM allocating from_msgpack input")
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            self.free(data_ptr)
+            raise MemoryError("guest OOM allocating from_msgpack out-slot")
+        try:
+            if payload:
+                self.write_bytes(data_ptr, payload)
+            status = int(
+                self._call("qjs_from_msgpack", ctx, data_ptr, len(payload), out_ptr)
+            )
+            slot = int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+            return status, slot
+        finally:
+            self.free(data_ptr)
+            self.free(out_ptr)
+
+    def get_global_object(self, ctx: int) -> int:
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            raise MemoryError("guest OOM allocating get_global_object out-slot")
+        try:
+            status = int(self._call("qjs_get_global_object", ctx, out_ptr))
+            if status != 0:
+                return 0
+            return int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+        finally:
+            self.free(out_ptr)
+
+    def _write_key(self, key: str) -> tuple[int, int]:
+        encoded = key.encode("utf-8")
+        key_ptr = self.malloc(len(encoded)) if encoded else 0
+        if encoded and key_ptr == 0:
+            raise MemoryError("guest OOM allocating property key")
+        if encoded:
+            self.write_bytes(key_ptr, encoded)
+        return key_ptr, len(encoded)
+
+    def get_prop(self, ctx: int, obj_slot: int, key: str) -> tuple[int, int]:
+        """Return (status, slot). status: 0 ok, 1 JS exception, <0 shim error."""
+        key_ptr, key_len = self._write_key(key)
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            self.free(key_ptr)
+            raise MemoryError("guest OOM allocating get_prop out-slot")
+        try:
+            status = int(
+                self._call("qjs_get_prop", ctx, obj_slot, key_ptr, key_len, out_ptr)
+            )
+            slot = int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+            return status, slot
+        finally:
+            self.free(key_ptr)
+            self.free(out_ptr)
+
+    def set_prop(self, ctx: int, obj_slot: int, key: str, val_slot: int) -> int:
+        """Return status. 0 = ok, 1 = JS exception, <0 = shim error."""
+        key_ptr, key_len = self._write_key(key)
+        try:
+            return int(
+                self._call("qjs_set_prop", ctx, obj_slot, key_ptr, key_len, val_slot)
+            )
+        finally:
+            self.free(key_ptr)
+
 
 _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_runtime_new",
@@ -171,6 +240,10 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_slot_drop",
     "qjs_eval",
     "qjs_to_msgpack",
+    "qjs_from_msgpack",
+    "qjs_get_global_object",
+    "qjs_get_prop",
+    "qjs_set_prop",
     "qjs_malloc",
     "qjs_free",
 )

@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any, overload
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
 from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
+from quickjs_wasm.globals import Globals
 
 if TYPE_CHECKING:
-    from quickjs_wasm.globals import Globals
     from quickjs_wasm.handle import Handle
     from quickjs_wasm.runtime import Runtime
 
@@ -27,6 +27,7 @@ class Context:
         self._timeout = timeout
         self._closed = False
         self.preserve_undefined = False
+        self._globals = Globals(self._bridge, self._ctx_id)
 
     def __enter__(self) -> Context:
         return self
@@ -96,7 +97,9 @@ class Context:
 
     @property
     def globals(self) -> Globals:
-        raise NotImplementedError("globals lands with the globals proxy (§7.2).")
+        if self._closed:
+            raise QuickJSError("context is closed")
+        return self._globals
 
     @overload
     def function(self, fn: Callable[..., Any]) -> Callable[..., Any]: ...

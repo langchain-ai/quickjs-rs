@@ -50,6 +50,20 @@ def test_smoke_primitives() -> None:
             ordered = ctx.eval("({z: 1, a: 2, m: 3})")
             assert list(ordered.keys()) == ["z", "a", "m"]
 
+            # Globals: read, write, contains
+            ctx.globals["x"] = 42
+            assert ctx.eval("x") == 42
+            ctx.globals["data"] = {"n": 100}
+            assert ctx.eval("data.n") == 100
+            assert "x" in ctx.globals
+            assert "not_a_real_global" not in ctx.globals
+            assert ctx.globals["x"] == 42
+
+            # Four-layer nested round-trip: encode → decode (from_msgpack) →
+            # encode (to_msgpack) → decode. Exercises every container type.
+            ctx.globals["deep"] = {"nested": {"list": [1, 2, {"leaf": "value"}]}}
+            assert ctx.eval("deep.nested.list[2].leaf") == "value"
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:
