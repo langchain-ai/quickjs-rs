@@ -142,6 +142,16 @@ class Bridge:
         # TaskGroup; _host_call_async_dispatch falls back to
         # loop.create_task in that case).
         self._active_task_group: asyncio.TaskGroup | None = None
+        # v0.2 step 9: set by _host_call_async_dispatch when it's
+        # invoked from inside sync eval (i.e. no running asyncio loop
+        # to schedule into). Context.eval checks this on return and
+        # raises ConcurrentEvalError pointing at eval_async, rather
+        # than letting the user discover the problem via the rejected
+        # Promise. The flag is per-Bridge (one sync eval at a time
+        # per Runtime is the existing assumption); cleared by
+        # Context.eval after consumption and by take_last_host_exception's
+        # callers as belt-and-suspenders.
+        self._sync_eval_hit_async_call = False
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
@@ -336,6 +346,14 @@ class Bridge:
         exc = self._last_host_exception
         self._last_host_exception = None
         return exc
+
+    def take_sync_eval_hit_async_call(self) -> bool:
+        """Pop and clear the sync-eval-hit-async-call flag. Context.eval
+        calls this on return to surface ConcurrentEvalError when the
+        eval body invoked a registered async host function (§7.4)."""
+        hit = self._sync_eval_hit_async_call
+        self._sync_eval_hit_async_call = False
+        return hit
 
     def raise_from_exception_slot(self, ctx: int, exc_slot: int) -> None:
         """Extract {name, message, stack} off a JS exception slot and raise.
@@ -670,10 +688,15 @@ class Bridge:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop. §7.4 / step 9 will turn this into a
-            # clean ConcurrentEvalError on the sync-eval-with-async-
-            # hostfn path; for now, synchronous rejection is the
-            # honest answer.
+            # No running loop → we're inside sync eval. §7.4 /
+            # §10.3: set the flag so Context.eval surfaces a clean
+            # ConcurrentEvalError on return, then return -1 so the
+            # shim's local-reject path produces a rejected Promise
+            # in the meantime (preserves context integrity — JS code
+            # that catches the rejection runs to completion, and the
+            # Python-side error surfaces at the eval boundary where
+            # the user's stack trace points).
+            self._sync_eval_hit_async_call = True
             return -1
 
         pending_id = self._next_pending_id

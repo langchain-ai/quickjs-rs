@@ -130,6 +130,12 @@ class Context:
         # through the host_call trampoline, so nested behavior is
         # unchanged.
         self._bridge.take_last_host_exception()
+        # §7.4 / §10.3 step 9: clear the sync-eval-async-hostfn flag
+        # at entry. A stale flag from an earlier eval (set but not
+        # consumed because that eval itself raised some unrelated
+        # error) would otherwise surface as a ConcurrentEvalError
+        # from this eval, which would be wrong.
+        self._bridge.take_sync_eval_hit_async_call()
 
         # §7.3: timeout is measured from the start of each eval /
         # eval_handle / Handle.call call. host_interrupt checks the
@@ -138,54 +144,78 @@ class Context:
         deadline = time.monotonic() + self._timeout
         self._bridge.set_deadline(deadline)
         try:
-            status, slot = self._bridge.eval(self._ctx_id, code, flags)
-        except wasmtime.Trap as trap:
-            # Two legitimate traps land here: (a) the epoch-deadline
-            # backup path §9 mandates — fires only when QuickJS's own
-            # interrupt hook didn't notice a deadline had passed; and
-            # (b) wasm-level stack exhaustion, when a JS recursion
-            # frame expanded the C stack past the configured wasm
-            # data-stack limit before JS_CHECK_STACK_OVERFLOW could
-            # catch it. Distinguish by checking whether the wall-clock
-            # deadline actually elapsed.
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"JS evaluation exceeded {self._timeout}s "
-                    f"(epoch trap: {trap})"
-                ) from None
-            # Non-timeout trap — most commonly wasm-level stack
-            # exhaustion from a deep JS recursion chain that outran
-            # QuickJS's own JS_CHECK_STACK_OVERFLOW. Log the raw trap
-            # so future debugging of "weird trap in the wild" has a
-            # breadcrumb beyond the synthesized JSError message.
-            _log.debug("non-timeout wasm trap during eval: %s", trap)
-            raise JSError(
-                "InternalError",
-                f"wasm trap during JS evaluation: {trap}",
-                None,
-            ) from None
-        finally:
-            self._bridge.set_deadline(None)
-        if status < 0:
-            raise QuickJSError(f"shim error from qjs_eval: status={status}")
-        if status == 1:
             try:
-                self._raise_from_exception_slot(slot)
+                status, slot = self._bridge.eval(self._ctx_id, code, flags)
+            except wasmtime.Trap as trap:
+                # Two legitimate traps land here: (a) the epoch-
+                # deadline backup path §9 mandates — fires only when
+                # QuickJS's own interrupt hook didn't notice a deadline
+                # had passed; and (b) wasm-level stack exhaustion, when
+                # a JS recursion frame expanded the C stack past the
+                # configured wasm data-stack limit before
+                # JS_CHECK_STACK_OVERFLOW could catch it. Distinguish
+                # by checking whether the wall-clock deadline actually
+                # elapsed.
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"JS evaluation exceeded {self._timeout}s "
+                        f"(epoch trap: {trap})"
+                    ) from None
+                # Non-timeout trap — most commonly wasm-level stack
+                # exhaustion from a deep JS recursion chain that
+                # outran QuickJS's own JS_CHECK_STACK_OVERFLOW. Log
+                # the raw trap so future debugging of "weird trap in
+                # the wild" has a breadcrumb beyond the synthesized
+                # JSError message.
+                _log.debug("non-timeout wasm trap during eval: %s", trap)
+                raise JSError(
+                    "InternalError",
+                    f"wasm trap during JS evaluation: {trap}",
+                    None,
+                ) from None
+            finally:
+                self._bridge.set_deadline(None)
+            if status < 0:
+                raise QuickJSError(f"shim error from qjs_eval: status={status}")
+            if status == 1:
+                try:
+                    self._raise_from_exception_slot(slot)
+                finally:
+                    self._bridge.slot_drop(self._ctx_id, slot)
+            try:
+                mp_status, payload = self._bridge.to_msgpack(
+                    self._ctx_id, slot
+                )
+                if mp_status < 0:
+                    raise MarshalError(
+                        "value type is not yet supported by qjs_to_msgpack; "
+                        "additional branches land in subsequent commits"
+                    )
+                value = _msgpack.decode(payload)
+                if isinstance(value, Undefined) and not self.preserve_undefined:
+                    return None
+                return value
             finally:
                 self._bridge.slot_drop(self._ctx_id, slot)
-        try:
-            mp_status, payload = self._bridge.to_msgpack(self._ctx_id, slot)
-            if mp_status < 0:
-                raise MarshalError(
-                    "value type is not yet supported by qjs_to_msgpack; "
-                    "additional branches land in subsequent commits"
-                )
-            value = _msgpack.decode(payload)
-            if isinstance(value, Undefined) and not self.preserve_undefined:
-                return None
-            return value
         finally:
-            self._bridge.slot_drop(self._ctx_id, slot)
+            # §7.4 / §10.3 step 9: if the eval body invoked a
+            # registered async host function, the dispatcher set this
+            # flag. Surface as ConcurrentEvalError regardless of
+            # whether the eval itself returned, raised a JSError, or
+            # caught-and-swallowed the rejection JS-side — the root
+            # cause the user needs to hear is "sync eval can't drive
+            # async host calls; use eval_async". Raising from a
+            # finally replaces any in-flight exception with
+            # ConcurrentEvalError; the original (if any) is available
+            # as __context__ for debugging.
+            if self._bridge.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    "sync eval encountered a registered async host "
+                    "function; use ctx.eval_async(...) instead. Async "
+                    "host calls need an asyncio loop to dispatch into, "
+                    "and sync eval has no way to drive their "
+                    "settlement."
+                )
 
     def _raise_from_exception_slot(self, exc_slot: int) -> None:
         """Thin passthrough to Bridge.raise_from_exception_slot.
@@ -214,34 +244,48 @@ class Context:
         if strict:
             flags |= 0x4
         self._bridge.take_last_host_exception()
+        # §7.4 / §10.3 step 9: clear the async-hostfn flag at entry.
+        # Same rationale as in eval — stale flag must not leak.
+        self._bridge.take_sync_eval_hit_async_call()
         deadline = time.monotonic() + self._timeout
         self._bridge.set_deadline(deadline)
         try:
-            status, slot = self._bridge.eval(self._ctx_id, code, flags)
-        except wasmtime.Trap as trap:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"JS evaluation exceeded {self._timeout}s "
-                    f"(epoch trap: {trap})"
-                ) from None
-            _log.debug("non-timeout wasm trap during eval_handle: %s", trap)
-            raise JSError(
-                "InternalError",
-                f"wasm trap during JS evaluation: {trap}",
-                None,
-            ) from None
-        finally:
-            self._bridge.set_deadline(None)
-
-        if status < 0:
-            raise QuickJSError(f"shim error from qjs_eval: status={status}")
-        if status == 1:
             try:
-                self._raise_from_exception_slot(slot)
+                status, slot = self._bridge.eval(self._ctx_id, code, flags)
+            except wasmtime.Trap as trap:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"JS evaluation exceeded {self._timeout}s "
+                        f"(epoch trap: {trap})"
+                    ) from None
+                _log.debug(
+                    "non-timeout wasm trap during eval_handle: %s", trap
+                )
+                raise JSError(
+                    "InternalError",
+                    f"wasm trap during JS evaluation: {trap}",
+                    None,
+                ) from None
             finally:
-                self._bridge.slot_drop(self._ctx_id, slot)
-        from quickjs_wasm.handle import Handle as _Handle
-        return _Handle(self, self._bridge, self._ctx_id, slot)
+                self._bridge.set_deadline(None)
+
+            if status < 0:
+                raise QuickJSError(f"shim error from qjs_eval: status={status}")
+            if status == 1:
+                try:
+                    self._raise_from_exception_slot(slot)
+                finally:
+                    self._bridge.slot_drop(self._ctx_id, slot)
+            from quickjs_wasm.handle import Handle as _Handle
+            return _Handle(self, self._bridge, self._ctx_id, slot)
+        finally:
+            # Same check as Context.eval's finally — see comment there.
+            if self._bridge.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    "sync eval_handle encountered a registered async "
+                    "host function; use ctx.eval_handle_async(...) "
+                    "instead."
+                )
 
     # ---- Async API (§7.4) ---------------------------------------------
 

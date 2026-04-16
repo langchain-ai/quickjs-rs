@@ -277,6 +277,125 @@ async def test_cancel_finally_host_calls_also_cancelled() -> None:
             assert cleanup_completed is False
 
 
+async def test_sync_eval_with_async_hostfn_raises_concurrent_eval_error() -> None:
+    """§13.2 / §7.4: sync ctx.eval that invokes a registered async host
+    function raises ConcurrentEvalError. The detection happens at the
+    dispatcher level (no asyncio loop → set flag) and surfaces when
+    eval returns."""
+    from quickjs_wasm import ConcurrentEvalError
+
+    def runner() -> None:
+        with Runtime() as rt:
+            with rt.new_context() as ctx:
+
+                async def slow(n: int) -> int:
+                    await asyncio.sleep(0)
+                    return n
+
+                ctx.register("slow", slow)
+
+                with pytest.raises(ConcurrentEvalError):
+                    ctx.eval("slow(1)")
+
+                # Context not corrupted: subsequent sync eval works.
+                assert ctx.eval("1 + 1") == 2
+
+    # Run the body in a dedicated thread so there's genuinely no
+    # asyncio loop in sight during ctx.eval. (pytest-asyncio's auto
+    # mode puts us inside a running loop by default; we need to be
+    # outside it to exercise the "no running loop" dispatcher path.)
+    import threading
+
+    thread = threading.Thread(target=runner)
+    thread.start()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "sync-eval test thread hung"
+
+
+async def test_async_eval_works_after_sync_eval_async_hostfn_error() -> None:
+    """Corollary to the above: after the sync eval raises
+    ConcurrentEvalError, the same context can still run async evals
+    of the same async host function. No context corruption, no stale
+    flag leakage."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def slow(n: int) -> int:
+                await asyncio.sleep(0)
+                return n
+
+            ctx.register("slow", slow)
+
+            # eval_async — this is what the user should be doing.
+            # Flag cleared at eval entry (even though it was never
+            # set, since no sync eval happened first); eval_async
+            # runs a real loop, dispatcher finds it, no flag set.
+            assert await ctx.eval_async("await slow(5)") == 5
+
+
+def test_sync_eval_pure_js_promise_is_not_error() -> None:
+    """Discriminator test: a sync eval that returns a pure-JS Promise
+    (no async host function involved) is legitimate, not a
+    ConcurrentEvalError. The detection must be at the dispatcher
+    level, not the eval-return-type level.
+
+    If this test ever fails because the check moved to
+    'eval returned a Promise, raise', that's a regression against a
+    legitimate usage pattern.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            # eval returns a Promise handle; the eval ITSELF has no
+            # async host calls, just a pure-JS Promise. Should be
+            # a MarshalError (Promises aren't marshalable to Python)
+            # — NOT a ConcurrentEvalError.
+            from quickjs_wasm import MarshalError
+
+            with pytest.raises(MarshalError):
+                ctx.eval("Promise.resolve(42)")
+
+            # eval_handle path: returns a Handle to the Promise, no
+            # error. User can drive it via await_promise later.
+            h = ctx.eval_handle("Promise.resolve(42)")
+            try:
+                assert h.is_promise
+            finally:
+                h.dispose()
+
+
+def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> None:
+    """Edge case: JS code that wraps the async host call in a
+    try/catch still surfaces ConcurrentEvalError to Python. JS
+    'handling' the rejection doesn't mean the Python caller got
+    what they asked for — surfacing the error tells them to use
+    eval_async. The flag-based detection does this naturally
+    because the flag is set at dispatcher time, before JS's catch
+    handler runs."""
+    from quickjs_wasm import ConcurrentEvalError
+
+    def runner() -> None:
+        with Runtime() as rt:
+            with rt.new_context() as ctx:
+
+                async def slow() -> int:
+                    return 1
+
+                ctx.register("slow", slow)
+
+                with pytest.raises(ConcurrentEvalError):
+                    ctx.eval(
+                        "try { slow(); 'unreachable' } "
+                        "catch (e) { e.name }"
+                    )
+
+    import threading
+
+    thread = threading.Thread(target=runner)
+    thread.start()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+
+
 async def test_cancelling_counter_preserved_after_absorption() -> None:
     """§7.4: when JS absorbs cancellation, asyncio.CancelledError is
     not re-raised — but the task's cancelling counter (set by

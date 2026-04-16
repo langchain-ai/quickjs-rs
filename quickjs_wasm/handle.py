@@ -144,10 +144,13 @@ class Handle:
 
     @property
     def is_promise(self) -> bool:
-        # Promises are out of scope for v0.1 (§14). Returning False is
-        # correct for every value that isn't one; acceptance test doesn't
-        # create promises.
-        return False
+        # §7.2, v0.2: backed by qjs_is_promise. The v0.1 stub always
+        # returned False because promises were out of scope; v0.2's
+        # await_promise needs the real answer, and callers doing
+        # `if h.is_promise: await h.await_promise()` deserve a working
+        # check.
+        self._check_live()
+        return self._bridge.is_promise(self._ctx_id, self._slot)
 
     def get(self, key: str | int) -> Handle:
         self._check_live()
