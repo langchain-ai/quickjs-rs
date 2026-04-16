@@ -335,10 +335,38 @@ QJS_EXPORT void qjs_runtime_set_stack_limit(uint32_t rt_id, uint64_t bytes) {
     JS_SetMaxStackSize(rt, (size_t)bytes);
 }
 
+/* v0.2 §17.2 step 3: drive the microtask queue until empty or until a
+ * job raises. Returns:
+ *   0 = ok, *out_count is the number of jobs that ran
+ *   1 = a job raised; *out_count counts jobs that ran before the raise.
+ *       The exception stays on the JSContext that raised — the bridge
+ *       surfaces it via the next qjs_eval or qjs_exception_to_msgpack
+ *       call (§10.1 routing).
+ *  <0 = shim error
+ *
+ * JS_ExecutePendingJob returns >0 on success (one job executed), 0 when
+ * no jobs are pending, <0 on exception. We accumulate counts and stop on
+ * the first exception so the raise doesn't get drowned by subsequent
+ * successful jobs. */
 QJS_EXPORT int32_t qjs_runtime_run_pending_jobs(uint32_t rt_id, uint32_t *out_count) {
-    (void)rt_id;
-    if (out_count) *out_count = 0;
-    return -1; /* Not yet implemented (§17 step 5). */
+    JSRuntime *rt = rt_lookup(rt_id);
+    if (!rt || !out_count) {
+        if (out_count) *out_count = 0;
+        return -1;
+    }
+    uint32_t executed = 0;
+    for (;;) {
+        JSContext *raising_ctx = NULL;
+        int rc = JS_ExecutePendingJob(rt, &raising_ctx);
+        if (rc == 0) break;                /* queue drained */
+        if (rc < 0) {                      /* job raised */
+            *out_count = executed;
+            return 1;
+        }
+        executed++;
+    }
+    *out_count = executed;
+    return 0;
 }
 
 QJS_EXPORT bool qjs_runtime_has_pending_jobs(uint32_t rt_id) {

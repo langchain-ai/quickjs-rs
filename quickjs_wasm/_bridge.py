@@ -11,6 +11,7 @@ here — the public API is responsible for surfacing the error.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import traceback
@@ -100,16 +101,10 @@ class Bridge:
         )
 
         # env::host_call_async — v0.2, §6.3. Shim calls this when JS
-        # invokes a registered async host function. Host schedules
-        # the work, allocates a pending_id, writes it to *out_pending_id,
-        # and returns 0. Later calls qjs_promise_resolve/reject keyed
-        # by that id.
-        #
-        # Full bridge-side dispatch (task scheduling, Promise settlement
-        # wiring) lands in §17.2 step 3. For step 2 this stub returns -1
-        # (synchronous rejection) so the shim's reject path is the
-        # exercised code path. Step 3 replaces this with the real
-        # scheduler.
+        # invokes a registered async host function. Host allocates a
+        # pending_id, schedules an asyncio task, writes the id to
+        # *out_pending_id, and returns 0. The task later calls
+        # qjs_promise_resolve/reject keyed by that id.
         linker.define_func(
             "env",
             "host_call_async",
@@ -117,14 +112,27 @@ class Bridge:
             self._host_call_async_dispatch,
         )
 
-        # fn_id → Python callable. Populated by Bridge.register_host_function.
-        self._host_fns: dict[int, Callable[..., Any]] = {}
-        # is_async flag per fn_id. Shared index space with _host_fns.
-        self._host_fns_async: dict[int, bool] = {}
+        # fn_id → (callable, ctx_id, is_async). ctx_id is needed by the
+        # async dispatcher so the task can later settle the correct
+        # context's promise. Registration is always done against a
+        # specific context, so stashing it here is cheaper than an
+        # extra lookup.
+        self._host_fns: dict[int, tuple[Callable[..., Any], int, bool]] = {}
         self._next_fn_id = 1
         # v0.2: pending_id allocator for async host calls. Monotonic,
         # starts at 1 (0 is reserved as "no pending call" per §6.4).
         self._next_pending_id = 1
+        # pending_id → asyncio.Task for in-flight async host calls. Step
+        # 7's cancellation path will look tasks up by id and cancel
+        # them. Keyed by pending_id, not fn_id, because there may be
+        # multiple in-flight calls of the same fn (e.g. Promise.all
+        # fan-out with three readFile invocations).
+        self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
+        # Event that step 5's driving loop awaits. Signaled every time
+        # a pending task completes (successfully or with an error).
+        # Created lazily on first async dispatch because the event
+        # must be bound to the loop that's driving the eval_async.
+        self._pending_completed: asyncio.Event | None = None
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
@@ -223,6 +231,23 @@ class Bridge:
 
     def runtime_install_interrupt(self, rt: int) -> None:
         self._call("qjs_runtime_install_interrupt", rt)
+
+    def runtime_run_pending_jobs(self, rt: int) -> tuple[int, int]:
+        """Drain the microtask queue.
+
+        Returns (status, count). status: 0 ok, 1 job raised (exception
+        stays on the context it was raised in — next qjs_eval /
+        exception_to_msgpack call picks it up), <0 shim error.
+        """
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            raise MemoryError("guest OOM allocating run_pending_jobs out-count")
+        try:
+            status = int(self._call("qjs_runtime_run_pending_jobs", rt, out_ptr))
+            count = int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+            return status, count
+        finally:
+            self.free(out_ptr)
 
     def context_new(self, rt: int) -> int:
         return int(self._call("qjs_context_new", rt))
@@ -563,8 +588,7 @@ class Bridge:
     ) -> None:
         fn_id = self._next_fn_id
         self._next_fn_id += 1
-        self._host_fns[fn_id] = fn
-        self._host_fns_async[fn_id] = is_async
+        self._host_fns[fn_id] = (fn, ctx, is_async)
         name_ptr, name_len = self._write_key(name)
         try:
             rc = int(
@@ -576,7 +600,6 @@ class Bridge:
             )
             if rc != 0:
                 del self._host_fns[fn_id]
-                del self._host_fns_async[fn_id]
                 raise RuntimeError(
                     f"qjs_register_host_function failed: status={rc}"
                 )
@@ -592,21 +615,117 @@ class Bridge:
     ) -> int:
         """env::host_call_async — §6.3, v0.2.
 
-        §17.2 step 2 stub: returns -1 (synchronous rejection) so the
-        shim-side reject path is exercised end-to-end. The real
-        implementation (step 3) allocates a pending_id, schedules an
-        asyncio task, and returns 0 with the id written to
-        ``*out_pending_id``. Until step 3 lands, any JS call to a
-        registered async host function lands on a rejected Promise with
-        a marker ``HostError``.
+        Called synchronously from inside the shim's async-trampoline
+        which is called from inside a JS eval that is itself driven by
+        the bridge. The running asyncio loop is owned by the caller of
+        eval_async (step 5); step 3's test drives it manually.
 
-        Reading/ignoring args is deliberate: the real dispatch will
-        decode them, but the stub has nothing to do with them. The
-        ``out_pending_id_addr`` write is skipped because the shim only
-        consults ``*out_pending_id`` when the return is 0.
+        Flow:
+            1. Look up the registered callable + ctx_id by fn_id.
+            2. Copy args out of guest memory (§9 re-entrancy — same as
+               sync dispatch).
+            3. Allocate a new pending_id (host-side per §6.3).
+            4. Write the id to *out_pending_id.
+            5. Schedule an asyncio task that awaits the coroutine,
+               encodes the result/error, and calls qjs_promise_resolve
+               or qjs_promise_reject on completion.
+            6. Return 0. The shim stores (id, resolve, reject) and
+               returns the Promise to JS.
+
+        Returns negative on synchronous rejection (unknown fn_id,
+        wrong registration type, args decode failure, no running loop).
+        The shim handles negative returns by rejecting the Promise
+        locally with a marker HostError, so failures here surface
+        cleanly on the JS side.
         """
-        del fn_id, args_ptr, args_len, out_pending_id_addr
-        return -1
+        entry = self._host_fns.get(fn_id)
+        if entry is None:
+            return -1
+        fn, ctx_id, is_async_flag = entry
+        if not is_async_flag:
+            # Registered as sync but shim dispatched async — indicates a
+            # registration/trampoline mismatch. Fail fast rather than
+            # silently running sync code in the async path.
+            return -1
+
+        # §9 re-entrancy: copy args before any Python code runs that
+        # might re-enter the shim.
+        args_payload = self.read_bytes(args_ptr, args_len) if args_len else b""
+        try:
+            args = _msgpack.decode(args_payload)
+            if not isinstance(args, list):
+                return -1
+        except Exception:  # noqa: BLE001 — decode errors are bridge-internal
+            return -1
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop. §7.4 / step 9 will turn this into a
+            # clean ConcurrentEvalError on the sync-eval-with-async-
+            # hostfn path; for now, synchronous rejection is the
+            # honest answer.
+            return -1
+
+        pending_id = self._next_pending_id
+        self._next_pending_id += 1
+        # Write the host-allocated id back to the shim's out-param.
+        self.write_bytes(out_pending_id_addr, pending_id.to_bytes(4, "little"))
+
+        if self._pending_completed is None:
+            self._pending_completed = asyncio.Event()
+
+        task = loop.create_task(
+            self._run_async_host_call(ctx_id, pending_id, fn, args)
+        )
+        self._pending_tasks[pending_id] = task
+        return 0
+
+    async def _run_async_host_call(
+        self,
+        ctx_id: int,
+        pending_id: int,
+        fn: Callable[..., Any],
+        args: list[Any],
+    ) -> None:
+        """Task body for one async host call.
+
+        On completion: settle the JS Promise via qjs_promise_resolve /
+        qjs_promise_reject, pop from the pending-task map, signal the
+        completion event so the driving loop can wake.
+        """
+        resolve_ok = True
+        payload: Any
+        try:
+            payload = await fn(*args)
+        except asyncio.CancelledError:
+            # Cancellation is handled by the driving loop's TaskGroup
+            # teardown (step 7); here we just propagate without
+            # settling. The TaskGroup will catch and re-reject uniformly.
+            raise
+        except BaseException as exc:  # noqa: BLE001 — language bridge
+            resolve_ok = False
+            self._last_host_exception = exc
+            payload = {
+                "name": "HostError",
+                "message": str(exc),
+                "stack": "".join(traceback.format_exception(exc)),
+            }
+
+        # Settle the shim-side Promise. The settle may internally
+        # throw in QuickJS if, say, the runtime has been torn down
+        # — treat that as a benign no-op per §6.4 v0.2 invariant.
+        try:
+            if resolve_ok:
+                self.promise_resolve(ctx_id, pending_id, payload)
+            else:
+                self.promise_reject(ctx_id, pending_id, payload)
+        except Exception:  # noqa: BLE001 — shim boundary
+            pass
+
+        self._pending_tasks.pop(pending_id, None)
+        if self._pending_completed is not None:
+            self._pending_completed.set()
 
     def _host_call_dispatch(
         self,
@@ -630,7 +749,8 @@ class Bridge:
         # shim's scratch will be reused — so snapshot now, decode after.
         args_payload = self.read_bytes(args_ptr, args_len) if args_len else b""
 
-        fn = self._host_fns.get(fn_id)
+        entry = self._host_fns.get(fn_id)
+        fn = entry[0] if entry is not None else None
         if fn is None:
             reply = _msgpack.encode(
                 {
@@ -689,6 +809,7 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_runtime_set_memory_limit",
     "qjs_runtime_set_stack_limit",
     "qjs_runtime_install_interrupt",
+    "qjs_runtime_run_pending_jobs",
     "qjs_context_new",
     "qjs_context_free",
     "qjs_slot_dup",
