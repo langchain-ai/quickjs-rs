@@ -122,17 +122,26 @@ class Bridge:
         # v0.2: pending_id allocator for async host calls. Monotonic,
         # starts at 1 (0 is reserved as "no pending call" per §6.4).
         self._next_pending_id = 1
-        # pending_id → asyncio.Task for in-flight async host calls. Step
-        # 7's cancellation path will look tasks up by id and cancel
-        # them. Keyed by pending_id, not fn_id, because there may be
-        # multiple in-flight calls of the same fn (e.g. Promise.all
-        # fan-out with three readFile invocations).
+        # pending_id → asyncio.Task for in-flight async host calls.
+        # Keyed by pending_id, not fn_id, because there may be multiple
+        # in-flight calls of the same fn (e.g. Promise.all fan-out with
+        # three readFile invocations). Step 7's cancellation path walks
+        # this dict to reject each corresponding Promise.
         self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
         # Event that step 5's driving loop awaits. Signaled every time
         # a pending task completes (successfully or with an error).
         # Created lazily on first async dispatch because the event
         # must be bound to the loop that's driving the eval_async.
         self._pending_completed: asyncio.Event | None = None
+        # v0.2 step 7: the TaskGroup owned by the currently-active
+        # eval_async. Host-call-async tasks are scheduled INTO this
+        # group when set, so cancellation of the driving task cascades
+        # to all in-flight host calls via structured concurrency.
+        # None when no eval_async is in flight (shim-level tests, for
+        # example, exercise the dispatcher directly without a
+        # TaskGroup; _host_call_async_dispatch falls back to
+        # loop.create_task in that case).
+        self._active_task_group: asyncio.TaskGroup | None = None
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
@@ -675,9 +684,19 @@ class Bridge:
         if self._pending_completed is None:
             self._pending_completed = asyncio.Event()
 
-        task = loop.create_task(
-            self._run_async_host_call(ctx_id, pending_id, fn, args)
-        )
+        coro = self._run_async_host_call(ctx_id, pending_id, fn, args)
+        if self._active_task_group is not None:
+            # §7.4 step 7: schedule into the active eval_async's
+            # TaskGroup so a cancellation on the driving task cascades
+            # here via structured concurrency. The task stays tracked
+            # in _pending_tasks for the rejection walk that happens
+            # just before TaskGroup teardown.
+            task = self._active_task_group.create_task(coro)
+        else:
+            # No TaskGroup: shim-level tests or any caller that
+            # dispatches through host_call_async without going
+            # through eval_async. Falls back to the step-3 behavior.
+            task = loop.create_task(coro)
         self._pending_tasks[pending_id] = task
         return 0
 

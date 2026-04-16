@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import time
@@ -253,7 +254,22 @@ class Context:
         filename: str = "<eval>",
         timeout: float | None = None,
     ) -> Any:
-        """See §7.4. Defaults to module mode so top-level await works."""
+        """Evaluate code with top-level await + async host-call support.
+
+        See §7.4 for the full execution model. Defaults to module mode
+        so top-level await works.
+
+        Cancellation: if the enclosing asyncio task is cancelled, the
+        driving loop rejects in-flight host-call Promises with a
+        HostCancellationError and lets JS ``catch``/``finally``
+        handlers run. If JS absorbs the cancellation (catches and
+        returns normally), eval_async returns the fulfilled value
+        without re-raising asyncio.CancelledError. Callers who need
+        cancellation to always propagate regardless of JS absorption
+        can check ``asyncio.current_task().cancelling() > 0`` after
+        the call — the cancellation counter is set by
+        ``task.cancel()`` and not cleared by our absorption path.
+        """
         settled_slot = await self._eval_and_drive(
             code, module=module, strict=strict, filename=filename, timeout=timeout
         )
@@ -387,113 +403,287 @@ class Context:
         Fast path: if ``slot`` is not a promise, it's already settled.
         Pure-sync code like ``eval_async("1 + 2")`` skips the loop and
         marshals directly.
+
+        Cancellation: the loop is wrapped in a TaskGroup that owns all
+        in-flight host-call tasks (dispatcher checks
+        ``bridge._active_task_group``). When the outer task is
+        cancelled:
+
+        1. Driving loop's ``event.wait()`` raises CancelledError.
+        2. We reject every in-flight Promise with a HostCancellationError
+           record via ``qjs_promise_reject`` — this must happen BEFORE
+           TaskGroup teardown so the JS-side rejection sees live
+           resolver callables.
+        3. Re-raise CancelledError to tear down the TaskGroup (cancels
+           remaining host-call tasks).
+        4. ``except* CancelledError`` outside the TaskGroup: clear the
+           deadline, run final pending-jobs drain so JS catch/finally
+           handlers execute, inspect the top-level promise state for
+           absorption detection.
+        5. Absorption: if the top-level promise is now fulfilled, JS
+           caught HostCancellationError and recovered — return the
+           fulfilled value normally. If rejected with a non-
+           HostCancellationError, JS caught the cancellation but its
+           cleanup itself threw — surface that exception. If still
+           rejected with HostCancellationError (the common case: no
+           catch handler), re-raise CancelledError.
         """
         # Fast path: non-promise results don't need the driving loop.
         if not self._bridge.is_promise(self._ctx_id, slot):
             return slot
 
-        # From here, `slot` holds the top-level promise. The loop owns
-        # its lifetime; the finally block drops it on any exit (return
-        # or raise). The returned result_slot on the fulfilled path is
-        # a fresh allocation from promise_result, so dropping the
-        # outer promise slot is always safe.
+        # From here, `slot` holds the top-level promise.
+        #
+        # The loop runs inside a TaskGroup so cancellation cascades to
+        # in-flight host-call tasks. On cancellation we reject every
+        # in-flight Promise with a HostCancellationError record, let
+        # the TaskGroup tear down, then inspect the top-level promise
+        # state for absorption detection.
+        #
+        # `absorbed_result_slot` threads a fulfilled value out of the
+        # absorption path — we can't `return` from inside an except*
+        # block (Python 3.11 restriction), so the cancellation handler
+        # sets this variable and the return happens after the block.
+        absorbed_result_slot: int | None = None
+        cancelled = False
+        # Nested try so we can distinguish "CancelledError bubbled out
+        # of the TaskGroup" (handled via except* for absorption) from
+        # "a regular exception bubbled out" (DeadlockError, TimeoutError,
+        # JSError, HostError — re-raised unwrapped). TaskGroup wraps
+        # everything in BaseExceptionGroup on exit; the inner except*
+        # strips the cancel subgroup, and the outer except unwraps a
+        # single-exception group into its sole child so callers see a
+        # bare DeadlockError etc. rather than BaseExceptionGroup[...].
         try:
-            while True:
-                # §7.4 step 1: drain microtasks first.
-                # Ordering matters: drain-then-check, not check-then-drain.
-                # A just-completed host call may have queued a microtask
-                # that settles the top-level promise; running jobs first
-                # lets state transitions propagate before we inspect.
-                rc, _count = self._bridge.runtime_run_pending_jobs(
-                    self._runtime._rt_id
-                )
-                if rc < 0:
-                    raise QuickJSError(
-                        f"shim error from runtime_run_pending_jobs: {rc}"
-                    )
-                # rc == 1 means a microtask raised. The exception stays
-                # on the context; it'll surface via the promise's
-                # rejected state on the next iteration or via the
-                # next state check below.
-
-                # §7.4 step 2: check promise state.
-                state = self._bridge.promise_state(self._ctx_id, slot)
-
-                # §7.4 step 3: fulfilled → marshal and return.
-                if state == 1:
-                    _, result_slot = self._bridge.promise_result(
-                        self._ctx_id, slot
-                    )
-                    return result_slot
-
-                # §7.4 step 4: rejected → extract reason and raise.
-                if state == 2:
-                    _, reason_slot = self._bridge.promise_result(
-                        self._ctx_id, slot
-                    )
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    self._bridge._active_task_group = tg
                     try:
-                        self._raise_from_exception_slot(reason_slot)
-                    finally:
-                        self._bridge.slot_drop(self._ctx_id, reason_slot)
+                        while True:
+                            # §7.4 step 1: drain microtasks first.
+                            # Drain-then-check, not check-then-drain:
+                            # a just-completed host call may have
+                            # queued a microtask that settles the
+                            # top-level promise.
+                            rc, _count = self._bridge.runtime_run_pending_jobs(
+                                self._runtime._rt_id
+                            )
+                            if rc < 0:
+                                raise QuickJSError(
+                                    f"shim error from runtime_run_pending_jobs: {rc}"
+                                )
 
-                # §7.4 step 5 / step 6: pending. Dispatch based on
-                # whether any async host calls are in flight.
-                if not self._bridge._pending_tasks:
-                    # §7.4 step 6: nothing will settle this promise.
-                    # Actionable error message — users in this loop
-                    # will read it first when debugging.
-                    raise DeadlockError(
-                        "eval_async's top-level promise is pending but "
-                        "no async host calls are in flight. Did you "
-                        "forget to register a function as async "
-                        "(is_async=True)? Or is a JS Promise missing "
-                        "its resolver?"
-                    )
+                            # §7.4 step 2: check promise state.
+                            state = self._bridge.promise_state(
+                                self._ctx_id, slot
+                            )
 
-                # §7.4 step 5: wait for the next host-call completion.
-                # The Event was lazy-created by the first dispatch; by
-                # the time we reach here with _pending_tasks non-empty,
-                # it exists. Single-waiter invariant: the driving loop
-                # is the only consumer of this Event. Multi-waiter
-                # semantics (debuggers, monitoring) would require an
-                # asyncio.Condition or per-dispatch futures — revisit
-                # in v0.3+ (see step-3 flag in v0.2 plan).
-                event = self._bridge._pending_completed
-                assert event is not None, (
-                    "pending task present but completion event is None; "
-                    "indicates a race in _host_call_async_dispatch"
-                )
-                # Wait/clear ordering: wait first, then clear, then
-                # loop back to drain + re-check. If we cleared first,
-                # a set() that fires between clear and wait would be
-                # lost. If we forgot to clear, the next wait returns
-                # immediately and the loop busy-spins.
-                await event.wait()
-                event.clear()
-                # Timeout enforcement: host_interrupt fires against
-                # the deadline we set earlier, so QuickJS itself will
-                # abort the next job-drain with an interrupted error.
-                # But a task that's blocked in Python-land awaiting
-                # something outside the shim (e.g. asyncio.sleep)
-                # won't see the interrupt. Check here as a belt-and-
-                # suspenders deadline tripwire for the async path.
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "eval_async exceeded its deadline"
+                            # §7.4 step 3: fulfilled → return result.
+                            if state == 1:
+                                _, result_slot = self._bridge.promise_result(
+                                    self._ctx_id, slot
+                                )
+                                self._bridge.set_deadline(None)
+                                self._bridge.slot_drop(self._ctx_id, slot)
+                                return result_slot
+
+                            # §7.4 step 4: rejected → raise from reason.
+                            if state == 2:
+                                _, reason_slot = self._bridge.promise_result(
+                                    self._ctx_id, slot
+                                )
+                                try:
+                                    self._raise_from_exception_slot(
+                                        reason_slot
+                                    )
+                                finally:
+                                    self._bridge.slot_drop(
+                                        self._ctx_id, reason_slot
+                                    )
+
+                            # §7.4 step 5 / 6: pending.
+                            if not self._bridge._pending_tasks:
+                                raise DeadlockError(
+                                    "eval_async's top-level promise is "
+                                    "pending but no async host calls "
+                                    "are in flight. Did you forget to "
+                                    "register a function as async "
+                                    "(is_async=True)? Or is a JS "
+                                    "Promise missing its resolver?"
+                                )
+
+                            # §7.4 step 5: wait for next host-call
+                            # completion. Single-waiter invariant: the
+                            # concurrent-eval guard in _eval_and_drive
+                            # keeps this loop as the sole consumer of
+                            # the completion event.
+                            event = self._bridge._pending_completed
+                            assert event is not None, (
+                                "pending task present but completion "
+                                "event is None; indicates a race in "
+                                "_host_call_async_dispatch"
+                            )
+                            # Wait/clear ordering: wait first, clear,
+                            # loop. Clear-first would drop a set()
+                            # fired between clear and wait; no clear
+                            # would busy-spin.
+                            await event.wait()
+                            event.clear()
+
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    "eval_async exceeded its deadline"
+                                )
+                    except asyncio.CancelledError:
+                        # §7.4 cancellation step 2-3: reject every
+                        # in-flight Promise with a HostCancellationError
+                        # record BEFORE TaskGroup teardown so the
+                        # rejections fire against live JS resolvers.
+                        cancelled = True
+                        self._reject_pending_with_cancellation()
+                        raise  # triggers TaskGroup teardown
+            except* asyncio.CancelledError:
+                # §7.4 cancellation step 4-6: TaskGroup is exited; all
+                # child tasks cancelled. Clear deadline (§6.4) before
+                # the final drain, then inspect promise state for
+                # absorption.
+                self._bridge.set_deadline(None)
+                self._bridge._active_task_group = None
+                try:
+                    self._bridge.runtime_run_pending_jobs(
+                        self._runtime._rt_id
                     )
+                    state = self._bridge.promise_state(
+                        self._ctx_id, slot
+                    )
+                    if state == 1:
+                        # §7.4 step 5: JS absorbed cancellation. Hold
+                        # the result so the post-except* return can
+                        # hand it back to the caller.
+                        _, absorbed_result_slot = (
+                            self._bridge.promise_result(self._ctx_id, slot)
+                        )
+                        self._bridge.slot_drop(self._ctx_id, slot)
+                    elif state == 2:
+                        _, reason_slot = self._bridge.promise_result(
+                            self._ctx_id, slot
+                        )
+                        # Distinguish "rejected with our injected
+                        # HostCancellationError" (common case: no JS
+                        # catch) from "rejected with something else"
+                        # (JS caught but its cleanup threw).
+                        is_our_cancel = self._exception_name_is(
+                            reason_slot, "HostCancellationError"
+                        )
+                        if not is_our_cancel:
+                            try:
+                                self._raise_from_exception_slot(
+                                    reason_slot
+                                )
+                            finally:
+                                self._bridge.slot_drop(
+                                    self._ctx_id, reason_slot
+                                )
+                        self._bridge.slot_drop(
+                            self._ctx_id, reason_slot
+                        )
+                        self._bridge.slot_drop(self._ctx_id, slot)
+                    else:
+                        # Still pending after final drain — shouldn't
+                        # happen; defensively drop and re-raise below.
+                        self._bridge.slot_drop(self._ctx_id, slot)
+                except asyncio.CancelledError:
+                    # The absorption-inspection path itself got
+                    # cancelled. Fall through to re-raise.
+                    self._bridge.slot_drop(self._ctx_id, slot)
+                # If absorption succeeded, absorbed_result_slot is
+                # set; fall through to the return at the bottom.
+                # Otherwise re-raise CancelledError.
+                if absorbed_result_slot is None:
+                    # Raised inside except*; from None suppresses the
+                    # ExceptionGroup as __context__ since the group is
+                    # an implementation detail of the TaskGroup, not
+                    # information the caller should see.
+                    raise asyncio.CancelledError() from None
+        except BaseExceptionGroup as eg:
+            # Non-cancellation exception bubbled out of the TaskGroup.
+            # TaskGroup wraps everything in BaseExceptionGroup on exit;
+            # we already peeled off the CancelledError subgroup above.
+            # Anything here is a user-visible error (DeadlockError,
+            # TimeoutError, JSError, HostError). Unwrap single-
+            # exception groups for ergonomic surface; a multi-member
+            # group is unusual but can happen if multiple host tasks
+            # threw before the driving loop noticed.
+            if len(eg.exceptions) == 1:
+                inner = eg.exceptions[0]
+                if isinstance(inner, BaseException):
+                    # Preserve inner.__cause__ (set by
+                    # _raise_from_exception_slot via `raise err from
+                    # cause` for HostError). A bare `raise inner`
+                    # triggers B904; `raise inner from inner.__cause__`
+                    # is a no-op that preserves the chain and
+                    # satisfies the linter. The ExceptionGroup wraps
+                    # the inner exception; users of eval_async see a
+                    # bare DeadlockError / HostError / etc. as if the
+                    # TaskGroup were invisible.
+                    raise inner from inner.__cause__
+            raise
         finally:
-            # Clear the epoch deadline BEFORE cleanup calls enter wasm
-            # — otherwise a deadline that just elapsed (the very thing
-            # that triggered this finally) would trap slot_drop. The
-            # outer caller re-sets the deadline for any subsequent
-            # operation; for cleanup we want the unbounded deadline.
-            self._bridge.set_deadline(None)
-            # Always drop the promise's own slot. On the happy path
-            # we return result_slot (a fresh allocation from
-            # promise_result); on error paths we drop any reason_slot
-            # inline above. The outer promise slot is always ours to
-            # clean up here.
-            self._bridge.slot_drop(self._ctx_id, slot)
+            # Final non-cancellation cleanup. The cancellation path
+            # does its own set_deadline(None) + slot_drop inside the
+            # except*; redoing here for that path would be benign
+            # (slot_drop on a freed slot is a shim-level no-op per §6.4).
+            if not cancelled:
+                self._bridge.set_deadline(None)
+                self._bridge._active_task_group = None
+                self._bridge.slot_drop(self._ctx_id, slot)
+
+        # Reached only on absorption: JS caught HostCancellationError
+        # and the promise fulfilled with a recovery value.
+        return absorbed_result_slot
+
+    def _reject_pending_with_cancellation(self) -> None:
+        """§7.4 cancellation step 2: reject every in-flight async
+        host-call Promise with a HostCancellationError record. Matches
+        the shim's string-literal injection convention (§10.3)."""
+        record = {
+            "name": "HostCancellationError",
+            "message": "eval_async was cancelled",
+            "stack": None,
+        }
+        for pid in list(self._bridge._pending_tasks):
+            try:
+                self._bridge.promise_reject(self._ctx_id, pid, record)
+            except Exception:  # noqa: BLE001 — best-effort cancellation
+                # Individual settlement failures shouldn't block the
+                # rest. The common case is pid already settled
+                # concurrently by a task that finished between our
+                # loop iteration and the CancelledError arriving —
+                # shim returns -1 there, which surfaces as a bridge
+                # RuntimeError; swallow.
+                pass
+
+    def _exception_name_is(self, exc_slot: int, expected_name: str) -> bool:
+        """Read the ``.name`` property off a JS exception slot and
+        compare to ``expected_name``. Used to distinguish the shim-
+        injected HostCancellationError rejection from a user-level
+        rejection produced by JS catch-handlers that re-threw."""
+        status, name_slot = self._bridge.get_prop(
+            self._ctx_id, exc_slot, "name"
+        )
+        if status != 0 or name_slot == 0:
+            if name_slot:
+                self._bridge.slot_drop(self._ctx_id, name_slot)
+            return False
+        try:
+            mp_status, payload = self._bridge.to_msgpack(
+                self._ctx_id, name_slot
+            )
+            if mp_status < 0:
+                return False
+            return bool(_msgpack.decode(payload) == expected_name)
+        finally:
+            self._bridge.slot_drop(self._ctx_id, name_slot)
 
     @property
     def globals(self) -> Globals:

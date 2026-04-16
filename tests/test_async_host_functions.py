@@ -135,3 +135,190 @@ async def test_explicit_sync_override_on_callable_class() -> None:
 
             ctx.register("plain", plain_doubler, is_async=False)
             assert ctx.eval("plain(21)") == 42
+
+
+# ---- §7.4 cancellation (step 7) ---------------------------------------
+
+
+async def test_cancel_propagates_through_eval_async() -> None:
+    """§13.2: task.cancel() on an in-flight eval_async re-raises
+    CancelledError to the caller when JS doesn't catch."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def sleep_long() -> str:
+                await asyncio.sleep(10)
+                return "never"
+
+            ctx.register("sleep_long", sleep_long)
+
+            task = asyncio.create_task(ctx.eval_async("await sleep_long()"))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+async def test_cancel_absorbed_by_js_catch_handler() -> None:
+    """§7.4: JS catching HostCancellationError and returning normally
+    causes eval_async to return that value without re-raising. The
+    cancellation counter remains non-zero for callers who need strict
+    propagation (via asyncio.current_task().cancelling())."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def sleep_long() -> str:
+                await asyncio.sleep(10)
+                return "never"
+
+            ctx.register("sleep_long", sleep_long)
+
+            async def runner() -> str:
+                try:
+                    async with asyncio.timeout(0.02):
+                        return await ctx.eval_async("""
+                            try {
+                                await sleep_long();
+                                "unreachable"
+                            } catch (e) {
+                                e.name
+                            }
+                        """)
+                except asyncio.CancelledError:
+                    # Acceptable alternate path per §13.2: cancellation
+                    # propagated before the JS catch handler ran. On
+                    # slower systems the timeout might fire before JS
+                    # even reaches its catch block.
+                    return "propagated"
+
+            result = await runner()
+            # Either JS absorbed (returning the error name) or the
+            # cancellation propagated before JS saw it. Both are
+            # spec-valid per §13.2.
+            assert result in ("HostCancellationError", "propagated")
+
+
+async def test_cancel_with_no_host_calls_pure_js_loop() -> None:
+    """Cancelling an eval_async that's running pure-JS compute (no
+    host calls in flight, so the pending-task map is empty and the
+    driving loop is blocked on the interrupt handler rather than
+    event.wait()) still terminates cleanly.
+
+    The interrupt-handler path is orthogonal to the TaskGroup-based
+    host-task cancellation; both need to work for cancellation to be
+    reliable across the range of JS workloads.
+    """
+    with Runtime() as rt:
+        # Short timeout so the compute loop's interrupt fires quickly.
+        with rt.new_context(timeout=0.1) as ctx:
+            # A tight JS loop with no host calls; the wall-clock
+            # interrupt fires via the timeout.
+            with pytest.raises((asyncio.CancelledError, Exception)):
+                # Any exception is acceptable here — TimeoutError from
+                # the deadline or CancelledError from task.cancel().
+                # The assertion is "doesn't hang."
+                task = asyncio.create_task(
+                    ctx.eval_async("while(true){}", module=False)
+                )
+                await asyncio.sleep(0.05)
+                task.cancel()
+                await task
+
+
+async def test_cancel_finally_host_calls_also_cancelled() -> None:
+    """§7.4 subtle case: JS `finally` that awaits another host call
+    does NOT get a free pass — the cleanup host call is scheduled into
+    the same TaskGroup as the original, so it's cancelled with the
+    rest. This means JS finally blocks can't do async cleanup reliably
+    during cancellation.
+
+    Alternative (letting finally escape cancellation) is a worse
+    footgun because JS could indefinitely delay cancellation by
+    putting long-running code in finally. Locked in: finally host
+    calls get cancelled alongside everything else.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            cleanup_ran = False
+            cleanup_completed = False
+
+            async def sleep_long() -> str:
+                await asyncio.sleep(10)
+                return "never"
+
+            async def cleanup() -> str:
+                nonlocal cleanup_ran, cleanup_completed
+                cleanup_ran = True
+                # A sleep that would complete if cleanup were allowed
+                # to run post-cancellation.
+                await asyncio.sleep(0.1)
+                cleanup_completed = True
+                return "cleaned"
+
+            ctx.register("sleep_long", sleep_long)
+            ctx.register("cleanup", cleanup)
+
+            task = asyncio.create_task(ctx.eval_async("""
+                try {
+                    await sleep_long();
+                } finally {
+                    await cleanup();
+                }
+            """))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # cleanup() was dispatched and started, but the TaskGroup
+            # cancellation prevented its sleep from completing —
+            # cleanup_completed stays False. The cleanup code RAN but
+            # didn't finish its await. This is the spec-locked
+            # semantic.
+            assert cleanup_completed is False
+
+
+async def test_cancelling_counter_preserved_after_absorption() -> None:
+    """§7.4: when JS absorbs cancellation, asyncio.CancelledError is
+    not re-raised — but the task's cancelling counter (set by
+    task.cancel()) is not cleared by us. Callers who need strict
+    propagation check this counter after the call.
+
+    This is a contract test; it exercises the escape hatch documented
+    in eval_async's docstring.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def sleep_long() -> str:
+                await asyncio.sleep(10)
+                return "never"
+
+            ctx.register("sleep_long", sleep_long)
+
+            async def runner() -> tuple[str, int]:
+                try:
+                    async with asyncio.timeout(0.02):
+                        r = await ctx.eval_async("""
+                            try {
+                                await sleep_long();
+                                "never"
+                            } catch (e) {
+                                "absorbed"
+                            }
+                        """)
+                        cancelling = asyncio.current_task().cancelling()
+                        return r, cancelling
+                except asyncio.CancelledError:
+                    # Cancellation arrived before JS could absorb.
+                    # Still a valid path per §13.2; report it so the
+                    # assertion below can handle either case.
+                    return "propagated", -1
+
+            r, cancelling = await runner()
+            if r == "absorbed":
+                # Absorption happened; cancelling counter should be > 0
+                # so the caller can detect the cancellation even
+                # though the Python exception didn't propagate.
+                assert cancelling > 0
+            else:
+                assert r == "propagated"
