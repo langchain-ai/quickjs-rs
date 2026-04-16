@@ -371,7 +371,7 @@ class Context:
                     self._raise_from_exception_slot(slot)
                 finally:
                     self._bridge.slot_drop(self._ctx_id, slot)
-            settled_slot = await self._drive_promise(slot, deadline)
+            settled_slot = await self._drive_promise_slot(slot, deadline)
             # §7.4 / quickjs-ng async-eval envelope: when bit 3 (async)
             # was set, the resolved value is wrapped as {value: x, done}
             # (iterator-result shape). Unwrap the `value` property before
@@ -395,10 +395,17 @@ class Context:
             self._bridge.set_deadline(None)
             self._eval_async_in_flight = False
 
-    async def _drive_promise(self, slot: int, deadline: float) -> int:
+    async def _drive_promise_slot(self, slot: int, deadline: float) -> int:
         """§7.4 driving loop. Consumes ``slot`` (drops on any exit path
         that doesn't return it); returns a new slot owning the settled
         value.
+
+        Shared seam between ``eval_async`` / ``eval_handle_async``
+        (which provide an eval-result slot that may or may not be a
+        Promise) and ``Handle.await_promise`` (which provides a
+        user-held promise slot). All three traffic through this one
+        method so cancellation, deadline, absorption detection, and
+        exception routing live in one place.
 
         Fast path: if ``slot`` is not a promise, it's already settled.
         Pure-sync code like ``eval_async("1 + 2")`` skips the loop and

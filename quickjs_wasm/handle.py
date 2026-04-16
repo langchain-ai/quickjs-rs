@@ -378,8 +378,76 @@ class Handle:
         finally:
             keys_fn_handle.dispose()
 
-    def await_promise(self, *, deadline: float | None = None) -> Handle:
-        raise NotImplementedError("await_promise lands in v0.3; see spec §7.2.")
+    async def await_promise(self, *, timeout: float | None = None) -> Handle:
+        """Drive pending jobs until this Promise settles; return a new
+        Handle to the resolved value, or raise on rejection.
+
+        See §7.2, §7.4. Must be called inside an async context. If this
+        Handle isn't a Promise (``is_promise`` is False), returns
+        ``self`` unchanged — idiomatic for chained handle ops where
+        the caller may or may not know whether they're holding a
+        Promise.
+
+        Respects the enclosing cancel scope (cancellation in the
+        driving task cascades here). Uses the owning Context's
+        cumulative eval_async budget unless ``timeout=`` is passed,
+        in which case that value applies for this call only (same
+        semantics as ``eval_async``'s ``timeout=`` kwarg).
+
+        Concurrency: honours the §7.4 concurrent-eval rule. If an
+        ``eval_async`` or another ``await_promise`` is in flight on
+        the same Context, raises ``ConcurrentEvalError``.
+        """
+        import time as _time  # local to avoid a second module-level import
+
+        from quickjs_wasm.errors import ConcurrentEvalError
+
+        self._check_live()
+        ctx = self._context_ref()
+        if ctx is None or getattr(ctx, "_closed", True):
+            raise InvalidHandleError("owning context has been closed")
+
+        # §7.4 fast path: not a Promise → return self. The caller
+        # may have written code like `h.await_promise()` where `h`
+        # sometimes is a plain value (the JS-side callee decided
+        # whether to return a Promise at runtime). Short-circuit
+        # preserves that ergonomic pattern.
+        if not self._bridge.is_promise(self._ctx_id, self._slot):
+            return self
+
+        # §7.4 concurrent-eval guard — same rule as eval_async.
+        if ctx._eval_async_in_flight:
+            raise ConcurrentEvalError(
+                "another eval_async or await_promise is already in "
+                "flight on this context; use a separate context for "
+                "concurrent JS workloads"
+            )
+
+        # §7.4 timeout semantics: per-call override or cumulative.
+        if timeout is not None:
+            deadline = _time.monotonic() + timeout
+        else:
+            deadline = ctx._cumulative_deadline
+
+        # Dup the underlying slot so the driving loop can own its
+        # lifetime (the loop's finally drops what it was handed).
+        # Without the dup, the loop would invalidate self's slot and
+        # break any subsequent operations on self — which is wrong:
+        # await_promise shouldn't consume self.
+        driven_slot = self._bridge.slot_dup(self._ctx_id, self._slot)
+        if driven_slot == 0:
+            raise QuickJSError("failed to dup promise slot for await")
+
+        ctx._eval_async_in_flight = True
+        self._bridge.take_last_host_exception()
+        self._bridge.set_deadline(deadline)
+        try:
+            settled_slot = await ctx._drive_promise_slot(driven_slot, deadline)
+        finally:
+            self._bridge.set_deadline(None)
+            ctx._eval_async_in_flight = False
+
+        return Handle(ctx, self._bridge, self._ctx_id, settled_slot)
 
     # ---- Internals ------------------------------------------------------
 
