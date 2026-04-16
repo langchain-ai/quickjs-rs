@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, overload
+from typing import TYPE_CHECKING, Any, overload
+
+from quickjs_wasm import _msgpack
+from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
 
 if TYPE_CHECKING:
     from quickjs_wasm.globals import Globals
@@ -13,10 +17,17 @@ if TYPE_CHECKING:
 
 class Context:
     def __init__(self, runtime: Runtime, *, timeout: float = 5.0) -> None:
-        raise NotImplementedError("Context is not yet implemented; see spec §7.2.")
+        self._runtime = runtime
+        self._bridge = runtime._bridge
+        ctx_id = self._bridge.context_new(runtime._rt_id)
+        if ctx_id == 0:
+            raise QuickJSError("failed to create QuickJS context")
+        self._ctx_id = ctx_id
+        self._timeout = timeout
+        self._closed = False
 
     def __enter__(self) -> Context:
-        raise NotImplementedError
+        return self
 
     def __exit__(
         self,
@@ -24,10 +35,14 @@ class Context:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        raise NotImplementedError
+        self.close()
 
     def close(self) -> None:
-        raise NotImplementedError
+        if self._closed:
+            return
+        self._bridge.context_free(self._ctx_id)
+        self._runtime._unregister_context(self)
+        self._closed = True
 
     def eval(
         self,
@@ -37,7 +52,32 @@ class Context:
         strict: bool = False,
         filename: str = "<eval>",
     ) -> Any:
-        raise NotImplementedError
+        if self._closed:
+            raise QuickJSError("context is closed")
+        del filename  # filename passthrough lands when we wire §6.2's options.
+        flags = 0
+        if module:
+            flags |= 0x1
+        if strict:
+            flags |= 0x4
+        status, slot = self._bridge.eval(self._ctx_id, code, flags)
+        if status < 0:
+            raise QuickJSError(f"shim error from qjs_eval: status={status}")
+        if status == 1:
+            # Exception path lands with the next assertion batch. For now,
+            # surface a minimal JSError so callers aren't left silent.
+            self._bridge.slot_drop(self._ctx_id, slot)
+            raise JSError("Error", "uncaught JS exception (stack not yet wired)")
+        try:
+            mp_status, payload = self._bridge.to_msgpack(self._ctx_id, slot)
+            if mp_status < 0:
+                raise MarshalError(
+                    "value type is not yet supported by qjs_to_msgpack; "
+                    "additional branches land in subsequent commits"
+                )
+            return _msgpack.decode(payload)
+        finally:
+            self._bridge.slot_drop(self._ctx_id, slot)
 
     def eval_handle(
         self,
@@ -47,11 +87,11 @@ class Context:
         strict: bool = False,
         filename: str = "<eval>",
     ) -> Handle:
-        raise NotImplementedError
+        raise NotImplementedError("eval_handle lands with handle support (§7.2).")
 
     @property
     def globals(self) -> Globals:
-        raise NotImplementedError
+        raise NotImplementedError("globals lands with the globals proxy (§7.2).")
 
     @overload
     def function(self, fn: Callable[..., Any]) -> Callable[..., Any]: ...
@@ -65,15 +105,15 @@ class Context:
         *,
         name: str | None = None,
     ) -> Any:
-        raise NotImplementedError
+        raise NotImplementedError("function lands with host-function support (§7.2).")
 
     def register(self, name: str, fn: Callable[..., Any]) -> None:
-        raise NotImplementedError
+        raise NotImplementedError("register lands with host-function support (§7.2).")
 
     @property
     def timeout(self) -> float:
-        raise NotImplementedError
+        return self._timeout
 
     @timeout.setter
     def timeout(self, value: float) -> None:
-        raise NotImplementedError
+        self._timeout = value

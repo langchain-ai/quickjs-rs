@@ -27,8 +27,8 @@ set(CMAKE_AR           "${WASI_SDK_PATH}/bin/llvm-ar" CACHE FILEPATH "")
 set(CMAKE_RANLIB       "${WASI_SDK_PATH}/bin/llvm-ranlib" CACHE FILEPATH "")
 set(CMAKE_STRIP        "${WASI_SDK_PATH}/bin/llvm-strip" CACHE FILEPATH "")
 
-set(CMAKE_C_COMPILER_TARGET   wasm32-wasi)
-set(CMAKE_CXX_COMPILER_TARGET wasm32-wasi)
+set(CMAKE_C_COMPILER_TARGET   wasm32-wasip1)
+set(CMAKE_CXX_COMPILER_TARGET wasm32-wasip1)
 
 set(CMAKE_SYSROOT "${WASI_SDK_PATH}/share/wasi-sysroot")
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")

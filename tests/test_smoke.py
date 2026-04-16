@@ -1,8 +1,9 @@
 """v0.1 acceptance test. See spec/implementation.md §13.
 
 This is the north star. Each assertion represents functionality that must
-work for v0.1 to ship. Work through it assertion-by-assertion — each passing
-assertion is a natural commit boundary per CLAUDE.md.
+work for v0.1 to ship. Assertions are un-skipped one commit at a time per
+CLAUDE.md's commit discipline — every passing assertion is a natural
+commit boundary.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import pytest
 
 from quickjs_wasm import (
     HostError,
-    InvalidHandleError,  # noqa: F401 — exercised implicitly once handles land
+    InvalidHandleError,  # noqa: F401 — exercised once handles land
     JSError,
     MarshalError,  # noqa: F401 — exercised when handle marshaling lands
     MemoryLimitError,
@@ -20,7 +21,14 @@ from quickjs_wasm import (
 )
 
 
-@pytest.mark.skip(reason="Pending Runtime/Context implementation (§7.2).")
+def test_smoke_arithmetic() -> None:
+    """Greened commit #1: synchronous eval of a trivial arithmetic expression."""
+    with Runtime(memory_limit=64 * 1024 * 1024) as rt:
+        with rt.new_context(timeout=5.0) as ctx:
+            assert ctx.eval("1 + 2") == 3
+
+
+@pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:
