@@ -20,15 +20,8 @@ Instructions for Claude Code working in this repository. Read this file in full 
 
 ## Implementation order
 
-Follow §17 of `spec/implementation.md`:
-
-1. Vendor quickjs-ng (should be in `vendor/quickjs-ng/` as a git submodule; verify before building)
-2. Write `wasm/shim.c` per §6
-3. Write `quickjs_wasm/_bridge.py` per §7 and §9 (WASI stubs)
-4. Write `quickjs_wasm/_msgpack.py` per §8
-5. Write `runtime.py`, `context.py`, `handle.py`, `globals.py`, `errors.py` per §7.2
-6. Fill in test bodies per §11.1 and §13
-7. Wire CI per §4.2 and §11.3
+Follow §17.2 of `spec/implementation.md` for v0.2. The v0.1 order lives
+in §17.1 as historical reference for the completed work.
 
 Before writing code for any section, re-read that section of the spec.
 
@@ -62,9 +55,33 @@ From §9 (safety):
 - Defaults are 64 MB memory / 1 MB stack / 5 s timeout
 - Every added WASI capability needs a spec update and a justification
 
+From §7.4 (async, v0.2):
+- Only one eval_async in flight per context at a time. Second raises
+  ConcurrentEvalError.
+- Sync eval raises ConcurrentEvalError on the first attempt to drive an
+  async-host-call promise. Eval fails cleanly before any JS runs
+  against the pending promise.
+- Async host-function detection is inspect.iscoroutinefunction (auto).
+  ctx.register(..., is_async=True/False) is the explicit override.
+- eval_async timeout is cumulative across calls on the same context,
+  starting from context creation. timeout= kwarg on eval_async
+  overrides per-call. Sync eval timeout is unchanged (per-call).
+- Cancellation: catch CancelledError at the driving loop's await,
+  cancel the internal TaskGroup, reject in-flight promises with
+  HostCancellationError, run pending jobs one final time to let JS
+  catch/finally execute, re-raise CancelledError unless JS absorbed it.
+- HostCancellationError's JS-side name is the string literal
+  "HostCancellationError" injected by the shim encoding path (same
+  pattern as HostError). The Python class name matches by convention.
+
 ## Scope
 
-v0.1 only. See §16 for explicit non-goals. If you hit a feature boundary (async, ES module loading, host classes with prototypes, debugger, SharedArrayBuffer, multi-threading), stub with `NotImplementedError` referencing the spec section that defers it. Do not partially implement v0.2+ features.
+v0.2 active. v0.1 complete at tag v0.1.0 (§13.1 acceptance green).
+See §17.2 for v0.2 implementation order.
+
+For features beyond v0.2 (see §14, §16), stub with NotImplementedError
+referencing the spec section that defers them. Do not partially
+implement v0.3+ features.
 
 ## Dependencies
 
@@ -152,7 +169,7 @@ Commits are always at a green state. No "WIP, tests failing" on the main branch.
 
 - Do not rewrite the shim in Rust, Zig, or any language other than C. We are committed to C + WASI-SDK for v0.1 through v1.0.
 - Do not change public API signatures in §7.2 without updating the spec in the same commit.
-- Do not implement v0.2+ features (see §14) before v0.1 is complete and the acceptance test is green.
+- Do not implement v0.3+ features (see §14) before v0.2 is complete and §13.2 acceptance is green.
 - Do not swap MessagePack for JSON, Protobuf, or any other serialization format.
 - Do not silently expand WASI permissions. Every added capability is a spec change.
 - Do not use `RuntimeError` or bare `Exception` in public methods — only `QuickJSError` subclasses.
