@@ -55,6 +55,10 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
     # positive fixint
     if b < 0x80:
         return b, offset + 1
+    # fixmap
+    if 0x80 <= b <= 0x8F:
+        count = b & 0x0F
+        return _decode_map(data, offset + 1, count)
     # fixarray
     if 0x90 <= b <= 0x9F:
         count = b & 0x0F
@@ -131,6 +135,13 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
     if b == 0xDD:
         count = int.from_bytes(data[offset + 1 : offset + 5], "big")
         return _decode_array(data, offset + 5, count)
+    # map 16 / 32
+    if b == 0xDE:
+        count = int.from_bytes(data[offset + 1 : offset + 3], "big")
+        return _decode_map(data, offset + 3, count)
+    if b == 0xDF:
+        count = int.from_bytes(data[offset + 1 : offset + 5], "big")
+        return _decode_map(data, offset + 5, count)
 
     raise NotImplementedError(
         f"msgpack decode for format 0x{b:02x} is not yet implemented"
@@ -143,6 +154,18 @@ def _decode_array(data: bytes, offset: int, count: int) -> tuple[list[Any], int]
         value, offset = _decode_at(data, offset)
         items.append(value)
     return items, offset
+
+
+def _decode_map(data: bytes, offset: int, count: int) -> tuple[dict[str, Any], int]:
+    """§8: maps have str keys; preserve insertion order (Python dicts already do)."""
+    result: dict[str, Any] = {}
+    for _ in range(count):
+        key, offset = _decode_at(data, offset)
+        if not isinstance(key, str):
+            raise ValueError(f"msgpack map key must be str per §8, got {type(key)!r}")
+        value, offset = _decode_at(data, offset)
+        result[key] = value
+    return result, offset
 
 
 def _decode_ext(ext_type: int, body: bytes) -> Any:

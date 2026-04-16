@@ -44,6 +44,12 @@ def test_smoke_primitives() -> None:
             assert ctx.eval("[[1, 2], [3, 4]]") == [[1, 2], [3, 4]]
             assert ctx.eval("[]") == []
 
+            # Objects (mixed nesting, empty, insertion order preserved)
+            assert ctx.eval("({a: 1, b: [2, 3]})") == {"a": 1, "b": [2, 3]}
+            assert ctx.eval("({})") == {}
+            ordered = ctx.eval("({z: 1, a: 2, m: 3})")
+            assert list(ordered.keys()) == ["z", "a", "m"]
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:

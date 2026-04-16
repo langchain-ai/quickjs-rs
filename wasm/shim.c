@@ -536,6 +536,64 @@ static int32_t encode_array(ShimContext *c, int32_t off, JSValue arr, int depth)
     return off;
 }
 
+static int32_t encode_map_header(ShimContext *c, int32_t off, uint32_t n) {
+    if (n <= 15) {
+        return write_u8(c, off, (uint8_t)(0x80 | n));
+    } else if (n <= 0xffff) {
+        if (!scratch_reserve(c, (uint32_t)off + 3)) return -1;
+        uint8_t *p = c->scratch + off;
+        p[0] = 0xde;
+        p[1] = (uint8_t)(n >> 8);
+        p[2] = (uint8_t)n;
+        return off + 3;
+    } else {
+        if (!scratch_reserve(c, (uint32_t)off + 5)) return -1;
+        uint8_t *p = c->scratch + off;
+        p[0] = 0xdf;
+        p[1] = (uint8_t)(n >> 24);
+        p[2] = (uint8_t)(n >> 16);
+        p[3] = (uint8_t)(n >> 8);
+        p[4] = (uint8_t)n;
+        return off + 5;
+    }
+}
+
+/* §8: plain Object → msgpack map with str keys, insertion-ordered.
+ * JS_GetOwnPropertyNames with JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY returns
+ * own enumerable string-keyed properties in insertion order, matching
+ * for...in / Object.keys / JSON.stringify semantics. */
+static int32_t encode_object(ShimContext *c, int32_t off, JSValue obj, int depth) {
+    JSPropertyEnum *props = NULL;
+    uint32_t n = 0;
+    if (JS_GetOwnPropertyNames(c->ctx, &props, &n, obj,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+        return -1;
+    }
+
+    int32_t new_off = encode_map_header(c, off, n);
+    if (new_off < 0) goto fail;
+
+    for (uint32_t i = 0; i < n; i++) {
+        size_t klen;
+        const char *key = JS_AtomToCStringLen(c->ctx, &klen, props[i].atom);
+        if (!key) { new_off = -1; goto fail; }
+
+        new_off = encode_str_bytes(c, new_off, (const uint8_t *)key, klen);
+        JS_FreeCString(c->ctx, key);
+        if (new_off < 0) goto fail;
+
+        JSValue val = JS_GetProperty(c->ctx, obj, props[i].atom);
+        if (JS_IsException(val)) { new_off = -1; goto fail; }
+        new_off = encode_value(c, val, new_off, depth + 1);
+        JS_FreeValue(c->ctx, val);
+        if (new_off < 0) goto fail;
+    }
+
+fail:
+    JS_FreePropertyEnum(c->ctx, props, n);
+    return new_off;
+}
+
 static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
     if (depth > MARSHAL_MAX_DEPTH) return -1;
     int tag = JS_VALUE_GET_TAG(v);
@@ -585,7 +643,20 @@ static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
     if (JS_IsArray(v)) {
         return encode_array(c, off, v, depth);
     }
-    /* Objects and other branches land in later commits. */
+    if (JS_IsObject(v)) {
+        /* §8: functions in eval results are not marshalable — they must be
+         * held as handles instead. Same for Promises (drive them first) and
+         * typed arrays other than Uint8Array (already handled above). */
+        if (JS_IsFunction(c->ctx, v)) return -1;
+        if (JS_IsPromise(v)) return -1;
+        if (JS_GetTypedArrayType(v) >= 0) return -1;
+        return encode_object(c, off, v, depth);
+    }
+    if (tag == JS_TAG_SYMBOL) {
+        /* §8: symbols are not marshalable in eval results. */
+        return -1;
+    }
+    /* Unknown tag. */
     return -1;
 }
 
