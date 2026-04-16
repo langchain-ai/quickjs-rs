@@ -20,6 +20,9 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 
 cp -R "${REPO_ROOT}/wasm" "${scratch}/wasm"
+# Drop any prior build tree so cmake doesn't find a cache pointing at
+# the original source path (absolute paths baked into CMakeCache.txt).
+rm -rf "${scratch}/wasm/build"
 export SOURCE_DATE_EPOCH=0
 export ZERO_AR_DATE=1
 
