@@ -142,16 +142,21 @@ class Bridge:
         # TaskGroup; _host_call_async_dispatch falls back to
         # loop.create_task in that case).
         self._active_task_group: asyncio.TaskGroup | None = None
-        # v0.2 step 9: set by _host_call_async_dispatch when it's
-        # invoked from inside sync eval (i.e. no running asyncio loop
-        # to schedule into). Context.eval checks this on return and
-        # raises ConcurrentEvalError pointing at eval_async, rather
-        # than letting the user discover the problem via the rejected
-        # Promise. The flag is per-Bridge (one sync eval at a time
-        # per Runtime is the existing assumption); cleared by
-        # Context.eval after consumption and by take_last_host_exception's
-        # callers as belt-and-suspenders.
+        # v0.2 step 9: set by _host_call_async_dispatch when JS
+        # invokes an async host function from inside a sync eval
+        # surface (Context.eval, Context.eval_handle, Handle.call,
+        # Handle.new). The sync-eval caller checks this on return
+        # and raises ConcurrentEvalError pointing at eval_async.
+        # Cleared by callers at entry + consumed by
+        # take_sync_eval_hit_async_call().
         self._sync_eval_hit_async_call = False
+        # True while sync Context.eval / eval_handle / Handle.call
+        # are running. The async-call dispatcher checks this
+        # explicitly rather than "is a loop running" — under
+        # pytest-asyncio's auto mode there's always a loop, and the
+        # loop-based heuristic would fail to detect sync-eval
+        # surfaces that happen during an async test.
+        self._in_sync_eval = False
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
@@ -685,17 +690,23 @@ class Bridge:
         except Exception:  # noqa: BLE001 — decode errors are bridge-internal
             return -1
 
+        # §7.4 / §10.3: if we're inside a sync-eval surface, set the
+        # flag so the surface raises ConcurrentEvalError on return.
+        # Checked before loop lookup because loop availability isn't
+        # the discriminator — pytest-asyncio's auto mode means
+        # there's always a loop; what matters is whether the CURRENT
+        # call came through a sync entry point.
+        if self._in_sync_eval:
+            self._sync_eval_hit_async_call = True
+            return -1
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop → we're inside sync eval. §7.4 /
-            # §10.3: set the flag so Context.eval surfaces a clean
-            # ConcurrentEvalError on return, then return -1 so the
-            # shim's local-reject path produces a rejected Promise
-            # in the meantime (preserves context integrity — JS code
-            # that catches the rejection runs to completion, and the
-            # Python-side error surfaces at the eval boundary where
-            # the user's stack trace points).
+            # No running loop and not inside the explicit sync-eval
+            # surface — e.g. a callable was invoked via a stale
+            # Promise or some exotic reentry. Signal the problem
+            # the same way: rejection + flag.
             self._sync_eval_hit_async_call = True
             return -1
 
@@ -735,39 +746,56 @@ class Bridge:
         On completion: settle the JS Promise via qjs_promise_resolve /
         qjs_promise_reject, pop from the pending-task map, signal the
         completion event so the driving loop can wake.
+
+        Cleanup via try/finally is load-bearing: a CancelledError
+        arriving mid-await raises through the body without reaching
+        the explicit settle-and-pop below, which would otherwise leak
+        the _pending_tasks entry. A leaked entry makes subsequent
+        eval_asyncs see spurious "in flight" tasks — specifically,
+        DeadlockError detection (pending promise + empty
+        _pending_tasks → raise) flips to the wrong branch because
+        the dict isn't empty. The driving loop's
+        _reject_pending_with_cancellation already settles the JS
+        Promise on cancel; the finally here is the symmetric Python-
+        side cleanup.
         """
         resolve_ok = True
         payload: Any
         try:
-            payload = await fn(*args)
-        except asyncio.CancelledError:
-            # Cancellation is handled by the driving loop's TaskGroup
-            # teardown (step 7); here we just propagate without
-            # settling. The TaskGroup will catch and re-reject uniformly.
-            raise
-        except BaseException as exc:  # noqa: BLE001 — language bridge
-            resolve_ok = False
-            self._last_host_exception = exc
-            payload = {
-                "name": "HostError",
-                "message": str(exc),
-                "stack": "".join(traceback.format_exception(exc)),
-            }
+            try:
+                payload = await fn(*args)
+            except asyncio.CancelledError:
+                # Cancellation is handled by the driving loop's
+                # TaskGroup teardown (step 7); propagate without
+                # settling here. The loop's cancellation handler
+                # already called promise_reject with a
+                # HostCancellationError record via
+                # _reject_pending_with_cancellation, so the JS side
+                # is settled. The finally below cleans up our dict.
+                raise
+            except BaseException as exc:  # noqa: BLE001 — language bridge
+                resolve_ok = False
+                self._last_host_exception = exc
+                payload = {
+                    "name": "HostError",
+                    "message": str(exc),
+                    "stack": "".join(traceback.format_exception(exc)),
+                }
 
-        # Settle the shim-side Promise. The settle may internally
-        # throw in QuickJS if, say, the runtime has been torn down
-        # — treat that as a benign no-op per §6.4 v0.2 invariant.
-        try:
-            if resolve_ok:
-                self.promise_resolve(ctx_id, pending_id, payload)
-            else:
-                self.promise_reject(ctx_id, pending_id, payload)
-        except Exception:  # noqa: BLE001 — shim boundary
-            pass
-
-        self._pending_tasks.pop(pending_id, None)
-        if self._pending_completed is not None:
-            self._pending_completed.set()
+            # Settle the shim-side Promise. The settle may internally
+            # throw in QuickJS if, say, the runtime has been torn down
+            # — treat that as a benign no-op per §6.4 v0.2 invariant.
+            try:
+                if resolve_ok:
+                    self.promise_resolve(ctx_id, pending_id, payload)
+                else:
+                    self.promise_reject(ctx_id, pending_id, payload)
+            except Exception:  # noqa: BLE001 — shim boundary
+                pass
+        finally:
+            self._pending_tasks.pop(pending_id, None)
+            if self._pending_completed is not None:
+                self._pending_completed.set()
 
     def _host_call_dispatch(
         self,

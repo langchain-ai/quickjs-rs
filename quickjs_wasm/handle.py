@@ -183,12 +183,10 @@ class Handle:
         this_slot = this._slot if this is not None else 0
         arg_slots, owned_slots = self._coerce_args(args)
         # §7.4 / §10.3: Handle.call is a sync entry point into JS.
-        # If the called function dispatches an async host function,
-        # the shim produces a rejected Promise but the Python caller
-        # needs to hear "you can't drive async from here" via
-        # ConcurrentEvalError — same spec rule as ctx.eval. Clear
-        # any stale flag at entry; raise from the finally.
+        # Same guard as Context.eval — flag async dispatches during
+        # the call so ConcurrentEvalError surfaces to the caller.
         self._bridge.take_sync_eval_hit_async_call()
+        self._bridge._in_sync_eval = True
         try:
             try:
                 status, result_slot = self._bridge.call(
@@ -196,6 +194,7 @@ class Handle:
                 )
                 return self._slot_to_handle_or_raise(status, result_slot)
             finally:
+                self._bridge._in_sync_eval = False
                 for s in owned_slots:
                     self._bridge.slot_drop(self._ctx_id, s)
         finally:
@@ -229,6 +228,7 @@ class Handle:
         # (unusual but possible via a constructor body) need the
         # same entry-point-boundary surface.
         self._bridge.take_sync_eval_hit_async_call()
+        self._bridge._in_sync_eval = True
         try:
             try:
                 status, result_slot = self._bridge.new_instance(
@@ -236,6 +236,7 @@ class Handle:
                 )
                 return self._slot_to_handle_or_raise(status, result_slot)
             finally:
+                self._bridge._in_sync_eval = False
                 for s in owned_slots:
                     self._bridge.slot_drop(self._ctx_id, s)
         finally:
@@ -463,20 +464,27 @@ class Handle:
         else:
             deadline = ctx._cumulative_deadline
 
-        # Dup the underlying slot so the driving loop can own its
-        # lifetime (the loop's finally drops what it was handed).
-        # Without the dup, the loop would invalidate self's slot and
-        # break any subsequent operations on self — which is wrong:
-        # await_promise shouldn't consume self.
-        driven_slot = self._bridge.slot_dup(self._ctx_id, self._slot)
-        if driven_slot == 0:
-            raise QuickJSError("failed to dup promise slot for await")
-
         ctx._eval_async_in_flight = True
         self._bridge.take_last_host_exception()
         self._bridge.set_deadline(deadline)
         try:
-            settled_slot = await ctx._drive_promise_slot(driven_slot, deadline)
+            # §7.4 driving-flow: open a TaskGroup, dup the slot
+            # inside it (so any host tasks dispatched during promise
+            # settlement are children of the group), drive.
+            # Without the dup, the loop would invalidate self's slot
+            # and break subsequent ops on self — await_promise
+            # shouldn't consume self.
+            def dup_slot() -> int:
+                new_slot = self._bridge.slot_dup(self._ctx_id, self._slot)
+                if new_slot == 0:
+                    raise QuickJSError(
+                        "failed to dup promise slot for await"
+                    )
+                return new_slot
+
+            settled_slot = await ctx._run_inside_task_group(
+                dup_slot, deadline
+            )
         finally:
             self._bridge.set_deadline(None)
             ctx._eval_async_in_flight = False

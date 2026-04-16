@@ -1,16 +1,25 @@
-"""v0.1 acceptance test. See spec/implementation.md §13.
+"""Acceptance tests. See spec/implementation.md §13.
 
-This is the north star. Each assertion represents functionality that must
-work for v0.1 to ship. Assertions are un-skipped one commit at a time per
-CLAUDE.md's commit discipline — every passing assertion is a natural
-commit boundary.
+The north star for v0.1 is ``test_acceptance`` (§13.1); the north
+star for v0.2 is ``test_async_acceptance`` (§13.2). Each is a
+single end-to-end scenario exercising the full feature set of its
+version — a tripwire that goes red if anything fundamental
+regresses.
+
+``test_smoke_primitives`` is a focused happy-path check that
+greened the first primitive-marshaling commits; it remains as a
+fast narrow-surface verification.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from quickjs_wasm import (
+    ConcurrentEvalError,
+    DeadlockError,
     HostError,
     InvalidHandleError,  # noqa: F401 — exercised once handles land
     JSError,
@@ -244,3 +253,153 @@ def test_acceptance() -> None:
                 ctx2.globals["y"] = "other"
                 assert ctx2.eval("y") == "other"
                 assert ctx.eval("typeof y") == "undefined"
+
+
+async def test_async_acceptance() -> None:
+    """§13.2 acceptance. Ported verbatim from the spec. If this
+    passes, v0.2's async surface is behaviorally complete.
+
+    The ``except asyncio.CancelledError: pass`` tolerance around the
+    absorption case is intentional, not sloppy: cancellation delivery
+    timing is implementation-dependent in asyncio, and on slow
+    runners the cancellation may propagate before JS's catch handler
+    runs. Both outcomes — JS absorbs, or cancellation propagates
+    before absorption — are valid implementations of §7.4 per the
+    spec, so the test tolerates either.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            # Auto-detected async host function
+            @ctx.function
+            async def sleep_ms(n: int) -> str:
+                await asyncio.sleep(n / 1000)
+                return "slept"
+
+            # Top-level await in module mode
+            assert await ctx.eval_async("await sleep_ms(10)") == "slept"
+
+            # Promise.all fan-out, multiple concurrent host calls
+            result = await ctx.eval_async("""
+                const results = await Promise.all([
+                    sleep_ms(5),
+                    sleep_ms(10),
+                    sleep_ms(15),
+                ]);
+                results.join(",")
+            """)
+            assert result == "slept,slept,slept"
+
+            # Mixed sync + async host calls in one eval
+            @ctx.function
+            def double(n: int) -> int:
+                return n * 2
+
+            @ctx.function
+            async def slow_double(n: int) -> int:
+                await asyncio.sleep(0.001)
+                return n * 2
+
+            result = await ctx.eval_async("""
+                const a = double(5);              // sync, immediate
+                const b = await slow_double(10);  // async, awaited
+                a + b
+            """)
+            assert result == 30
+
+            # The motivating agent-code pattern: readFile + swarm
+            captured_reads: list[str] = []
+
+            @ctx.function
+            async def readFile(path: str) -> str:
+                captured_reads.append(path)
+                return "Date: 2024-01-01\nDate: 2024-01-02\nNotDate"
+
+            @ctx.function
+            async def swarm(tasks: list, opts: dict) -> dict:
+                return {
+                    "completed": len(tasks),
+                    "failed": 0,
+                    "results": [
+                        {
+                            "id": t["id"],
+                            "status": "completed",
+                            "result": '{"abbreviation_count": 1}',
+                        }
+                        for t in tasks
+                    ],
+                }
+
+            result = await ctx.eval_async("""
+                const raw = await readFile("/context.txt");
+                const lines = raw.split("\\n").filter(l => l.startsWith("Date:"));
+                const summary = await swarm(
+                    lines.map((line, i) => ({ id: `t_${i}`, description: line })),
+                    { concurrency: 32 }
+                );
+                let total = 0;
+                for (const r of summary.results) {
+                    if (r.status === "completed") {
+                        total += JSON.parse(r.result).abbreviation_count;
+                    }
+                }
+                total
+            """)
+            assert result == 2
+            assert captured_reads == ["/context.txt"]
+
+            # Cancellation: task.cancel() propagates through eval_async
+            task = asyncio.create_task(
+                ctx.eval_async("await sleep_ms(10000)")
+            )
+            await asyncio.sleep(0.01)  # let it start
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # JS catching HostCancellationError and recovering
+            # Cancel via asyncio.timeout; JS catches and returns sentinel;
+            # eval_async returns normally since cancellation was absorbed
+            async with asyncio.timeout(0.02):
+                try:
+                    caught = await ctx.eval_async("""
+                        try {
+                            await sleep_ms(10000);
+                            "unreachable"
+                        } catch (e) {
+                            e.name
+                        }
+                    """)
+                    assert caught == "HostCancellationError"
+                except asyncio.CancelledError:
+                    # Acceptable alternate path: cancellation propagated
+                    # before JS catch handler ran. Either outcome is a
+                    # valid implementation of §7.4 cancellation.
+                    pass
+
+            # DeadlockError: pending promise with no async work
+            with pytest.raises(DeadlockError):
+                await ctx.eval_async(
+                    "new Promise((resolve) => {})",
+                    module=False,
+                )
+
+            # ConcurrentEvalError: two eval_async at once on same context
+            async def first() -> None:
+                await ctx.eval_async("await sleep_ms(100)")
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(first())
+                await asyncio.sleep(0.01)  # let first start
+                with pytest.raises(ConcurrentEvalError):
+                    await ctx.eval_async("1 + 1")
+
+            # Sync eval + async host fn: clean failure
+            with pytest.raises(ConcurrentEvalError):
+                ctx.eval("sleep_ms(1)")  # returns a Promise sync eval can't drive
+
+            # Handle.await_promise
+            p = await ctx.eval_handle_async("Promise.resolve(42)")
+            resolved = await p.await_promise()
+            assert resolved.to_python() == 42
+            resolved.dispose()
+            p.dispose()

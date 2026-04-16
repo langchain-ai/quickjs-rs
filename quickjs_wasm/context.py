@@ -143,6 +143,7 @@ class Context:
         # loops inside QuickJS (§9).
         deadline = time.monotonic() + self._timeout
         self._bridge.set_deadline(deadline)
+        self._bridge._in_sync_eval = True
         try:
             try:
                 status, slot = self._bridge.eval(self._ctx_id, code, flags)
@@ -175,6 +176,7 @@ class Context:
                 ) from None
             finally:
                 self._bridge.set_deadline(None)
+                self._bridge._in_sync_eval = False
             if status < 0:
                 raise QuickJSError(f"shim error from qjs_eval: status={status}")
             if status == 1:
@@ -249,6 +251,7 @@ class Context:
         self._bridge.take_sync_eval_hit_async_call()
         deadline = time.monotonic() + self._timeout
         self._bridge.set_deadline(deadline)
+        self._bridge._in_sync_eval = True
         try:
             try:
                 status, slot = self._bridge.eval(self._ctx_id, code, flags)
@@ -268,6 +271,7 @@ class Context:
                 ) from None
             finally:
                 self._bridge.set_deadline(None)
+                self._bridge._in_sync_eval = False
 
             if status < 0:
                 raise QuickJSError(f"shim error from qjs_eval: status={status}")
@@ -412,28 +416,10 @@ class Context:
                 )
         self._bridge.set_deadline(deadline)
         try:
-            try:
-                status, slot = self._bridge.eval(self._ctx_id, code, flags)
-            except wasmtime.Trap as trap:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"JS evaluation exceeded timeout "
-                        f"(epoch trap: {trap})"
-                    ) from None
-                _log.debug("non-timeout wasm trap during eval_async: %s", trap)
-                raise JSError(
-                    "InternalError",
-                    f"wasm trap during JS evaluation: {trap}",
-                    None,
-                ) from None
-            if status < 0:
-                raise QuickJSError(f"shim error from qjs_eval: status={status}")
-            if status == 1:
-                try:
-                    self._raise_from_exception_slot(slot)
-                finally:
-                    self._bridge.slot_drop(self._ctx_id, slot)
-            settled_slot = await self._drive_promise_slot(slot, deadline)
+            settled_slot = await self._run_inside_task_group(
+                lambda: self._eval_for_async(code, flags, deadline),
+                deadline,
+            )
             # §7.4 / quickjs-ng async-eval envelope: when bit 3 (async)
             # was set, the resolved value is wrapped as {value: x, done}
             # (iterator-result shape). Unwrap the `value` property before
@@ -457,76 +443,93 @@ class Context:
             self._bridge.set_deadline(None)
             self._eval_async_in_flight = False
 
-    async def _drive_promise_slot(self, slot: int, deadline: float) -> int:
-        """§7.4 driving loop. Consumes ``slot`` (drops on any exit path
-        that doesn't return it); returns a new slot owning the settled
-        value.
+    def _eval_for_async(self, code: str, flags: int, deadline: float) -> int:
+        """Synchronous eval inside an already-open TaskGroup scope.
+        Any async host calls dispatched during this eval are scheduled
+        into the active TaskGroup (§7.4)."""
+        try:
+            status, slot = self._bridge.eval(self._ctx_id, code, flags)
+        except wasmtime.Trap as trap:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"JS evaluation exceeded timeout "
+                    f"(epoch trap: {trap})"
+                ) from None
+            _log.debug("non-timeout wasm trap during eval_async: %s", trap)
+            raise JSError(
+                "InternalError",
+                f"wasm trap during JS evaluation: {trap}",
+                None,
+            ) from None
+        if status < 0:
+            raise QuickJSError(f"shim error from qjs_eval: status={status}")
+        if status == 1:
+            try:
+                self._raise_from_exception_slot(slot)
+            finally:
+                self._bridge.slot_drop(self._ctx_id, slot)
+        return slot
 
-        Shared seam between ``eval_async`` / ``eval_handle_async``
-        (which provide an eval-result slot that may or may not be a
-        Promise) and ``Handle.await_promise`` (which provides a
-        user-held promise slot). All three traffic through this one
-        method so cancellation, deadline, absorption detection, and
-        exception routing live in one place.
+    async def _run_inside_task_group(
+        self,
+        get_slot: Callable[[], int],
+        deadline: float,
+    ) -> int:
+        """§7.4 driving flow: open a TaskGroup, obtain the initial
+        slot via ``get_slot`` (runs synchronously inside the group so
+        any async host calls dispatched during slot acquisition go
+        into the group), then drive the resulting promise.
 
-        Fast path: if ``slot`` is not a promise, it's already settled.
-        Pure-sync code like ``eval_async("1 + 2")`` skips the loop and
-        marshals directly.
+        The TaskGroup must wrap the initial eval (or handle dup) so
+        that host-call tasks scheduled *during* the initial
+        synchronous phase become children of the group. Otherwise
+        cancellation doesn't cascade to them, and they leak. This is
+        the correctness-load-bearing seam between sync dispatch and
+        structured-concurrency cancellation.
 
-        Cancellation: the loop is wrapped in a TaskGroup that owns all
-        in-flight host-call tasks (dispatcher checks
-        ``bridge._active_task_group``). When the outer task is
-        cancelled:
+        Shared by eval_async, eval_handle_async, and
+        Handle.await_promise.
+
+        Cancellation flow (§7.4):
 
         1. Driving loop's ``event.wait()`` raises CancelledError.
         2. We reject every in-flight Promise with a HostCancellationError
-           record via ``qjs_promise_reject`` — this must happen BEFORE
-           TaskGroup teardown so the JS-side rejection sees live
-           resolver callables.
-        3. Re-raise CancelledError to tear down the TaskGroup (cancels
-           remaining host-call tasks).
-        4. ``except* CancelledError`` outside the TaskGroup: clear the
-           deadline, run final pending-jobs drain so JS catch/finally
-           handlers execute, inspect the top-level promise state for
-           absorption detection.
-        5. Absorption: if the top-level promise is now fulfilled, JS
-           caught HostCancellationError and recovered — return the
-           fulfilled value normally. If rejected with a non-
-           HostCancellationError, JS caught the cancellation but its
-           cleanup itself threw — surface that exception. If still
-           rejected with HostCancellationError (the common case: no
-           catch handler), re-raise CancelledError.
+           record via ``qjs_promise_reject`` — BEFORE TaskGroup
+           teardown so the JS-side rejections see live resolvers.
+        3. Re-raise to tear down the TaskGroup (cancels remaining
+           host-call tasks).
+        4. ``except* CancelledError`` outside: clear deadline, run
+           final pending-jobs drain so JS catch/finally handlers
+           execute, inspect the top-level promise state for absorption.
+        5. Absorption: fulfilled → return value. Rejected with a
+           non-HostCancellationError → JS caught the cancel but its
+           cleanup threw; surface that. Rejected with
+           HostCancellationError or still pending → not absorbed,
+           re-raise CancelledError.
         """
-        # Fast path: non-promise results don't need the driving loop.
-        if not self._bridge.is_promise(self._ctx_id, slot):
-            return slot
-
-        # From here, `slot` holds the top-level promise.
-        #
-        # The loop runs inside a TaskGroup so cancellation cascades to
-        # in-flight host-call tasks. On cancellation we reject every
-        # in-flight Promise with a HostCancellationError record, let
-        # the TaskGroup tear down, then inspect the top-level promise
-        # state for absorption detection.
-        #
-        # `absorbed_result_slot` threads a fulfilled value out of the
-        # absorption path — we can't `return` from inside an except*
-        # block (Python 3.11 restriction), so the cancellation handler
-        # sets this variable and the return happens after the block.
         absorbed_result_slot: int | None = None
         cancelled = False
-        # Nested try so we can distinguish "CancelledError bubbled out
-        # of the TaskGroup" (handled via except* for absorption) from
-        # "a regular exception bubbled out" (DeadlockError, TimeoutError,
-        # JSError, HostError — re-raised unwrapped). TaskGroup wraps
-        # everything in BaseExceptionGroup on exit; the inner except*
-        # strips the cancel subgroup, and the outer except unwraps a
-        # single-exception group into its sole child so callers see a
-        # bare DeadlockError etc. rather than BaseExceptionGroup[...].
+        slot: int | None = None
         try:
             try:
                 async with asyncio.TaskGroup() as tg:
                     self._bridge._active_task_group = tg
+                    # Initial slot acquisition happens INSIDE the
+                    # TaskGroup scope so dispatched host-call tasks
+                    # become children. This is the fix for the
+                    # cancellation-leak bug: previously the TaskGroup
+                    # only wrapped the driving loop, and any tasks
+                    # dispatched during the initial eval were bare
+                    # loop.create_task'd children that the TaskGroup
+                    # never saw.
+                    slot = get_slot()
+                    # Fast path: non-promise result — no driving needed.
+                    if not self._bridge.is_promise(self._ctx_id, slot):
+                        # Nothing to drive. Return the slot as-is; the
+                        # TaskGroup exits cleanly with no children.
+                        fast_slot = slot
+                        slot = None  # transferred to caller
+                        return fast_slot
                     try:
                         while True:
                             # §7.4 step 1: drain microtasks first.
@@ -618,6 +621,10 @@ class Context:
                 # absorption.
                 self._bridge.set_deadline(None)
                 self._bridge._active_task_group = None
+                # slot is set by get_slot() before the TaskGroup
+                # scope opens; a CancelledError reaching here means
+                # we made it past slot acquisition.
+                assert slot is not None
                 try:
                     self._bridge.runtime_run_pending_jobs(
                         self._runtime._rt_id
@@ -715,11 +722,15 @@ class Context:
             # Final non-cancellation cleanup. The cancellation path
             # does its own set_deadline(None) + slot_drop inside the
             # except*; redoing here for that path would be benign
-            # (slot_drop on a freed slot is a shim-level no-op per §6.4).
+            # (slot_drop on a freed slot is a shim-level no-op per
+            # §6.4).
             if not cancelled:
                 self._bridge.set_deadline(None)
                 self._bridge._active_task_group = None
-                self._bridge.slot_drop(self._ctx_id, slot)
+                # `slot` is None only on the fast-path return where
+                # we already handed ownership to the caller.
+                if slot is not None:
+                    self._bridge.slot_drop(self._ctx_id, slot)
 
         # Reached only on absorption: JS caught HostCancellationError
         # and the promise fulfilled with a recovery value.
