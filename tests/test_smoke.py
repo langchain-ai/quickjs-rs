@@ -21,11 +21,16 @@ from quickjs_wasm import (
 )
 
 
-def test_smoke_arithmetic() -> None:
-    """Greened commit #1: synchronous eval of a trivial arithmetic expression."""
+def test_smoke_primitives() -> None:
+    """Greens the primitive block of §13: arithmetic, string, bool, null, undefined, float."""
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:
             assert ctx.eval("1 + 2") == 3
+            assert ctx.eval("'hello'") == "hello"
+            assert ctx.eval("true") is True
+            assert ctx.eval("null") is None
+            assert ctx.eval("undefined") is None
+            assert ctx.eval("1.5") == 1.5
 
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")

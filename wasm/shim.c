@@ -358,6 +358,43 @@ static int32_t encode_number(ShimContext *c, double d) {
     return 0;
 }
 
+/* Encode a string (UTF-8 bytes, length already known) as a msgpack str. */
+static int32_t encode_str(ShimContext *c, const uint8_t *bytes, size_t len) {
+    uint32_t header_len;
+    if (len <= 31) {
+        header_len = 1;
+    } else if (len <= 0xff) {
+        header_len = 2;
+    } else if (len <= 0xffff) {
+        header_len = 3;
+    } else if (len <= 0xffffffffu) {
+        header_len = 5;
+    } else {
+        return -1; /* msgpack str max is 2^32-1 bytes */
+    }
+    if (!scratch_reserve(c, header_len + (uint32_t)len)) return -1;
+    uint8_t *p = c->scratch;
+    if (len <= 31) {
+        p[0] = (uint8_t)(0xa0 | len);
+    } else if (len <= 0xff) {
+        p[0] = 0xd9;
+        p[1] = (uint8_t)len;
+    } else if (len <= 0xffff) {
+        p[0] = 0xda;
+        p[1] = (uint8_t)(len >> 8);
+        p[2] = (uint8_t)len;
+    } else {
+        p[0] = 0xdb;
+        p[1] = (uint8_t)(len >> 24);
+        p[2] = (uint8_t)(len >> 16);
+        p[3] = (uint8_t)(len >> 8);
+        p[4] = (uint8_t)len;
+    }
+    if (len > 0) memcpy(p + header_len, bytes, len);
+    c->scratch_len = header_len + (uint32_t)len;
+    return 0;
+}
+
 QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
                                   uint32_t *out_ptr, uint32_t *out_len) {
     ShimContext *c = ctx_lookup(ctx_id);
@@ -372,6 +409,31 @@ QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
         rc = encode_number(c, (double)JS_VALUE_GET_INT(v));
     } else if (JS_TAG_IS_FLOAT64(tag)) {
         rc = encode_number(c, JS_VALUE_GET_FLOAT64(v));
+    } else if (tag == JS_TAG_BOOL) {
+        if (!scratch_reserve(c, 1)) return -1;
+        c->scratch[0] = JS_VALUE_GET_BOOL(v) ? 0xc3 : 0xc2;
+        c->scratch_len = 1;
+        rc = 0;
+    } else if (tag == JS_TAG_NULL) {
+        if (!scratch_reserve(c, 1)) return -1;
+        c->scratch[0] = 0xc0; /* nil */
+        c->scratch_len = 1;
+        rc = 0;
+    } else if (tag == JS_TAG_UNDEFINED) {
+        /* §8: ext type 0, empty body. fixext1 is the smallest ext encoding
+         * but takes a 1-byte body. Use ext8 with length=0. */
+        if (!scratch_reserve(c, 3)) return -1;
+        c->scratch[0] = 0xc7; /* ext8 */
+        c->scratch[1] = 0x00; /* length */
+        c->scratch[2] = 0x00; /* type = 0 (undefined) */
+        c->scratch_len = 3;
+        rc = 0;
+    } else if (tag == JS_TAG_STRING || tag == JS_TAG_STRING_ROPE) {
+        size_t slen;
+        const char *s = JS_ToCStringLen(c->ctx, &slen, v);
+        if (!s) return -1;
+        rc = encode_str(c, (const uint8_t *)s, slen);
+        JS_FreeCString(c->ctx, s);
     } else {
         /* All other branches land in later commits. */
         return -1;

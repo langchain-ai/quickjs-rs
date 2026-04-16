@@ -7,6 +7,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, overload
 
 from quickjs_wasm import _msgpack
+from quickjs_wasm._msgpack import Undefined
 from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ class Context:
         self._ctx_id = ctx_id
         self._timeout = timeout
         self._closed = False
+        self.preserve_undefined = False
 
     def __enter__(self) -> Context:
         return self
@@ -75,7 +77,10 @@ class Context:
                     "value type is not yet supported by qjs_to_msgpack; "
                     "additional branches land in subsequent commits"
                 )
-            return _msgpack.decode(payload)
+            value = _msgpack.decode(payload)
+            if isinstance(value, Undefined) and not self.preserve_undefined:
+                return None
+            return value
         finally:
             self._bridge.slot_drop(self._ctx_id, slot)
 
