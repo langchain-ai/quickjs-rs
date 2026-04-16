@@ -49,6 +49,26 @@ typedef struct DynBuf {
     uint32_t len;
 } DynBuf;
 
+/* §6.2 / §6.4 (v0.2): pending map entries for async host-call Promises.
+ *
+ * When JS calls an async host function, shim_host_call_async_trampoline
+ * creates a Promise via JS_NewPromiseCapability, stashes the (resolve,
+ * reject) callables in this table keyed by a fresh pending_id, and
+ * returns that pending_id to the Python host via host_call_async. The
+ * host later calls qjs_promise_resolve / qjs_promise_reject to settle.
+ *
+ * Pending IDs are monotonically increasing, starting at 1 — 0 is
+ * reserved as a sentinel "no pending call" value, matching the
+ * slot-0-is-reserved convention from §6.1. The two tables don't share
+ * indexing, but the convention is worth keeping consistent so a future
+ * reader can't misread a 0 as a valid ID.
+ */
+typedef struct PendingEntry {
+    uint32_t id;       /* 0 = free slot */
+    JSValue resolve;
+    JSValue reject;
+} PendingEntry;
+
 typedef struct ShimContext {
     JSContext *ctx;
     Slot *slots;
@@ -56,6 +76,9 @@ typedef struct ShimContext {
     uint32_t slot_count; /* high-water mark of allocated slots */
     uint32_t free_head; /* 0 means empty */
     DynBuf scratch;
+    PendingEntry *pending;
+    uint32_t pending_cap;
+    uint32_t pending_count; /* high-water mark of used slots */
     bool alive;
 } ShimContext;
 
@@ -99,6 +122,8 @@ static ShimContext *ctx_lookup(uint32_t ctx_id) {
     return c;
 }
 
+#define PENDING_INITIAL_CAP 8
+
 static uint32_t ctx_alloc(JSContext *ctx) {
     for (uint32_t i = 0; i < MAX_CONTEXTS; i++) {
         if (!g_contexts[i].alive) {
@@ -114,6 +139,15 @@ static uint32_t ctx_alloc(JSContext *ctx) {
                 free(c->slots);
                 return 0;
             }
+            c->pending = (PendingEntry *)calloc(PENDING_INITIAL_CAP,
+                                                sizeof(PendingEntry));
+            if (!c->pending) {
+                free(c->slots);
+                dynbuf_free(&c->scratch);
+                return 0;
+            }
+            c->pending_cap = PENDING_INITIAL_CAP;
+            c->pending_count = 0;
             c->alive = true;
             return i + 1;
         }
@@ -129,10 +163,81 @@ static void ctx_release(ShimContext *c) {
             JS_FreeValue(c->ctx, c->slots[i].value);
         }
     }
+    /* §6.4 v0.2: drop pending map entries. Late resolve/reject calls
+     * from the host become benign no-ops because the table is gone. */
+    for (uint32_t i = 0; i < c->pending_count; i++) {
+        if (c->pending[i].id != 0) {
+            JS_FreeValue(c->ctx, c->pending[i].resolve);
+            JS_FreeValue(c->ctx, c->pending[i].reject);
+        }
+    }
+    free(c->pending);
     free(c->slots);
     dynbuf_free(&c->scratch);
     JS_FreeContext(c->ctx);
     memset(c, 0, sizeof(*c));
+}
+
+/* Store (resolve, reject) in the pending map under the host-assigned
+ * pending_id. The entry owns one refcount on each JSValue; they are
+ * freed either at settlement (qjs_promise_resolve/reject) or at
+ * context teardown (ctx_release). Returns 0 on success, -1 on OOM or
+ * on id-collision (host supplied a pending_id that's already live,
+ * violating §6.4's "unique per context" invariant). */
+static int32_t pending_store(ShimContext *c, uint32_t pending_id,
+                             JSValue resolve, JSValue reject) {
+    if (pending_id == 0) return -1;
+    /* Id-collision check doubles as a free-slot finder. */
+    uint32_t free_idx = UINT32_MAX;
+    for (uint32_t i = 0; i < c->pending_count; i++) {
+        if (c->pending[i].id == pending_id) return -1; /* collision */
+        if (c->pending[i].id == 0 && free_idx == UINT32_MAX) free_idx = i;
+    }
+    if (free_idx == UINT32_MAX) {
+        if (c->pending_count >= c->pending_cap) {
+            uint32_t new_cap = c->pending_cap * 2;
+            PendingEntry *n = (PendingEntry *)realloc(
+                c->pending, new_cap * sizeof(PendingEntry));
+            if (!n) return -1;
+            memset(n + c->pending_cap, 0,
+                   (new_cap - c->pending_cap) * sizeof(PendingEntry));
+            c->pending = n;
+            c->pending_cap = new_cap;
+        }
+        free_idx = c->pending_count++;
+    }
+    c->pending[free_idx].id = pending_id;
+    c->pending[free_idx].resolve = resolve;
+    c->pending[free_idx].reject = reject;
+    return 0;
+}
+
+/* Find a pending entry by id. Returns the array index, or -1. */
+static int32_t pending_find(ShimContext *c, uint32_t id) {
+    if (id == 0) return -1;
+    for (uint32_t i = 0; i < c->pending_count; i++) {
+        if (c->pending[i].id == id) return (int32_t)i;
+    }
+    return -1;
+}
+
+/* Detach a pending entry by array index and return its (resolve, reject)
+ * to the caller. The caller then owns the refcounts and is responsible
+ * for calling JS_Call on the appropriate callable and then freeing both.
+ *
+ * §6.4 ordering: detach BEFORE calling JS. If the JS_Call triggers a
+ * re-entrant qjs_promise_resolve/reject (e.g. via a .then handler), the
+ * re-entrant call sees the id as already-settled and returns negative
+ * status — no double-resolve, no double-free. The caller's "finally"-
+ * equivalent (JS_FreeValue on both callables) handles JSValue lifetime.
+ */
+static void pending_detach(ShimContext *c, int32_t idx,
+                           JSValue *out_resolve, JSValue *out_reject) {
+    *out_resolve = c->pending[idx].resolve;
+    *out_reject = c->pending[idx].reject;
+    c->pending[idx].id = 0;
+    c->pending[idx].resolve = JS_UNDEFINED;
+    c->pending[idx].reject = JS_UNDEFINED;
 }
 
 /* Returns a slot ID (>=1) owning one refcount on `value`, or 0 on failure
@@ -1333,13 +1438,121 @@ QJS_EXPORT uint32_t qjs_type_of(uint32_t ctx_id, uint32_t slot) {
 }
 
 QJS_EXPORT bool qjs_is_promise(uint32_t ctx_id, uint32_t slot) {
-    (void)ctx_id; (void)slot;
-    return false;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !slot_valid(c, slot)) return false;
+    return JS_IsPromise(c->slots[slot].value);
 }
 
 QJS_EXPORT int32_t qjs_promise_state(uint32_t ctx_id, uint32_t slot) {
-    (void)ctx_id; (void)slot;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !slot_valid(c, slot)) return -1;
+    JSPromiseStateEnum st = JS_PromiseState(c->ctx, c->slots[slot].value);
+    switch (st) {
+        case JS_PROMISE_PENDING:   return 0;
+        case JS_PROMISE_FULFILLED: return 1;
+        case JS_PROMISE_REJECTED:  return 2;
+        default:                   return -1; /* not a promise */
+    }
+}
+
+/* v0.2: §6.2 promise settlement exports. */
+
+QJS_EXPORT int32_t qjs_promise_result(uint32_t ctx_id, uint32_t promise_slot,
+                                      uint32_t *out_slot) {
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot || !slot_valid(c, promise_slot)) return -1;
+    *out_slot = 0;
+    JSValue p = c->slots[promise_slot].value;
+    JSPromiseStateEnum st = JS_PromiseState(c->ctx, p);
+    if (st == JS_PROMISE_PENDING || st == JS_PROMISE_NOT_A_PROMISE) return -1;
+    JSValue result = JS_PromiseResult(c->ctx, p);
+    uint32_t s = slot_alloc(c, result);
+    if (s == 0) { JS_FreeValue(c->ctx, result); return -1; }
+    *out_slot = s;
+    return 0;
+}
+
+/* Decode a msgpack payload into a JSValue. Returns JS_EXCEPTION on
+ * decode failure (with the context's current exception set, if any). */
+static JSValue decode_msgpack_payload(ShimContext *c,
+                                      uint32_t data_ptr, uint32_t data_len) {
+    DecCursor cur = {
+        .data = (const uint8_t *)(uintptr_t)data_ptr,
+        .len = data_len,
+        .off = 0,
+        .error = false,
+    };
+    JSValue v = decode_value(c, &cur, 0);
+    if (cur.error || cur.off != cur.len) {
+        if (!JS_IsException(v)) JS_FreeValue(c->ctx, v);
+        return JS_EXCEPTION;
+    }
+    return v;
+}
+
+/* Common settlement path for resolve/reject.
+ *
+ * §6.4 ordering (worth keeping — the user specifically flagged this):
+ * detach the pending map entry BEFORE calling the JS resolver. If
+ * the JS_Call re-enters qjs_promise_resolve/reject for the same id
+ * (e.g. via a .then handler registered synchronously on the Promise),
+ * the re-entrant call sees the id as already-settled and returns
+ * negative status. No double-resolve, no double-free.
+ *
+ * JSValue lifetime: the (resolve, reject) refcounts are owned by the
+ * pending map until detach. After detach, we own them locally — we
+ * use the relevant one (resolve if resolving, reject if rejecting)
+ * via JS_Call and then free BOTH regardless of whether JS_Call threw.
+ * That's the "finally-equivalent" piece.
+ */
+static int32_t settle_pending(ShimContext *c, uint32_t pending_id,
+                              uint32_t data_ptr, uint32_t data_len,
+                              bool reject) {
+    if (!c) return -1;
+    int32_t idx = pending_find(c, pending_id);
+    if (idx < 0) return -1;
+
+    /* Decode msgpack first — if this fails, leave the pending entry in
+     * place so the caller can retry (but we report an error). */
+    JSValue val = decode_msgpack_payload(c, data_ptr, data_len);
+    if (JS_IsException(val)) {
+        JSValue swallowed = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, swallowed);
+        return -1;
+    }
+
+    /* §6.4 ordering: detach BEFORE JS_Call. */
+    JSValue resolve, reject_cb;
+    pending_detach(c, idx, &resolve, &reject_cb);
+    JSValue target = reject ? reject_cb : resolve;
+
+    JSValue args[1] = { val };
+    JSValue r = JS_Call(c->ctx, target, JS_UNDEFINED, 1, args);
+    /* Cleanup (finally-equivalent): free resolvers + arg + JS_Call
+     * return regardless of whether it threw. */
+    if (JS_IsException(r)) {
+        JSValue swallowed = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, swallowed);
+    }
+    JS_FreeValue(c->ctx, r);
+    JS_FreeValue(c->ctx, val);
+    JS_FreeValue(c->ctx, resolve);
+    JS_FreeValue(c->ctx, reject_cb);
+    return 0;
+}
+
+QJS_EXPORT int32_t qjs_promise_resolve(uint32_t ctx_id, uint32_t pending_id,
+                                       uint32_t value_msgpack_ptr,
+                                       uint32_t value_msgpack_len) {
+    return settle_pending(ctx_lookup(ctx_id), pending_id,
+                          value_msgpack_ptr, value_msgpack_len, false);
+}
+
+QJS_EXPORT int32_t qjs_promise_reject(uint32_t ctx_id, uint32_t pending_id,
+                                      uint32_t reason_msgpack_ptr,
+                                      uint32_t reason_msgpack_len) {
+    return settle_pending(ctx_lookup(ctx_id), pending_id,
+                          reason_msgpack_ptr, reason_msgpack_len, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1451,9 +1664,123 @@ static JSValue shim_host_call_trampoline(JSContext *ctx, JSValueConst this_val,
     return decoded;
 }
 
+/* v0.2 async trampoline. Flow:
+ *   1. Encode argv as msgpack (fresh DynBuf so any nested eval doesn't
+ *      clobber the args buffer via the context scratch).
+ *   2. Create a JS Promise via JS_NewPromiseCapability.
+ *   3. Call host_call_async(fn_id, args, &pending_id). The host
+ *      allocates the pending_id, records the in-flight call, and
+ *      schedules the real work (e.g. asyncio task). Non-zero return
+ *      means the host synchronously rejected — no settlement expected.
+ *   4. Store (pending_id, resolve, reject) in the shim-side map so
+ *      qjs_promise_resolve/reject can look them up later.
+ *   5. Return the Promise to JS.
+ *
+ * If host rejected synchronously (step 3 returned non-zero): reject
+ * the Promise locally with a marker HostError. The callables are
+ * used immediately and freed; nothing is stored in the pending map.
+ */
+static JSValue shim_host_call_async_trampoline(JSContext *ctx,
+                                               JSValueConst this_val,
+                                               int argc, JSValueConst *argv,
+                                               int magic,
+                                               JSValueConst *func_data) {
+    (void)this_val; (void)magic;
+
+    int32_t ctx_id_val = 0, fn_id_val = 0;
+    if (JS_ToInt32(ctx, &ctx_id_val, func_data[0]) < 0) return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &fn_id_val, func_data[1]) < 0) return JS_EXCEPTION;
+    uint32_t ctx_id = (uint32_t)ctx_id_val;
+    uint32_t fn_id = (uint32_t)fn_id_val;
+
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c) return JS_ThrowInternalError(ctx, "host shim-context vanished");
+
+    DynBuf args;
+    if (!dynbuf_init(&args, 64)) {
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    int32_t off = encode_array_header(&args, 0, (uint32_t)argc);
+    if (off < 0) {
+        dynbuf_free(&args);
+        return JS_ThrowInternalError(ctx, "host arg encode failed");
+    }
+    for (int i = 0; i < argc; i++) {
+        off = encode_value(c, &args, argv[i], off, 0);
+        if (off < 0) {
+            dynbuf_free(&args);
+            return JS_ThrowTypeError(ctx,
+                "host function arg %d is not marshalable per §8", i);
+        }
+    }
+    args.len = (uint32_t)off;
+
+    JSValue resolving[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, resolving);
+    if (JS_IsException(promise)) {
+        dynbuf_free(&args);
+        return promise;
+    }
+
+    uint32_t pending_id = 0;
+    int32_t rc = host_call_async(fn_id,
+                                 (uint32_t)(uintptr_t)args.data, args.len,
+                                 &pending_id);
+    dynbuf_free(&args);
+
+    if (rc != 0 || pending_id == 0) {
+        /* Host rejected synchronously, or assigned a sentinel id.
+         * Reject the Promise locally and drop the callables. Note
+         * the ordering: we use resolving[1] immediately rather than
+         * storing it first and then looking it up — no re-entrancy
+         * concern because nothing is in the pending map to look up. */
+        JSValue reason = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, reason, "name",
+                          JS_NewString(ctx, "HostError"));
+        JS_SetPropertyStr(ctx, reason, "message",
+                          JS_NewString(ctx, "host rejected async call"));
+        JSValue args_arr[1] = { reason };
+        JSValue r = JS_Call(ctx, resolving[1], JS_UNDEFINED, 1, args_arr);
+        if (JS_IsException(r)) {
+            JSValue swallowed = JS_GetException(ctx);
+            JS_FreeValue(ctx, swallowed);
+        }
+        JS_FreeValue(ctx, r);
+        JS_FreeValue(ctx, reason);
+        JS_FreeValue(ctx, resolving[0]);
+        JS_FreeValue(ctx, resolving[1]);
+        return promise;
+    }
+
+    if (pending_store(c, pending_id, resolving[0], resolving[1]) < 0) {
+        /* Id collision or OOM. Treat as synchronous rejection. */
+        JSValue reason = JS_NewError(ctx);
+        JS_SetPropertyStr(ctx, reason, "name",
+                          JS_NewString(ctx, "HostError"));
+        JS_SetPropertyStr(ctx, reason, "message",
+                          JS_NewString(ctx,
+                              "shim pending_id collision or OOM"));
+        JSValue args_arr[1] = { reason };
+        JSValue r = JS_Call(ctx, resolving[1], JS_UNDEFINED, 1, args_arr);
+        if (JS_IsException(r)) {
+            JSValue swallowed = JS_GetException(ctx);
+            JS_FreeValue(ctx, swallowed);
+        }
+        JS_FreeValue(ctx, r);
+        JS_FreeValue(ctx, reason);
+        JS_FreeValue(ctx, resolving[0]);
+        JS_FreeValue(ctx, resolving[1]);
+    }
+    /* On success, resolving[0]/[1] are owned by the pending map now. */
+
+    return promise;
+}
+
+/* magic: 0 = sync trampoline, 1 = async trampoline. */
 QJS_EXPORT int32_t qjs_register_host_function(uint32_t ctx_id,
                                               uint32_t name_ptr, uint32_t name_len,
-                                              uint32_t fn_id) {
+                                              uint32_t fn_id,
+                                              uint32_t is_async) {
     ShimContext *c = ctx_lookup(ctx_id);
     if (!c) return -1;
 
@@ -1467,7 +1794,11 @@ QJS_EXPORT int32_t qjs_register_host_function(uint32_t ctx_id,
         JS_NewInt32(c->ctx, (int32_t)fn_id),
     };
 
-    JSValue fn = JS_NewCFunctionData(c->ctx, shim_host_call_trampoline,
+    JSCFunctionData *trampoline = is_async
+        ? shim_host_call_async_trampoline
+        : shim_host_call_trampoline;
+
+    JSValue fn = JS_NewCFunctionData(c->ctx, trampoline,
                                      /*length=*/0, /*magic=*/0,
                                      /*data_len=*/2, data);
     /* JS_NewCFunctionData dups the data values, so release our originals. */

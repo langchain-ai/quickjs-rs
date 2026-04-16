@@ -93,12 +93,36 @@ QJS_EXPORT bool     qjs_is_promise(uint32_t ctx, uint32_t slot);
 /* 0 = pending, 1 = fulfilled, 2 = rejected, -1 = not a promise */
 QJS_EXPORT int32_t  qjs_promise_state(uint32_t ctx, uint32_t slot);
 
+/* ---- Promise settlement and inspection (§6.2, v0.2) ---------------- */
+
+/* Return the fulfillment value / rejection reason as a fresh slot.
+ * Returns negative status on a pending promise — callers must check
+ * qjs_promise_state first. */
+QJS_EXPORT int32_t qjs_promise_result(uint32_t ctx, uint32_t promise_slot,
+                                      uint32_t *out_slot);
+
+/* Settle a pending promise keyed by the pending_id returned from
+ * host_call_async. The value/reason is decoded from msgpack in guest
+ * memory. Calling resolve or reject twice on the same pending_id, or
+ * on an unknown one, returns negative status (no side effects).
+ * §6.4 v0.2 invariant. */
+QJS_EXPORT int32_t qjs_promise_resolve(uint32_t ctx, uint32_t pending_id,
+                                       uint32_t value_msgpack_ptr,
+                                       uint32_t value_msgpack_len);
+QJS_EXPORT int32_t qjs_promise_reject(uint32_t ctx, uint32_t pending_id,
+                                      uint32_t reason_msgpack_ptr,
+                                      uint32_t reason_msgpack_len);
+
 /* ---- Host functions (§6.2) ----------------------------------------- */
 
+/* is_async: 0 = dispatches through host_call (sync), returns value directly.
+ *           1 = dispatches through host_call_async (v0.2), creates a JS
+ *               Promise and settles via qjs_promise_resolve/reject. */
 QJS_EXPORT int32_t qjs_register_host_function(uint32_t ctx,
                                               uint32_t name_ptr,
                                               uint32_t name_len,
-                                              uint32_t fn_id);
+                                              uint32_t fn_id,
+                                              uint32_t is_async);
 
 /* ---- Guest memory (§6.2) ------------------------------------------- */
 
@@ -107,13 +131,24 @@ QJS_EXPORT void     qjs_free(uint32_t ptr);
 
 /* ---- Imports (§6.3) ------------------------------------------------ */
 
-/* Dispatched when JS calls a host-registered function. The host writes
- * its reply into a qjs_malloc-allocated guest buffer and hands back the
- * pointer/length; the shim qjs_free's it after consuming. */
+/* Dispatched when JS calls a sync host-registered function. The host
+ * writes its reply into a qjs_malloc-allocated guest buffer and hands
+ * back the pointer/length; the shim qjs_free's it after consuming. */
 __attribute__((import_name("host_call")))
 int32_t host_call(uint32_t fn_id,
                   uint32_t args_ptr, uint32_t args_len,
                   uint32_t *out_ptr, uint32_t *out_len);
+
+/* v0.2: Dispatched when JS calls an async host-registered function.
+ * The host schedules the real work, returns an opaque pending_id in
+ * *out_pending_id, and settles the promise later via
+ * qjs_promise_resolve / qjs_promise_reject. Non-zero return means the
+ * host synchronously rejected the call (no Promise is created, no
+ * settlement expected). */
+__attribute__((import_name("host_call_async")))
+int32_t host_call_async(uint32_t fn_id,
+                        uint32_t args_ptr, uint32_t args_len,
+                        uint32_t *out_pending_id);
 
 /* Non-zero return aborts the currently running JS. */
 __attribute__((import_name("host_interrupt")))

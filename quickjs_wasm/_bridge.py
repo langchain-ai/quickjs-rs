@@ -99,9 +99,32 @@ class Bridge:
             self._host_call_dispatch,
         )
 
+        # env::host_call_async — v0.2, §6.3. Shim calls this when JS
+        # invokes a registered async host function. Host schedules
+        # the work, allocates a pending_id, writes it to *out_pending_id,
+        # and returns 0. Later calls qjs_promise_resolve/reject keyed
+        # by that id.
+        #
+        # Full bridge-side dispatch (task scheduling, Promise settlement
+        # wiring) lands in §17.2 step 3. For step 2 this stub returns -1
+        # (synchronous rejection) so the shim's reject path is the
+        # exercised code path. Step 3 replaces this with the real
+        # scheduler.
+        linker.define_func(
+            "env",
+            "host_call_async",
+            wasmtime.FuncType([i32, i32, i32, i32], [i32]),
+            self._host_call_async_dispatch,
+        )
+
         # fn_id → Python callable. Populated by Bridge.register_host_function.
         self._host_fns: dict[int, Callable[..., Any]] = {}
+        # is_async flag per fn_id. Shared index space with _host_fns.
+        self._host_fns_async: dict[int, bool] = {}
         self._next_fn_id = 1
+        # v0.2: pending_id allocator for async host calls. Monotonic,
+        # starts at 1 (0 is reserved as "no pending call" per §6.4).
+        self._next_pending_id = 1
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
@@ -470,31 +493,120 @@ class Bridge:
     def type_of(self, ctx: int, slot: int) -> int:
         return int(self._call("qjs_type_of", ctx, slot))
 
+    def is_promise(self, ctx: int, slot: int) -> bool:
+        return bool(self._call("qjs_is_promise", ctx, slot))
+
+    def promise_state(self, ctx: int, slot: int) -> int:
+        """0 = pending, 1 = fulfilled, 2 = rejected, -1 = not a promise."""
+        return int(self._call("qjs_promise_state", ctx, slot))
+
+    def promise_result(self, ctx: int, slot: int) -> tuple[int, int]:
+        """Return (status, result_slot). status: 0 ok, <0 shim error."""
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            raise MemoryError("guest OOM allocating promise_result out-slot")
+        try:
+            status = int(self._call("qjs_promise_result", ctx, slot, out_ptr))
+            result_slot = int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+            return status, result_slot
+        finally:
+            self.free(out_ptr)
+
+    def promise_resolve(
+        self, ctx: int, pending_id: int, value: Any
+    ) -> int:
+        payload = _msgpack.encode(value)
+        data_ptr = self.malloc(len(payload)) if payload else 0
+        if payload and data_ptr == 0:
+            raise MemoryError("guest OOM allocating promise_resolve payload")
+        try:
+            if payload:
+                self.write_bytes(data_ptr, payload)
+            return int(
+                self._call(
+                    "qjs_promise_resolve", ctx, pending_id, data_ptr, len(payload)
+                )
+            )
+        finally:
+            self.free(data_ptr)
+
+    def promise_reject(
+        self, ctx: int, pending_id: int, reason: Any
+    ) -> int:
+        payload = _msgpack.encode(reason)
+        data_ptr = self.malloc(len(payload)) if payload else 0
+        if payload and data_ptr == 0:
+            raise MemoryError("guest OOM allocating promise_reject payload")
+        try:
+            if payload:
+                self.write_bytes(data_ptr, payload)
+            return int(
+                self._call(
+                    "qjs_promise_reject", ctx, pending_id, data_ptr, len(payload)
+                )
+            )
+        finally:
+            self.free(data_ptr)
+
     def slot_dup(self, ctx: int, slot: int) -> int:
         return int(self._call("qjs_slot_dup", ctx, slot))
 
     # ---- Host-function registry -----------------------------------------
 
     def register_host_function(
-        self, ctx: int, name: str, fn: Callable[..., Any]
+        self,
+        ctx: int,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        is_async: bool = False,
     ) -> None:
         fn_id = self._next_fn_id
         self._next_fn_id += 1
         self._host_fns[fn_id] = fn
+        self._host_fns_async[fn_id] = is_async
         name_ptr, name_len = self._write_key(name)
         try:
             rc = int(
                 self._call(
-                    "qjs_register_host_function", ctx, name_ptr, name_len, fn_id
+                    "qjs_register_host_function",
+                    ctx, name_ptr, name_len, fn_id,
+                    1 if is_async else 0,
                 )
             )
             if rc != 0:
                 del self._host_fns[fn_id]
+                del self._host_fns_async[fn_id]
                 raise RuntimeError(
                     f"qjs_register_host_function failed: status={rc}"
                 )
         finally:
             self.free(name_ptr)
+
+    def _host_call_async_dispatch(
+        self,
+        fn_id: int,
+        args_ptr: int,
+        args_len: int,
+        out_pending_id_addr: int,
+    ) -> int:
+        """env::host_call_async — §6.3, v0.2.
+
+        §17.2 step 2 stub: returns -1 (synchronous rejection) so the
+        shim-side reject path is exercised end-to-end. The real
+        implementation (step 3) allocates a pending_id, schedules an
+        asyncio task, and returns 0 with the id written to
+        ``*out_pending_id``. Until step 3 lands, any JS call to a
+        registered async host function lands on a rejected Promise with
+        a marker ``HostError``.
+
+        Reading/ignoring args is deliberate: the real dispatch will
+        decode them, but the stub has nothing to do with them. The
+        ``out_pending_id_addr`` write is skipped because the shim only
+        consults ``*out_pending_id`` when the return is 0.
+        """
+        del fn_id, args_ptr, args_len, out_pending_id_addr
+        return -1
 
     def _host_call_dispatch(
         self,
@@ -591,6 +703,11 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_call",
     "qjs_new_instance",
     "qjs_type_of",
+    "qjs_is_promise",
+    "qjs_promise_state",
+    "qjs_promise_result",
+    "qjs_promise_resolve",
+    "qjs_promise_reject",
     "qjs_register_host_function",
     "qjs_malloc",
     "qjs_free",
