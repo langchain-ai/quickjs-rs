@@ -196,6 +196,11 @@ int32_t qjs_from_msgpack(uint32_t ctx, uint32_t data_ptr, uint32_t data_len,
                          uint32_t *out_slot);
 int32_t qjs_exception_to_msgpack(uint32_t ctx, uint32_t exc_slot,
                                  uint32_t *out_ptr, uint32_t *out_len);
+```
+
+The scratch buffer is per-context, grows in place via `realloc` when a value exceeds current capacity, and starts at 64 KB. There is no separate malloc-and-return path for large values — the single ownership model (scratch owned by shim, invalidated on next marshaling call on this context) applies uniformly. Callers never free marshaling output.
+
+```c
 
 /* Type inspection (does not traverse). Returns a qjs_value_kind. */
 uint32_t qjs_type_of(uint32_t ctx, uint32_t slot);
@@ -742,7 +747,7 @@ Additionally: all tests in §11.1 pass; `mypy quickjs_wasm` is clean; `ruff chec
 ## 15. Open decisions to revisit
 
 - **QuickJS build config**: `CONFIG_BIGNUM=y` is assumed. Confirm compile size is acceptable (~150 KB added). If not, bigint support becomes optional.
-- **Scratch buffer sizing**: 1 MB default for the msgpack scratch buffer. Values larger than this force a guest-side malloc-and-return path. Tune after profiling.
+- **Scratch starting size**: 64 KB per context. Tune after profiling against realistic agent workloads.
 - **ResourceWarning on leaked handles**: keep as warning, or escalate to always-error under a config flag? Default: warning, consistent with stdlib.
 - **Python 3.9 support**: dropping costs us nothing and gains `match` and `|`-union types. Staying at 3.10 minimum.
 - **Windows wheel testing**: wasmtime-py supports Windows, but WASI filesystem behavior differs. Smoke-test only; real platform coverage when someone files a bug.
