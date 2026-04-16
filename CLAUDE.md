@@ -166,6 +166,22 @@ If the spec is ambiguous or contradicts itself, stop and ask the user rather tha
 
 If an implementation approach requires a decision the spec doesn't cover (e.g. an internal data structure choice), pick the simpler option and note the choice in a code comment referencing the spec section it extends.
 
+## Deferred-feature tests
+
+Some tests use `pytest.raises(NotImplementedError)` to lock in behavior
+for features the spec defers to a later version. When the deferred
+version ships, these tests flip from "asserts raises" to "asserts works."
+
+A feature-flip commit is always a spec-changing commit:
+- The spec section that declared the deferral (e.g. §7.2 "raises
+  NotImplementedError in v0.1") must be updated in the same commit.
+- The test body flips from the raises assertion to the real assertions.
+- The implementation lands.
+
+Do not ship a feature-flip commit that leaves the spec claiming the
+feature still raises NotImplementedError. That's a silent spec-code
+disagreement of exactly the kind §"Authoritative docs" forbids.
+
 ## File map
 
 ```
