@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quickjs-wasm"
+version = "0.1.0"
+description = "Sandboxed JavaScript execution for Python, hosted via a WASI build of QuickJS."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "LangChain" },
+]
+keywords = ["quickjs", "javascript", "wasm", "wasi", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Interpreters",
+]
+dependencies = [
+    "wasmtime>=27.0.0",
+    "msgpack>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/langchain-ai/quickjs-wasm"
+Issues = "https://github.com/langchain-ai/quickjs-wasm/issues"
+
+[tool.setuptools.packages.find]
+include = ["quickjs_wasm*"]
+
+[tool.setuptools.package-data]
+quickjs_wasm = ["py.typed", "_resources/quickjs.wasm"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["quickjs_wasm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::ResourceWarning"]

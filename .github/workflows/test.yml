@@ -1,0 +1,48 @@
+name: test
+
+# Runs pytest, ruff, and mypy on the full OS × Python matrix. The wasm
+# artifact is built once by build-wasm.yml and downloaded into each job.
+# See spec/implementation.md §11.3.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  wasm:
+    uses: ./.github/workflows/build-wasm.yml
+
+  test:
+    needs: wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: quickjs-wasm
+          path: quickjs_wasm/_resources
+
+      - name: Install package (dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy
+        run: mypy quickjs_wasm
+
+      - name: pytest
+        run: pytest -v
