@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
 from quickjs_wasm.errors import (
+    ConcurrentEvalError,
     InvalidHandleError,
     JSError,
     MarshalError,
@@ -181,14 +182,29 @@ class Handle:
             self._check_same_context(this)
         this_slot = this._slot if this is not None else 0
         arg_slots, owned_slots = self._coerce_args(args)
+        # §7.4 / §10.3: Handle.call is a sync entry point into JS.
+        # If the called function dispatches an async host function,
+        # the shim produces a rejected Promise but the Python caller
+        # needs to hear "you can't drive async from here" via
+        # ConcurrentEvalError — same spec rule as ctx.eval. Clear
+        # any stale flag at entry; raise from the finally.
+        self._bridge.take_sync_eval_hit_async_call()
         try:
-            status, result_slot = self._bridge.call(
-                self._ctx_id, self._slot, this_slot, arg_slots
-            )
-            return self._slot_to_handle_or_raise(status, result_slot)
+            try:
+                status, result_slot = self._bridge.call(
+                    self._ctx_id, self._slot, this_slot, arg_slots
+                )
+                return self._slot_to_handle_or_raise(status, result_slot)
+            finally:
+                for s in owned_slots:
+                    self._bridge.slot_drop(self._ctx_id, s)
         finally:
-            for s in owned_slots:
-                self._bridge.slot_drop(self._ctx_id, s)
+            if self._bridge.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    "sync Handle.call encountered a registered async "
+                    "host function; drive the promise via await_promise "
+                    "(inside an async context) instead."
+                )
 
     def call_method(self, name: str, *args: Handle | Any) -> Handle:
         self._check_live()
@@ -208,14 +224,29 @@ class Handle:
         """
         self._check_live()
         arg_slots, owned_slots = self._coerce_args(args)
+        # §7.4 / §10.3: same sync-eval-async-hostfn guard as
+        # Handle.call. Constructors that invoke async host functions
+        # (unusual but possible via a constructor body) need the
+        # same entry-point-boundary surface.
+        self._bridge.take_sync_eval_hit_async_call()
         try:
-            status, result_slot = self._bridge.new_instance(
-                self._ctx_id, self._slot, arg_slots
-            )
-            return self._slot_to_handle_or_raise(status, result_slot)
+            try:
+                status, result_slot = self._bridge.new_instance(
+                    self._ctx_id, self._slot, arg_slots
+                )
+                return self._slot_to_handle_or_raise(status, result_slot)
+            finally:
+                for s in owned_slots:
+                    self._bridge.slot_drop(self._ctx_id, s)
         finally:
-            for s in owned_slots:
-                self._bridge.slot_drop(self._ctx_id, s)
+            if self._bridge.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    "sync Handle.new encountered a registered async "
+                    "host function during construction; redesign the "
+                    "constructor to avoid async host calls, or use "
+                    "await_promise on a promise-returning factory "
+                    "instead."
+                )
 
     def to_python(self, *, allow_opaque: bool = False) -> Any:
         """Marshal this handle out to a Python value.

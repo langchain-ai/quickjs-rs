@@ -396,6 +396,120 @@ def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> None:
     assert not thread.is_alive()
 
 
+async def test_async_host_function_raises_surfaces_hosterror() -> None:
+    """§10.2 async path: a non-cancellation exception in an async host
+    function surfaces as HostError on the eval_async caller with the
+    original Python exception threaded via __cause__.
+
+    Distinct from the cancellation path (step 7) — this is the
+    ordinary raise, not a CancelledError. Exercises the dispatcher's
+    encode-as-HostError-record branch in _run_async_host_call."""
+    from quickjs_wasm import HostError
+
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            class CustomError(Exception):
+                pass
+
+            async def broken() -> None:
+                await asyncio.sleep(0)  # yield before raising
+                raise CustomError("specific failure mode")
+
+            ctx.register("broken", broken)
+
+            with pytest.raises(HostError) as excinfo:
+                await ctx.eval_async("await broken()")
+            assert "specific failure mode" in excinfo.value.message
+            assert isinstance(excinfo.value.__cause__, CustomError)
+
+
+def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
+    """Handle.call on an async host function from sync context must
+    raise ConcurrentEvalError, matching Context.eval's behavior for
+    the same failure mode. The step-9 flag-and-surface pattern
+    extends to Handle.call as a spec-compliance property — the
+    user-visible behavior should be consistent regardless of which
+    sync entry point invoked the async host function."""
+    import threading
+
+    from quickjs_wasm import ConcurrentEvalError
+
+    exc: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            with Runtime() as rt:
+                with rt.new_context() as ctx:
+
+                    async def slow(n: int) -> int:
+                        await asyncio.sleep(0)
+                        return n
+
+                    ctx.register("slow", slow)
+                    # Get a handle to the slow function and call it
+                    # directly via Handle.call — no eval involved.
+                    slow_handle = ctx.eval_handle("slow")
+                    try:
+                        with pytest.raises(ConcurrentEvalError):
+                            slow_handle.call(1)
+                    finally:
+                        slow_handle.dispose()
+        except BaseException as e:  # noqa: BLE001
+            exc.append(e)
+
+    t = threading.Thread(target=runner)
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "handle.call test thread hung"
+    if exc:
+        raise exc[0]
+
+
+def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -> None:
+    """Handle.call_method on an object whose method is an async host
+    function. Via the existing call_method → call delegation, the
+    ConcurrentEvalError surfaces without call_method needing its own
+    flag-check wiring."""
+    import threading
+
+    from quickjs_wasm import ConcurrentEvalError
+
+    exc: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            with Runtime() as rt:
+                with rt.new_context() as ctx:
+
+                    async def slow(n: int) -> int:
+                        await asyncio.sleep(0)
+                        return n
+
+                    # Register slow as a global, then build an object
+                    # whose method calls it. Handle.call_method on
+                    # that object triggers the async host fn during
+                    # the method's body.
+                    ctx.register("slow", slow)
+                    obj = ctx.eval_handle(
+                        "({ invoke(n) { return slow(n); } })"
+                    )
+                    try:
+                        with pytest.raises(ConcurrentEvalError):
+                            obj.call_method("invoke", 1)
+                    finally:
+                        obj.dispose()
+        except BaseException as e:  # noqa: BLE001
+            exc.append(e)
+
+    t = threading.Thread(target=runner)
+    t.start()
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "handle.call_method test thread hung"
+    if exc:
+        raise exc[0]
+
+
 async def test_cancelling_counter_preserved_after_absorption() -> None:
     """§7.4: when JS absorbs cancellation, asyncio.CancelledError is
     not re-raised — but the task's cancelling counter (set by

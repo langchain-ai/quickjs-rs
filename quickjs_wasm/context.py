@@ -392,6 +392,24 @@ class Context:
             deadline = time.monotonic() + timeout
         else:
             deadline = self._cumulative_deadline
+            # Pre-check: §7.4 says "the next interrupt check aborts
+            # with TimeoutError" once the cumulative budget is
+            # exhausted. For a trivially-fast eval (e.g. "1+1" after
+            # the budget has elapsed), no bytecode-level interrupt
+            # check ever fires — QuickJS polls every N opcodes and
+            # 1+1 is well under the threshold. Check explicitly here
+            # so the user sees TimeoutError on the first call past
+            # the budget, not "silently passed, surprise!" on some
+            # longer-running call later. The per-call override path
+            # (timeout= kwarg) skips this — an override's whole
+            # purpose is to ignore the cumulative deadline.
+            if time.monotonic() >= deadline:
+                self._eval_async_in_flight = False
+                raise TimeoutError(
+                    "eval_async's cumulative timeout budget has "
+                    "elapsed; create a new context or pass "
+                    "timeout= to this call for a fresh budget"
+                )
         self._bridge.set_deadline(deadline)
         try:
             try:

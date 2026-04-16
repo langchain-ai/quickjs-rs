@@ -315,3 +315,137 @@ async def test_eval_async_per_call_timeout_override() -> None:
 
             with pytest.raises(_TimeoutError):
                 await ctx.eval_async("await very_slow()", timeout=0.05)
+
+
+async def test_promise_chain_resolves_synchronously() -> None:
+    """A JS-side Promise chain (Promise.resolve(x).then(...)) settles
+    via microtasks — no async host calls in flight, no external
+    signal needed. The driving loop's drain-then-check order plus
+    run_pending_jobs is what makes this work: the .then handler runs
+    as a microtask during the drain, and step 3 (fulfilled) reads
+    the post-drain state.
+
+    Explicit test because the sync-resolution path has a different
+    shape from the host-call-driven path (no _pending_completed
+    event ever fires) and they should both just work."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            result = await ctx.eval_async(
+                "await Promise.resolve(1).then(x => x + 1)"
+            )
+            assert result == 2
+
+
+async def test_cumulative_timeout_two_calls_within_budget() -> None:
+    """§7.4: the cumulative budget is shared across eval_async calls
+    on the same context. Two short calls whose combined wall-clock
+    stays under the budget should both succeed."""
+    with Runtime() as rt:
+        with rt.new_context(timeout=1.0) as ctx:
+
+            async def tiny() -> str:
+                await asyncio.sleep(0.01)
+                return "ok"
+
+            ctx.register("tiny", tiny)
+
+            assert await ctx.eval_async("await tiny()") == "ok"
+            assert await ctx.eval_async("await tiny()") == "ok"
+
+
+async def test_cumulative_timeout_exceeded_on_later_call() -> None:
+    """§7.4: once the cumulative budget is exhausted, subsequent
+    eval_async calls on the context raise TimeoutError — even a
+    trivial 1+1 that would otherwise be instant, because the
+    deadline check fires at interrupt-poll time regardless of what
+    the call is doing.
+
+    This is the shape that makes "long-running agent loop with a
+    total time budget" work cleanly: turn 1-5 consume their time,
+    turn 6 bounces with TimeoutError so the caller knows the
+    budget is done."""
+    from quickjs_wasm import TimeoutError as _TimeoutError
+
+    # Short budget so the test wall-clock is short.
+    with Runtime() as rt:
+        with rt.new_context(timeout=0.05) as ctx:
+
+            async def consumer() -> None:
+                await asyncio.sleep(0.1)  # eat the whole budget
+
+            ctx.register("consumer", consumer)
+
+            # First call exceeds the budget on its own.
+            with pytest.raises(_TimeoutError):
+                await ctx.eval_async("await consumer()")
+
+            # Second call — even 1+1 — should still raise because the
+            # budget counter is past the deadline.
+            with pytest.raises(_TimeoutError):
+                await ctx.eval_async("1 + 1", module=False)
+
+
+async def test_per_call_timeout_override_lifts_above_cumulative() -> None:
+    """§7.4: timeout= kwarg on eval_async replaces the cumulative
+    deadline for that call only. A call that would otherwise bounce
+    on the depleted cumulative budget can still succeed with an
+    explicit override."""
+    with Runtime() as rt:
+        # Tiny cumulative budget so it's easy to exhaust.
+        with rt.new_context(timeout=0.01) as ctx:
+            # Sleep to push past the cumulative deadline.
+            await asyncio.sleep(0.05)
+
+            # Without override: cumulative exhausted, should fail.
+            from quickjs_wasm import TimeoutError as _TimeoutError
+
+            with pytest.raises(_TimeoutError):
+                await ctx.eval_async("1 + 1", module=False)
+
+            # With override: a fresh 1-second budget for this call
+            # only. The cumulative deadline is irrelevant.
+            assert await ctx.eval_async(
+                "1 + 1", module=False, timeout=1.0
+            ) == 2
+
+
+def test_sync_eval_does_not_decrement_cumulative_budget() -> None:
+    """§7.4 spec-conformance tripwire: the cumulative budget applies
+    only to eval_async. Sync eval has its own per-call timeout and
+    doesn't consume the async budget. If a future refactor
+    accidentally unifies the sync/async deadline tracking (e.g. by
+    sharing a single _active_deadline on the bridge), a subsequent
+    eval_async would see a deadline that's already passed because
+    the sync eval's deadline was in monotonic-time past.
+
+    Verifies: sync ctx.eval runs freely (per-call deadline), then
+    eval_async still has its full cumulative budget available.
+    """
+    import time as _time
+
+    async def body() -> None:
+        with Runtime() as rt:
+            with rt.new_context(timeout=1.0) as ctx:
+                start = _time.monotonic()
+                # Several sync evals.
+                for _ in range(3):
+                    assert ctx.eval("1 + 1", module=False) == 2
+                # Sanity: sync evals stayed well within the sync
+                # per-call budget (1s). If they individually took a
+                # long time, this test wouldn't prove what it's
+                # trying to prove.
+                assert _time.monotonic() - start < 0.5
+
+                # Now eval_async. The cumulative budget started at
+                # context-creation time; sync eval shouldn't have
+                # consumed it. The async call has ~1.0s still.
+                async def sleepy() -> str:
+                    await asyncio.sleep(0.05)
+                    return "ok"
+
+                ctx.register("sleepy", sleepy)
+                assert await ctx.eval_async("await sleepy()") == "ok"
+                # If sync eval decremented the budget incorrectly,
+                # the above would have raised TimeoutError.
+
+    asyncio.run(body())
