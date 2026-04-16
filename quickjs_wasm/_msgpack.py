@@ -44,6 +44,9 @@ def decode(data: bytes) -> Any:
     return value
 
 
+_FIXEXT_LENGTHS = {0xD4: 1, 0xD5: 2, 0xD6: 4, 0xD7: 8, 0xD8: 16}
+
+
 def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
     if offset >= len(data):
         raise ValueError("unexpected end of msgpack input")
@@ -55,7 +58,8 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
     # fixstr
     if 0xA0 <= b <= 0xBF:
         length = b & 0x1F
-        return data[offset + 1 : offset + 1 + length].decode("utf-8"), offset + 1 + length
+        end = offset + 1 + length
+        return data[offset + 1 : end].decode("utf-8"), end
     # nil
     if b == 0xC0:
         return None, offset + 1
@@ -64,16 +68,45 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
         return False, offset + 1
     if b == 0xC3:
         return True, offset + 1
-    # ext 8 (covers zero-length ext used for undefined)
+    # bin 8 / 16 / 32
+    if b == 0xC4:
+        length = data[offset + 1]
+        end = offset + 2 + length
+        return data[offset + 2 : end], end
+    if b == 0xC5:
+        length = int.from_bytes(data[offset + 1 : offset + 3], "big")
+        end = offset + 3 + length
+        return data[offset + 3 : end], end
+    if b == 0xC6:
+        length = int.from_bytes(data[offset + 1 : offset + 5], "big")
+        end = offset + 5 + length
+        return data[offset + 5 : end], end
+    # ext 8 / 16 / 32
     if b == 0xC7:
         length = data[offset + 1]
         ext_type = data[offset + 2]
-        body = data[offset + 3 : offset + 3 + length]
-        return _decode_ext(ext_type, body), offset + 3 + length
+        end = offset + 3 + length
+        return _decode_ext(ext_type, data[offset + 3 : end]), end
+    if b == 0xC8:
+        length = int.from_bytes(data[offset + 1 : offset + 3], "big")
+        ext_type = data[offset + 3]
+        end = offset + 4 + length
+        return _decode_ext(ext_type, data[offset + 4 : end]), end
+    if b == 0xC9:
+        length = int.from_bytes(data[offset + 1 : offset + 5], "big")
+        ext_type = data[offset + 5]
+        end = offset + 6 + length
+        return _decode_ext(ext_type, data[offset + 6 : end]), end
     # float64
     if b == 0xCB:
         (value,) = struct.unpack_from(">d", data, offset + 1)
         return float(value), offset + 9
+    # fixext 1 / 2 / 4 / 8 / 16
+    if b in _FIXEXT_LENGTHS:
+        length = _FIXEXT_LENGTHS[b]
+        ext_type = data[offset + 1]
+        end = offset + 2 + length
+        return _decode_ext(ext_type, data[offset + 2 : end]), end
     # str 8 / 16 / 32
     if b == 0xD9:
         length = data[offset + 1]
@@ -96,4 +129,6 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
 def _decode_ext(ext_type: int, body: bytes) -> Any:
     if ext_type == EXT_UNDEFINED:
         return UNDEFINED
+    if ext_type == EXT_BIGINT:
+        return int(body.decode("utf-8"))
     raise NotImplementedError(f"msgpack ext type {ext_type} is not yet implemented")

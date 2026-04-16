@@ -3,6 +3,7 @@
 See spec/implementation.md §7 for the public API.
 """
 
+from quickjs_wasm._msgpack import UNDEFINED, Undefined
 from quickjs_wasm.context import Context
 from quickjs_wasm.errors import (
     HostError,
@@ -23,6 +24,8 @@ __all__ = [
     "Runtime",
     "Context",
     "Handle",
+    "Undefined",
+    "UNDEFINED",
     "QuickJSError",
     "JSError",
     "HostError",

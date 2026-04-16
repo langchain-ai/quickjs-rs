@@ -22,7 +22,7 @@ from quickjs_wasm import (
 
 
 def test_smoke_primitives() -> None:
-    """Greens the primitive block of §13: arithmetic, string, bool, null, undefined, float."""
+    """Greens the primitive block of §13 plus bigint and Uint8Array."""
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:
             assert ctx.eval("1 + 2") == 3
@@ -31,6 +31,13 @@ def test_smoke_primitives() -> None:
             assert ctx.eval("null") is None
             assert ctx.eval("undefined") is None
             assert ctx.eval("1.5") == 1.5
+
+            # BigInt — positive and negative to exercise sign handling.
+            assert ctx.eval("10n ** 30n") == 10**30
+            assert ctx.eval("-(10n ** 30n)") == -(10**30)
+
+            # Bytes
+            assert ctx.eval("new Uint8Array([1, 2, 3])") == b"\x01\x02\x03"
 
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")

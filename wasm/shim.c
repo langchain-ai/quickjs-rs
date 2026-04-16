@@ -395,6 +395,106 @@ static int32_t encode_str(ShimContext *c, const uint8_t *bytes, size_t len) {
     return 0;
 }
 
+/* Encode raw bytes as msgpack bin. */
+static int32_t encode_bin(ShimContext *c, const uint8_t *bytes, size_t len) {
+    uint32_t header_len;
+    if (len <= 0xff) {
+        header_len = 2;
+    } else if (len <= 0xffff) {
+        header_len = 3;
+    } else if (len <= 0xffffffffu) {
+        header_len = 5;
+    } else {
+        return -1;
+    }
+    if (!scratch_reserve(c, header_len + (uint32_t)len)) return -1;
+    uint8_t *p = c->scratch;
+    if (len <= 0xff) {
+        p[0] = 0xc4;
+        p[1] = (uint8_t)len;
+    } else if (len <= 0xffff) {
+        p[0] = 0xc5;
+        p[1] = (uint8_t)(len >> 8);
+        p[2] = (uint8_t)len;
+    } else {
+        p[0] = 0xc6;
+        p[1] = (uint8_t)(len >> 24);
+        p[2] = (uint8_t)(len >> 16);
+        p[3] = (uint8_t)(len >> 8);
+        p[4] = (uint8_t)len;
+    }
+    if (len > 0) memcpy(p + header_len, bytes, len);
+    c->scratch_len = header_len + (uint32_t)len;
+    return 0;
+}
+
+/* Encode a BigInt as msgpack ext1 (body = UTF-8 decimal string). §8.
+ * JS_ToCStringLen on a BigInt yields the decimal form with no "n" suffix
+ * and a leading "-" for negatives, exactly what we want. */
+static int32_t encode_bigint(ShimContext *c, JSValue v) {
+    size_t slen;
+    const char *s = JS_ToCStringLen(c->ctx, &slen, v);
+    if (!s) return -1;
+
+    uint32_t header_len;
+    if (slen == 1) {
+        header_len = 2; /* fixext1 */
+    } else if (slen == 2) {
+        header_len = 2; /* fixext2 */
+    } else if (slen == 4) {
+        header_len = 2; /* fixext4 */
+    } else if (slen == 8) {
+        header_len = 2; /* fixext8 */
+    } else if (slen == 16) {
+        header_len = 2; /* fixext16 */
+    } else if (slen <= 0xff) {
+        header_len = 3; /* ext8 */
+    } else if (slen <= 0xffff) {
+        header_len = 4; /* ext16 */
+    } else if (slen <= 0xffffffffu) {
+        header_len = 6; /* ext32 */
+    } else {
+        JS_FreeCString(c->ctx, s);
+        return -1;
+    }
+
+    if (!scratch_reserve(c, header_len + (uint32_t)slen)) {
+        JS_FreeCString(c->ctx, s);
+        return -1;
+    }
+    uint8_t *p = c->scratch;
+    switch (slen) {
+        case 1:  p[0] = 0xd4; p[1] = 0x01; break;
+        case 2:  p[0] = 0xd5; p[1] = 0x01; break;
+        case 4:  p[0] = 0xd6; p[1] = 0x01; break;
+        case 8:  p[0] = 0xd7; p[1] = 0x01; break;
+        case 16: p[0] = 0xd8; p[1] = 0x01; break;
+        default:
+            if (slen <= 0xff) {
+                p[0] = 0xc7;
+                p[1] = (uint8_t)slen;
+                p[2] = 0x01;
+            } else if (slen <= 0xffff) {
+                p[0] = 0xc8;
+                p[1] = (uint8_t)(slen >> 8);
+                p[2] = (uint8_t)slen;
+                p[3] = 0x01;
+            } else {
+                p[0] = 0xc9;
+                p[1] = (uint8_t)(slen >> 24);
+                p[2] = (uint8_t)(slen >> 16);
+                p[3] = (uint8_t)(slen >> 8);
+                p[4] = (uint8_t)slen;
+                p[5] = 0x01;
+            }
+            break;
+    }
+    memcpy(p + header_len, s, slen);
+    c->scratch_len = header_len + (uint32_t)slen;
+    JS_FreeCString(c->ctx, s);
+    return 0;
+}
+
 QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
                                   uint32_t *out_ptr, uint32_t *out_len) {
     ShimContext *c = ctx_lookup(ctx_id);
@@ -434,6 +534,21 @@ QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
         if (!s) return -1;
         rc = encode_str(c, (const uint8_t *)s, slen);
         JS_FreeCString(c->ctx, s);
+    } else if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT) {
+        rc = encode_bigint(c, v);
+    } else if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
+        /* Marshal a Uint8Array as msgpack bin. §8. */
+        size_t byte_offset = 0, byte_length = 0;
+        JSValue ab = JS_GetTypedArrayBuffer(c->ctx, v, &byte_offset, &byte_length, NULL);
+        if (JS_IsException(ab)) return -1;
+        size_t ab_len = 0;
+        uint8_t *ab_data = JS_GetArrayBuffer(c->ctx, &ab_len, ab);
+        if (!ab_data) {
+            JS_FreeValue(c->ctx, ab);
+            return -1;
+        }
+        rc = encode_bin(c, ab_data + byte_offset, byte_length);
+        JS_FreeValue(c->ctx, ab);
     } else {
         /* All other branches land in later commits. */
         return -1;
