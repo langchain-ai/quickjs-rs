@@ -690,6 +690,18 @@ Under the hood, `module=True` compiles as `JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_AS
 
 True ES module loading lands in v0.4 with a Python-side resolver callback (see §14). Until then, code that needs module-level isolation should use `eval_handle_async` on an IIFE that explicitly returns what it wants to expose.
 
+#### State persistence across `eval_async` calls
+
+Because `module=True` uses QuickJS's script-mode async-eval under the hood (per the quickjs-ng top-level-await constraint described above), state from one `eval_async` call persists to subsequent calls on the same context. Specifically:
+
+- Top-level `var`, `let`, `const`, and `function` declarations become realm-level bindings visible to later evals.
+- Globals explicitly set via `ctx.globals[...]` or assigned through `globalThis` persist.
+- JS-land objects hold their references across calls; a `Handle` returned from one eval can be operated on in the next.
+
+This matches REPL / notebook semantics and is usually desired for multi-step agent workloads — turn 1 sets up state, turn 2 uses it, turn 3 tears down. Callers who want per-eval isolation should use a fresh `Context` per call (contexts are cheap; they share the runtime's heap).
+
+The persistence interacts with cancellation (see below): if an `eval_async` is cancelled mid-execution after some top-level bindings were created, those bindings persist. Callers retrying a cancelled eval on the same context will see the partial state from the cancelled attempt. Either use a fresh context for each retry, or ensure the code is idempotent against partial execution (wrap with `try/finally` that restores invariants, or guard each binding with `globalThis.X ??= ...`).
+
 #### JS-side shape
 
 Sync host functions return values directly. Async host functions return `Promise<T>`. From user-written JS, both look like function calls:
