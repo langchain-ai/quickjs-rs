@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quickjs-wasm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sandboxed JavaScript execution for Python, hosted via a WASI build of QuickJS."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "LangChain" },
 ]
@@ -18,7 +18,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -33,6 +32,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov",
+    "pytest-asyncio>=0.23",
     "ruff",
     "mypy",
 ]
@@ -49,16 +49,17 @@ quickjs_wasm = ["py.typed", "_resources/quickjs.wasm"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "W"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 files = ["quickjs_wasm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::ResourceWarning"]
+asyncio_mode = "auto"
