@@ -55,6 +55,10 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
     # positive fixint
     if b < 0x80:
         return b, offset + 1
+    # fixarray
+    if 0x90 <= b <= 0x9F:
+        count = b & 0x0F
+        return _decode_array(data, offset + 1, count)
     # fixstr
     if 0xA0 <= b <= 0xBF:
         length = b & 0x1F
@@ -120,10 +124,25 @@ def _decode_at(data: bytes, offset: int) -> tuple[Any, int]:
         length = int.from_bytes(data[offset + 1 : offset + 5], "big")
         end = offset + 5 + length
         return data[offset + 5 : end].decode("utf-8"), end
+    # array 16 / 32
+    if b == 0xDC:
+        count = int.from_bytes(data[offset + 1 : offset + 3], "big")
+        return _decode_array(data, offset + 3, count)
+    if b == 0xDD:
+        count = int.from_bytes(data[offset + 1 : offset + 5], "big")
+        return _decode_array(data, offset + 5, count)
 
     raise NotImplementedError(
         f"msgpack decode for format 0x{b:02x} is not yet implemented"
     )
+
+
+def _decode_array(data: bytes, offset: int, count: int) -> tuple[list[Any], int]:
+    items: list[Any] = []
+    for _ in range(count):
+        value, offset = _decode_at(data, offset)
+        items.append(value)
+    return items, offset
 
 
 def _decode_ext(ext_type: int, body: bytes) -> Any:

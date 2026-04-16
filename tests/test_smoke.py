@@ -39,6 +39,11 @@ def test_smoke_primitives() -> None:
             # Bytes
             assert ctx.eval("new Uint8Array([1, 2, 3])") == b"\x01\x02\x03"
 
+            # Arrays (including nested to exercise recursion)
+            assert ctx.eval("[1, 2, 3]") == [1, 2, 3]
+            assert ctx.eval("[[1, 2], [3, 4]]") == [[1, 2], [3, 4]]
+            assert ctx.eval("[]") == []
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:

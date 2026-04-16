@@ -346,39 +346,60 @@ static void be_store_u64(uint8_t *p, uint64_t v) {
     p[7] = (uint8_t)v;
 }
 
-/* Encode a JS number as MessagePack float64. §8: all JS numbers are f64
- * on the wire, even integer-valued ones, to preserve JS semantics. */
-static int32_t encode_number(ShimContext *c, double d) {
-    if (!scratch_reserve(c, 9)) return -1;
-    c->scratch[0] = 0xcb; /* float64 */
-    union { double d; uint64_t u; } conv;
-    conv.d = d;
-    be_store_u64(&c->scratch[1], conv.u);
-    c->scratch_len = 9;
-    return 0;
+/* ------------------------------------------------------------------ */
+/* Encoders                                                            */
+/*                                                                     */
+/* Each encoder writes at `off` inside the shim-owned scratch buffer   */
+/* and returns the new trailing offset (number of bytes written so     */
+/* far), or -1 on failure. scratch_reserve may realloc, so encoders    */
+/* only resolve `c->scratch` to a pointer *after* the reserve call.    */
+/* Recursive values (arrays, objects) use the same return-new-offset   */
+/* convention so each child append runs in sequence.                   */
+/* ------------------------------------------------------------------ */
+
+static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth);
+
+/* Max nested container depth. QuickJS's own parser caps at ~1000; we
+ * stay well below that to keep the recursion predictable. */
+#define MARSHAL_MAX_DEPTH 128
+
+static int32_t write_u8(ShimContext *c, int32_t off, uint8_t b) {
+    if (!scratch_reserve(c, (uint32_t)off + 1)) return -1;
+    c->scratch[off] = b;
+    return off + 1;
 }
 
-/* Encode a string (UTF-8 bytes, length already known) as a msgpack str. */
-static int32_t encode_str(ShimContext *c, const uint8_t *bytes, size_t len) {
+static int32_t write_bytes(ShimContext *c, int32_t off,
+                           const uint8_t *src, size_t len) {
+    if (!scratch_reserve(c, (uint32_t)off + (uint32_t)len)) return -1;
+    if (len > 0) memcpy(c->scratch + off, src, len);
+    return off + (int32_t)len;
+}
+
+static int32_t encode_number(ShimContext *c, int32_t off, double d) {
+    if (!scratch_reserve(c, (uint32_t)off + 9)) return -1;
+    uint8_t *p = c->scratch + off;
+    p[0] = 0xcb; /* float64 */
+    union { double d; uint64_t u; } conv;
+    conv.d = d;
+    be_store_u64(p + 1, conv.u);
+    return off + 9;
+}
+
+static int32_t encode_str_bytes(ShimContext *c, int32_t off,
+                                const uint8_t *bytes, size_t len) {
     uint32_t header_len;
-    if (len <= 31) {
-        header_len = 1;
-    } else if (len <= 0xff) {
-        header_len = 2;
-    } else if (len <= 0xffff) {
-        header_len = 3;
-    } else if (len <= 0xffffffffu) {
-        header_len = 5;
-    } else {
-        return -1; /* msgpack str max is 2^32-1 bytes */
-    }
-    if (!scratch_reserve(c, header_len + (uint32_t)len)) return -1;
-    uint8_t *p = c->scratch;
+    if (len <= 31) header_len = 1;
+    else if (len <= 0xff) header_len = 2;
+    else if (len <= 0xffff) header_len = 3;
+    else if (len <= 0xffffffffu) header_len = 5;
+    else return -1;
+    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)len)) return -1;
+    uint8_t *p = c->scratch + off;
     if (len <= 31) {
         p[0] = (uint8_t)(0xa0 | len);
     } else if (len <= 0xff) {
-        p[0] = 0xd9;
-        p[1] = (uint8_t)len;
+        p[0] = 0xd9; p[1] = (uint8_t)len;
     } else if (len <= 0xffff) {
         p[0] = 0xda;
         p[1] = (uint8_t)(len >> 8);
@@ -391,27 +412,20 @@ static int32_t encode_str(ShimContext *c, const uint8_t *bytes, size_t len) {
         p[4] = (uint8_t)len;
     }
     if (len > 0) memcpy(p + header_len, bytes, len);
-    c->scratch_len = header_len + (uint32_t)len;
-    return 0;
+    return off + (int32_t)header_len + (int32_t)len;
 }
 
-/* Encode raw bytes as msgpack bin. */
-static int32_t encode_bin(ShimContext *c, const uint8_t *bytes, size_t len) {
+static int32_t encode_bin_bytes(ShimContext *c, int32_t off,
+                                const uint8_t *bytes, size_t len) {
     uint32_t header_len;
+    if (len <= 0xff) header_len = 2;
+    else if (len <= 0xffff) header_len = 3;
+    else if (len <= 0xffffffffu) header_len = 5;
+    else return -1;
+    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)len)) return -1;
+    uint8_t *p = c->scratch + off;
     if (len <= 0xff) {
-        header_len = 2;
-    } else if (len <= 0xffff) {
-        header_len = 3;
-    } else if (len <= 0xffffffffu) {
-        header_len = 5;
-    } else {
-        return -1;
-    }
-    if (!scratch_reserve(c, header_len + (uint32_t)len)) return -1;
-    uint8_t *p = c->scratch;
-    if (len <= 0xff) {
-        p[0] = 0xc4;
-        p[1] = (uint8_t)len;
+        p[0] = 0xc4; p[1] = (uint8_t)len;
     } else if (len <= 0xffff) {
         p[0] = 0xc5;
         p[1] = (uint8_t)(len >> 8);
@@ -424,45 +438,34 @@ static int32_t encode_bin(ShimContext *c, const uint8_t *bytes, size_t len) {
         p[4] = (uint8_t)len;
     }
     if (len > 0) memcpy(p + header_len, bytes, len);
-    c->scratch_len = header_len + (uint32_t)len;
-    return 0;
+    return off + (int32_t)header_len + (int32_t)len;
 }
 
 /* Encode a BigInt as msgpack ext1 (body = UTF-8 decimal string). §8.
  * JS_ToCStringLen on a BigInt yields the decimal form with no "n" suffix
- * and a leading "-" for negatives, exactly what we want. */
-static int32_t encode_bigint(ShimContext *c, JSValue v) {
+ * and a leading "-" for negatives. */
+static int32_t encode_bigint(ShimContext *c, int32_t off, JSValue v) {
     size_t slen;
     const char *s = JS_ToCStringLen(c->ctx, &slen, v);
     if (!s) return -1;
 
     uint32_t header_len;
-    if (slen == 1) {
-        header_len = 2; /* fixext1 */
-    } else if (slen == 2) {
-        header_len = 2; /* fixext2 */
-    } else if (slen == 4) {
-        header_len = 2; /* fixext4 */
-    } else if (slen == 8) {
-        header_len = 2; /* fixext8 */
-    } else if (slen == 16) {
-        header_len = 2; /* fixext16 */
-    } else if (slen <= 0xff) {
-        header_len = 3; /* ext8 */
-    } else if (slen <= 0xffff) {
-        header_len = 4; /* ext16 */
-    } else if (slen <= 0xffffffffu) {
-        header_len = 6; /* ext32 */
-    } else {
-        JS_FreeCString(c->ctx, s);
-        return -1;
+    switch (slen) {
+        case 1: case 2: case 4: case 8: case 16:
+            header_len = 2; break;
+        default:
+            if (slen <= 0xff) header_len = 3;
+            else if (slen <= 0xffff) header_len = 4;
+            else if (slen <= 0xffffffffu) header_len = 6;
+            else { JS_FreeCString(c->ctx, s); return -1; }
+            break;
     }
 
-    if (!scratch_reserve(c, header_len + (uint32_t)slen)) {
+    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)slen)) {
         JS_FreeCString(c->ctx, s);
         return -1;
     }
-    uint8_t *p = c->scratch;
+    uint8_t *p = c->scratch + off;
     switch (slen) {
         case 1:  p[0] = 0xd4; p[1] = 0x01; break;
         case 2:  p[0] = 0xd5; p[1] = 0x01; break;
@@ -471,9 +474,7 @@ static int32_t encode_bigint(ShimContext *c, JSValue v) {
         case 16: p[0] = 0xd8; p[1] = 0x01; break;
         default:
             if (slen <= 0xff) {
-                p[0] = 0xc7;
-                p[1] = (uint8_t)slen;
-                p[2] = 0x01;
+                p[0] = 0xc7; p[1] = (uint8_t)slen; p[2] = 0x01;
             } else if (slen <= 0xffff) {
                 p[0] = 0xc8;
                 p[1] = (uint8_t)(slen >> 8);
@@ -490,9 +491,102 @@ static int32_t encode_bigint(ShimContext *c, JSValue v) {
             break;
     }
     memcpy(p + header_len, s, slen);
-    c->scratch_len = header_len + (uint32_t)slen;
     JS_FreeCString(c->ctx, s);
-    return 0;
+    return off + (int32_t)header_len + (int32_t)slen;
+}
+
+static int32_t encode_array_header(ShimContext *c, int32_t off, uint32_t n) {
+    if (n <= 15) {
+        return write_u8(c, off, (uint8_t)(0x90 | n));
+    } else if (n <= 0xffff) {
+        if (!scratch_reserve(c, (uint32_t)off + 3)) return -1;
+        uint8_t *p = c->scratch + off;
+        p[0] = 0xdc;
+        p[1] = (uint8_t)(n >> 8);
+        p[2] = (uint8_t)n;
+        return off + 3;
+    } else {
+        if (!scratch_reserve(c, (uint32_t)off + 5)) return -1;
+        uint8_t *p = c->scratch + off;
+        p[0] = 0xdd;
+        p[1] = (uint8_t)(n >> 24);
+        p[2] = (uint8_t)(n >> 16);
+        p[3] = (uint8_t)(n >> 8);
+        p[4] = (uint8_t)n;
+        return off + 5;
+    }
+}
+
+static int32_t encode_array(ShimContext *c, int32_t off, JSValue arr, int depth) {
+    int64_t length64 = 0;
+    if (JS_GetLength(c->ctx, arr, &length64) < 0) return -1;
+    if (length64 < 0 || length64 > 0xffffffffLL) return -1;
+    uint32_t length = (uint32_t)length64;
+
+    off = encode_array_header(c, off, length);
+    if (off < 0) return -1;
+
+    for (uint32_t i = 0; i < length; i++) {
+        JSValue elem = JS_GetPropertyUint32(c->ctx, arr, i);
+        if (JS_IsException(elem)) return -1;
+        off = encode_value(c, elem, off, depth + 1);
+        JS_FreeValue(c->ctx, elem);
+        if (off < 0) return -1;
+    }
+    return off;
+}
+
+static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
+    if (depth > MARSHAL_MAX_DEPTH) return -1;
+    int tag = JS_VALUE_GET_TAG(v);
+
+    if (tag == JS_TAG_INT) {
+        return encode_number(c, off, (double)JS_VALUE_GET_INT(v));
+    }
+    if (JS_TAG_IS_FLOAT64(tag)) {
+        return encode_number(c, off, JS_VALUE_GET_FLOAT64(v));
+    }
+    if (tag == JS_TAG_BOOL) {
+        return write_u8(c, off, JS_VALUE_GET_BOOL(v) ? 0xc3 : 0xc2);
+    }
+    if (tag == JS_TAG_NULL) {
+        return write_u8(c, off, 0xc0);
+    }
+    if (tag == JS_TAG_UNDEFINED) {
+        /* §8: ext type 0, empty body. ext8 is the smallest zero-length ext. */
+        off = write_u8(c, off, 0xc7);
+        if (off < 0) return -1;
+        off = write_u8(c, off, 0x00);
+        if (off < 0) return -1;
+        return write_u8(c, off, 0x00);
+    }
+    if (tag == JS_TAG_STRING || tag == JS_TAG_STRING_ROPE) {
+        size_t slen;
+        const char *s = JS_ToCStringLen(c->ctx, &slen, v);
+        if (!s) return -1;
+        int32_t rc = encode_str_bytes(c, off, (const uint8_t *)s, slen);
+        JS_FreeCString(c->ctx, s);
+        return rc;
+    }
+    if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT) {
+        return encode_bigint(c, off, v);
+    }
+    if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
+        size_t byte_offset = 0, byte_length = 0;
+        JSValue ab = JS_GetTypedArrayBuffer(c->ctx, v, &byte_offset, &byte_length, NULL);
+        if (JS_IsException(ab)) return -1;
+        size_t ab_len = 0;
+        uint8_t *ab_data = JS_GetArrayBuffer(c->ctx, &ab_len, ab);
+        if (!ab_data) { JS_FreeValue(c->ctx, ab); return -1; }
+        int32_t rc = encode_bin_bytes(c, off, ab_data + byte_offset, byte_length);
+        JS_FreeValue(c->ctx, ab);
+        return rc;
+    }
+    if (JS_IsArray(v)) {
+        return encode_array(c, off, v, depth);
+    }
+    /* Objects and other branches land in later commits. */
+    return -1;
 }
 
 QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
@@ -501,60 +595,9 @@ QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
     if (!c || !out_ptr || !out_len || !slot_valid(c, slot)) return -1;
     scratch_reset(c);
 
-    JSValue v = c->slots[slot].value;
-    int tag = JS_VALUE_GET_TAG(v);
-
-    int32_t rc;
-    if (tag == JS_TAG_INT) {
-        rc = encode_number(c, (double)JS_VALUE_GET_INT(v));
-    } else if (JS_TAG_IS_FLOAT64(tag)) {
-        rc = encode_number(c, JS_VALUE_GET_FLOAT64(v));
-    } else if (tag == JS_TAG_BOOL) {
-        if (!scratch_reserve(c, 1)) return -1;
-        c->scratch[0] = JS_VALUE_GET_BOOL(v) ? 0xc3 : 0xc2;
-        c->scratch_len = 1;
-        rc = 0;
-    } else if (tag == JS_TAG_NULL) {
-        if (!scratch_reserve(c, 1)) return -1;
-        c->scratch[0] = 0xc0; /* nil */
-        c->scratch_len = 1;
-        rc = 0;
-    } else if (tag == JS_TAG_UNDEFINED) {
-        /* §8: ext type 0, empty body. fixext1 is the smallest ext encoding
-         * but takes a 1-byte body. Use ext8 with length=0. */
-        if (!scratch_reserve(c, 3)) return -1;
-        c->scratch[0] = 0xc7; /* ext8 */
-        c->scratch[1] = 0x00; /* length */
-        c->scratch[2] = 0x00; /* type = 0 (undefined) */
-        c->scratch_len = 3;
-        rc = 0;
-    } else if (tag == JS_TAG_STRING || tag == JS_TAG_STRING_ROPE) {
-        size_t slen;
-        const char *s = JS_ToCStringLen(c->ctx, &slen, v);
-        if (!s) return -1;
-        rc = encode_str(c, (const uint8_t *)s, slen);
-        JS_FreeCString(c->ctx, s);
-    } else if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT) {
-        rc = encode_bigint(c, v);
-    } else if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
-        /* Marshal a Uint8Array as msgpack bin. §8. */
-        size_t byte_offset = 0, byte_length = 0;
-        JSValue ab = JS_GetTypedArrayBuffer(c->ctx, v, &byte_offset, &byte_length, NULL);
-        if (JS_IsException(ab)) return -1;
-        size_t ab_len = 0;
-        uint8_t *ab_data = JS_GetArrayBuffer(c->ctx, &ab_len, ab);
-        if (!ab_data) {
-            JS_FreeValue(c->ctx, ab);
-            return -1;
-        }
-        rc = encode_bin(c, ab_data + byte_offset, byte_length);
-        JS_FreeValue(c->ctx, ab);
-    } else {
-        /* All other branches land in later commits. */
-        return -1;
-    }
-
-    if (rc != 0) return rc;
+    int32_t end = encode_value(c, c->slots[slot].value, 0, 0);
+    if (end < 0) return -1;
+    c->scratch_len = (uint32_t)end;
     *out_ptr = (uint32_t)(uintptr_t)c->scratch;
     *out_len = c->scratch_len;
     return 0;
