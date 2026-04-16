@@ -119,6 +119,26 @@ def test_smoke_primitives() -> None:
                 ctx.eval("while(true){}")
             ctx.timeout = 5.0
 
+            # Handles: eval_handle returns a Handle that outlives
+            # its creating eval call, supports property access, method
+            # invocation, and to_python marshaling for the subset of
+            # values that are marshalable.
+            with ctx.eval_handle(
+                "({x: 1, y: 2, add(a, b) { return a + b }})"
+            ) as obj:
+                assert obj.type_of == "object"
+                assert obj.get("x").to_python() == 1
+                result = obj.call_method("add", 10, 20)
+                assert result.to_python() == 30
+                result.dispose()
+
+            # Multi-context isolation: globals don't leak across
+            # contexts sharing the same Runtime.
+            with rt.new_context() as ctx2:
+                ctx2.globals["y"] = "other"
+                assert ctx2.eval("y") == "other"
+                assert ctx.eval("typeof y") == "undefined"
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:

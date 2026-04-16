@@ -342,6 +342,46 @@ class Bridge:
         finally:
             self.free(key_ptr)
 
+    def call(
+        self,
+        ctx: int,
+        fn_slot: int,
+        this_slot: int,
+        arg_slots: list[int],
+    ) -> tuple[int, int]:
+        """Return (status, result_slot). status: 0 ok, 1 JS exception, <0 shim error."""
+        argc = len(arg_slots)
+        argv_ptr = 0
+        if argc > 0:
+            argv_ptr = self.malloc(4 * argc)
+            if argv_ptr == 0:
+                raise MemoryError("guest OOM allocating call argv")
+            payload = b"".join(s.to_bytes(4, "little") for s in arg_slots)
+            self.write_bytes(argv_ptr, payload)
+        out_ptr = self.malloc(4)
+        if out_ptr == 0:
+            if argv_ptr:
+                self.free(argv_ptr)
+            raise MemoryError("guest OOM allocating call out-slot")
+        try:
+            status = int(
+                self._call(
+                    "qjs_call", ctx, fn_slot, this_slot, argc, argv_ptr, out_ptr
+                )
+            )
+            slot = int.from_bytes(self.read_bytes(out_ptr, 4), "little")
+            return status, slot
+        finally:
+            if argv_ptr:
+                self.free(argv_ptr)
+            self.free(out_ptr)
+
+    def type_of(self, ctx: int, slot: int) -> int:
+        return int(self._call("qjs_type_of", ctx, slot))
+
+    def slot_dup(self, ctx: int, slot: int) -> int:
+        return int(self._call("qjs_slot_dup", ctx, slot))
+
     # ---- Host-function registry -----------------------------------------
 
     def register_host_function(
@@ -457,6 +497,8 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_get_global_object",
     "qjs_get_prop",
     "qjs_set_prop",
+    "qjs_call",
+    "qjs_type_of",
     "qjs_register_host_function",
     "qjs_malloc",
     "qjs_free",

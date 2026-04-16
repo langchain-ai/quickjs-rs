@@ -13,6 +13,22 @@ if TYPE_CHECKING:
 
 
 class Runtime:
+    """Owns the JS heap, memory/stack limits, and the wasm instance.
+
+    Internals worth knowing for tuning:
+
+    - A daemon thread per Runtime increments the wasmtime engine's epoch
+      at a fixed 50 ms cadence. This is what gives ``set_epoch_deadline``
+      (§9's trap-based backup to ``host_interrupt``) a clock to race
+      against. Don't lower the cadence without understanding what it's
+      protecting against: the wall-clock interrupt path is primary, and
+      the epoch backup only matters when QuickJS is in a C-level loop
+      that doesn't poll interrupts. 50 ms gives ~100 ms worst-case lag
+      on that already-catastrophic scenario, which is acceptable; 5 ms
+      would cut lag at the cost of 10× the per-tick wakeups for the
+      common case where nothing has gone wrong.
+    """
+
     def __init__(
         self,
         *,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from types import TracebackType
@@ -20,6 +21,8 @@ from quickjs_wasm.errors import (
     TimeoutError,
 )
 from quickjs_wasm.globals import Globals
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from quickjs_wasm.handle import Handle
@@ -103,6 +106,12 @@ class Context:
                     f"JS evaluation exceeded {self._timeout}s "
                     f"(epoch trap: {trap})"
                 ) from None
+            # Non-timeout trap — most commonly wasm-level stack
+            # exhaustion from a deep JS recursion chain that outran
+            # QuickJS's own JS_CHECK_STACK_OVERFLOW. Log the raw trap
+            # so future debugging of "weird trap in the wild" has a
+            # breadcrumb beyond the synthesized JSError message.
+            _log.debug("non-timeout wasm trap during eval: %s", trap)
             raise JSError(
                 "InternalError",
                 f"wasm trap during JS evaluation: {trap}",
@@ -187,7 +196,43 @@ class Context:
         strict: bool = False,
         filename: str = "<eval>",
     ) -> Handle:
-        raise NotImplementedError("eval_handle lands with handle support (§7.2).")
+        if self._closed:
+            raise QuickJSError("context is closed")
+        del filename
+        flags = 0
+        if module:
+            flags |= 0x1
+        if strict:
+            flags |= 0x4
+        self._bridge.take_last_host_exception()
+        deadline = time.monotonic() + self._timeout
+        self._bridge.set_deadline(deadline)
+        try:
+            status, slot = self._bridge.eval(self._ctx_id, code, flags)
+        except wasmtime.Trap as trap:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"JS evaluation exceeded {self._timeout}s "
+                    f"(epoch trap: {trap})"
+                ) from None
+            _log.debug("non-timeout wasm trap during eval_handle: %s", trap)
+            raise JSError(
+                "InternalError",
+                f"wasm trap during JS evaluation: {trap}",
+                None,
+            ) from None
+        finally:
+            self._bridge.set_deadline(None)
+
+        if status < 0:
+            raise QuickJSError(f"shim error from qjs_eval: status={status}")
+        if status == 1:
+            try:
+                self._raise_from_exception_slot(slot)
+            finally:
+                self._bridge.slot_drop(self._ctx_id, slot)
+        from quickjs_wasm.handle import Handle as _Handle
+        return _Handle(self, self._bridge, self._ctx_id, slot)
 
     @property
     def globals(self) -> Globals:

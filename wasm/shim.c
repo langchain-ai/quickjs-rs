@@ -1217,12 +1217,48 @@ QJS_EXPORT int32_t qjs_get_prop_u32(uint32_t ctx_id, uint32_t obj_slot,
     return -1;
 }
 
+/* Call a JS function held in `fn_slot`. `this_slot == 0` means use
+ * JS_UNDEFINED as the receiver (strict-mode default). `argv_ptr` points
+ * at `argc` consecutive uint32 slot IDs in guest memory. Returns:
+ *   0 = ok, *out_slot is a fresh slot owning the result
+ *   1 = JS exception, *out_slot is a fresh slot owning the exception
+ *  <0 = shim error */
 QJS_EXPORT int32_t qjs_call(uint32_t ctx_id, uint32_t fn_slot, uint32_t this_slot,
                             uint32_t argc, uint32_t argv_ptr,
                             uint32_t *out_slot) {
-    (void)ctx_id; (void)fn_slot; (void)this_slot; (void)argc; (void)argv_ptr;
-    if (out_slot) *out_slot = 0;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot || !slot_valid(c, fn_slot)) return -1;
+    *out_slot = 0;
+    if (this_slot != 0 && !slot_valid(c, this_slot)) return -1;
+
+    JSValue *argv = NULL;
+    if (argc > 0) {
+        argv = (JSValue *)malloc(sizeof(JSValue) * argc);
+        if (!argv) return -1;
+        const uint32_t *arg_slots = (const uint32_t *)(uintptr_t)argv_ptr;
+        for (uint32_t i = 0; i < argc; i++) {
+            uint32_t s = arg_slots[i];
+            if (!slot_valid(c, s)) { free(argv); return -1; }
+            argv[i] = c->slots[s].value;
+        }
+    }
+
+    JSValue this_val = this_slot == 0 ? JS_UNDEFINED : c->slots[this_slot].value;
+    JSValue result = JS_Call(c->ctx, c->slots[fn_slot].value, this_val,
+                             (int)argc, argv);
+    free(argv);
+
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(c->ctx);
+        uint32_t slot = slot_alloc(c, exc);
+        if (slot == 0) { JS_FreeValue(c->ctx, exc); return -1; }
+        *out_slot = slot;
+        return 1;
+    }
+    uint32_t slot = slot_alloc(c, result);
+    if (slot == 0) { JS_FreeValue(c->ctx, result); return -1; }
+    *out_slot = slot;
+    return 0;
 }
 
 QJS_EXPORT int32_t qjs_new_instance(uint32_t ctx_id, uint32_t ctor_slot,
@@ -1230,12 +1266,39 @@ QJS_EXPORT int32_t qjs_new_instance(uint32_t ctx_id, uint32_t ctor_slot,
                                     uint32_t *out_slot) {
     (void)ctx_id; (void)ctor_slot; (void)argc; (void)argv_ptr;
     if (out_slot) *out_slot = 0;
+    /* TODO(handles): Handle.new wires JS_CallConstructor; not exercised by
+     * the v0.1 acceptance test (§13), so left stubbed for now. */
     return -1;
 }
 
+/* §7.2 ValueKind enum. Keep in sync with quickjs_wasm.handle.ValueKind. */
+#define KIND_NULL      0
+#define KIND_UNDEFINED 1
+#define KIND_BOOLEAN   2
+#define KIND_NUMBER    3
+#define KIND_BIGINT    4
+#define KIND_STRING    5
+#define KIND_SYMBOL    6
+#define KIND_OBJECT    7
+#define KIND_FUNCTION  8
+#define KIND_ARRAY     9
+
 QJS_EXPORT uint32_t qjs_type_of(uint32_t ctx_id, uint32_t slot) {
-    (void)ctx_id; (void)slot;
-    return 0; /* "null" sentinel; real mapping lands with handles. */
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !slot_valid(c, slot)) return KIND_UNDEFINED;
+    JSValue v = c->slots[slot].value;
+    int tag = JS_VALUE_GET_TAG(v);
+
+    if (tag == JS_TAG_NULL) return KIND_NULL;
+    if (tag == JS_TAG_UNDEFINED) return KIND_UNDEFINED;
+    if (tag == JS_TAG_BOOL) return KIND_BOOLEAN;
+    if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag)) return KIND_NUMBER;
+    if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT) return KIND_BIGINT;
+    if (tag == JS_TAG_STRING || tag == JS_TAG_STRING_ROPE) return KIND_STRING;
+    if (tag == JS_TAG_SYMBOL) return KIND_SYMBOL;
+    if (JS_IsArray(v)) return KIND_ARRAY;
+    if (JS_IsFunction(c->ctx, v)) return KIND_FUNCTION;
+    return KIND_OBJECT;
 }
 
 QJS_EXPORT bool qjs_is_promise(uint32_t ctx_id, uint32_t slot) {
