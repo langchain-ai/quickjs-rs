@@ -857,7 +857,21 @@ If that JS error propagates back out to Python uncaught, it's rewrapped as `Host
 - A user-written JS Promise that never resolves.
 - Logic bug in evaluated code (forgot to call `resolve()`, etc.).
 
-### 10.4 Invariant
+### 10.4 Exception propagation implementation notes
+
+**ExceptionGroup unwrapping from TaskGroup teardown.** `eval_async`'s driving loop runs inside an `asyncio.TaskGroup` (§7.4 cancellation). When a non-cancellation exception escapes the group, the TaskGroup re-raises it as `BaseExceptionGroup`. The driving loop unwraps single-exception groups so callers see a bare `DeadlockError` / `HostError` / `JSError` / etc. rather than a group wrapper that doesn't add information.
+
+The unwrap idiom is `raise inner from inner.__cause__`, which is subtle:
+
+- A bare `raise inner` would work but triggers `ruff B904` inside an `except`-handler ("use `raise ... from err` or `raise ... from None`").
+- `raise inner from None` would clear `inner.__cause__` and break the `HostError.__cause__` threading for Python exceptions that crossed the JS boundary (§10.2). That threading is what lets users inspect the original Python traceback for a host function that raised.
+- `raise inner from inner.__cause__` reassigns `__cause__` to its existing value. Semantically a no-op, it satisfies B904 and preserves the chain.
+
+If a future Python release introduces a cleaner idiom for "unwrap a group and preserve `__cause__`," the bridge's `_drive_promise` is the single site to update.
+
+**Multi-exception group handling.** The driving loop's structure (drain-then-check, any rejection exits step 4, `_run_async_host_call` catches non-cancel exceptions internally and encodes them as `promise_reject` payloads) makes multi-member `BaseExceptionGroup` empirically unreachable in normal flow. Reaching the multi-exception path would require `promise_reject` itself to throw (shim-boundary failure, OOM mid-settle) or a future refactor that lets host tasks raise bare Python exceptions into the group. The current driving loop passes multi-member groups through as-is rather than guessing at a single canonical exception; if a real producer for this path ever appears, the right fix is either first-exception-with-rest-as-context or a dedicated multi-HostError surface, decided at that point.
+
+### 10.5 Invariant
 
 Every public Python method either returns successfully or raises a `QuickJSError` subclass. No bare `Exception`, no `RuntimeError` leaking from the bridge.
 

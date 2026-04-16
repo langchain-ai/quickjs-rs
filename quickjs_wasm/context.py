@@ -610,10 +610,7 @@ class Context:
             # TaskGroup wraps everything in BaseExceptionGroup on exit;
             # we already peeled off the CancelledError subgroup above.
             # Anything here is a user-visible error (DeadlockError,
-            # TimeoutError, JSError, HostError). Unwrap single-
-            # exception groups for ergonomic surface; a multi-member
-            # group is unusual but can happen if multiple host tasks
-            # threw before the driving loop noticed.
+            # TimeoutError, JSError, HostError).
             if len(eg.exceptions) == 1:
                 inner = eg.exceptions[0]
                 if isinstance(inner, BaseException):
@@ -621,12 +618,29 @@ class Context:
                     # _raise_from_exception_slot via `raise err from
                     # cause` for HostError). A bare `raise inner`
                     # triggers B904; `raise inner from inner.__cause__`
-                    # is a no-op that preserves the chain and
-                    # satisfies the linter. The ExceptionGroup wraps
-                    # the inner exception; users of eval_async see a
-                    # bare DeadlockError / HostError / etc. as if the
+                    # is a semantic no-op that preserves the chain
+                    # and satisfies the linter. §10.5 documents the
+                    # idiom. Users of eval_async see a bare
+                    # DeadlockError / HostError / etc. as if the
                     # TaskGroup were invisible.
                     raise inner from inner.__cause__
+            # Multi-exception group: defensive path. Empirically
+            # unreachable under the current driving-loop structure
+            # (the loop drains jobs between waits, any rejection
+            # exits step 4 immediately, cancelled siblings surface
+            # as CancelledError and are peeled off by the except*
+            # above). _run_async_host_call catches all non-cancel
+            # exceptions internally and encodes them as
+            # promise_reject payloads, so host tasks don't raise
+            # into the group in normal flow. Reaching here would
+            # require promise_reject itself to throw (shim-boundary
+            # failure) or a future refactor that lets host tasks
+            # raise bare Python exceptions into the group. If this
+            # ever fires, the right fix is to unwrap and surface the
+            # first exception with the rest as __context__, or to
+            # define a multi-HostError surface. For now, pass through
+            # the BaseExceptionGroup so the failure is visible rather
+            # than silently wrong.
             raise
         finally:
             # Final non-cancellation cleanup. The cancellation path
