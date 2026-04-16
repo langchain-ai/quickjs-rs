@@ -279,37 +279,27 @@ async def test_cancel_finally_host_calls_also_cancelled() -> None:
 
 async def test_sync_eval_with_async_hostfn_raises_concurrent_eval_error() -> None:
     """§13.2 / §7.4: sync ctx.eval that invokes a registered async host
-    function raises ConcurrentEvalError. The detection happens at the
-    dispatcher level (no asyncio loop → set flag) and surfaces when
-    eval returns."""
+    function raises ConcurrentEvalError. Step 11's structural
+    detection (``Bridge._in_sync_eval`` boolean) fires regardless of
+    whether an asyncio loop is ambient, so this test runs as a plain
+    async test rather than needing to escape pytest-asyncio's
+    auto-mode loop via a thread."""
     from quickjs_wasm import ConcurrentEvalError
 
-    def runner() -> None:
-        with Runtime() as rt:
-            with rt.new_context() as ctx:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
 
-                async def slow(n: int) -> int:
-                    await asyncio.sleep(0)
-                    return n
+            async def slow(n: int) -> int:
+                await asyncio.sleep(0)
+                return n
 
-                ctx.register("slow", slow)
+            ctx.register("slow", slow)
 
-                with pytest.raises(ConcurrentEvalError):
-                    ctx.eval("slow(1)")
+            with pytest.raises(ConcurrentEvalError):
+                ctx.eval("slow(1)")
 
-                # Context not corrupted: subsequent sync eval works.
-                assert ctx.eval("1 + 1") == 2
-
-    # Run the body in a dedicated thread so there's genuinely no
-    # asyncio loop in sight during ctx.eval. (pytest-asyncio's auto
-    # mode puts us inside a running loop by default; we need to be
-    # outside it to exercise the "no running loop" dispatcher path.)
-    import threading
-
-    thread = threading.Thread(target=runner)
-    thread.start()
-    thread.join(timeout=5.0)
-    assert not thread.is_alive(), "sync-eval test thread hung"
+            # Context not corrupted: subsequent sync eval works.
+            assert ctx.eval("1 + 1") == 2
 
 
 async def test_async_eval_works_after_sync_eval_async_hostfn_error() -> None:
@@ -363,7 +353,7 @@ def test_sync_eval_pure_js_promise_is_not_error() -> None:
                 h.dispose()
 
 
-def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> None:
+async def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> None:
     """Edge case: JS code that wraps the async host call in a
     try/catch still surfaces ConcurrentEvalError to Python. JS
     'handling' the rejection doesn't mean the Python caller got
@@ -373,27 +363,19 @@ def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> None:
     handler runs."""
     from quickjs_wasm import ConcurrentEvalError
 
-    def runner() -> None:
-        with Runtime() as rt:
-            with rt.new_context() as ctx:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
 
-                async def slow() -> int:
-                    return 1
+            async def slow() -> int:
+                return 1
 
-                ctx.register("slow", slow)
+            ctx.register("slow", slow)
 
-                with pytest.raises(ConcurrentEvalError):
-                    ctx.eval(
-                        "try { slow(); 'unreachable' } "
-                        "catch (e) { e.name }"
-                    )
-
-    import threading
-
-    thread = threading.Thread(target=runner)
-    thread.start()
-    thread.join(timeout=5.0)
-    assert not thread.is_alive()
+            with pytest.raises(ConcurrentEvalError):
+                ctx.eval(
+                    "try { slow(); 'unreachable' } "
+                    "catch (e) { e.name }"
+                )
 
 
 async def test_async_host_function_raises_surfaces_hosterror() -> None:
@@ -424,90 +406,59 @@ async def test_async_host_function_raises_surfaces_hosterror() -> None:
             assert isinstance(excinfo.value.__cause__, CustomError)
 
 
-def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
+async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
     """Handle.call on an async host function from sync context must
     raise ConcurrentEvalError, matching Context.eval's behavior for
     the same failure mode. The step-9 flag-and-surface pattern
     extends to Handle.call as a spec-compliance property — the
     user-visible behavior should be consistent regardless of which
     sync entry point invoked the async host function."""
-    import threading
-
     from quickjs_wasm import ConcurrentEvalError
 
-    exc: list[BaseException] = []
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
 
-    def runner() -> None:
-        try:
-            with Runtime() as rt:
-                with rt.new_context() as ctx:
+            async def slow(n: int) -> int:
+                await asyncio.sleep(0)
+                return n
 
-                    async def slow(n: int) -> int:
-                        await asyncio.sleep(0)
-                        return n
-
-                    ctx.register("slow", slow)
-                    # Get a handle to the slow function and call it
-                    # directly via Handle.call — no eval involved.
-                    slow_handle = ctx.eval_handle("slow")
-                    try:
-                        with pytest.raises(ConcurrentEvalError):
-                            slow_handle.call(1)
-                    finally:
-                        slow_handle.dispose()
-        except BaseException as e:  # noqa: BLE001
-            exc.append(e)
-
-    t = threading.Thread(target=runner)
-    t.start()
-    t.join(timeout=5.0)
-    assert not t.is_alive(), "handle.call test thread hung"
-    if exc:
-        raise exc[0]
+            ctx.register("slow", slow)
+            # Get a handle to the slow function and call it directly
+            # via Handle.call — no eval involved.
+            slow_handle = ctx.eval_handle("slow")
+            try:
+                with pytest.raises(ConcurrentEvalError):
+                    slow_handle.call(1)
+            finally:
+                slow_handle.dispose()
 
 
-def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -> None:
+async def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -> None:
     """Handle.call_method on an object whose method is an async host
     function. Via the existing call_method → call delegation, the
     ConcurrentEvalError surfaces without call_method needing its own
     flag-check wiring."""
-    import threading
-
     from quickjs_wasm import ConcurrentEvalError
 
-    exc: list[BaseException] = []
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
 
-    def runner() -> None:
-        try:
-            with Runtime() as rt:
-                with rt.new_context() as ctx:
+            async def slow(n: int) -> int:
+                await asyncio.sleep(0)
+                return n
 
-                    async def slow(n: int) -> int:
-                        await asyncio.sleep(0)
-                        return n
-
-                    # Register slow as a global, then build an object
-                    # whose method calls it. Handle.call_method on
-                    # that object triggers the async host fn during
-                    # the method's body.
-                    ctx.register("slow", slow)
-                    obj = ctx.eval_handle(
-                        "({ invoke(n) { return slow(n); } })"
-                    )
-                    try:
-                        with pytest.raises(ConcurrentEvalError):
-                            obj.call_method("invoke", 1)
-                    finally:
-                        obj.dispose()
-        except BaseException as e:  # noqa: BLE001
-            exc.append(e)
-
-    t = threading.Thread(target=runner)
-    t.start()
-    t.join(timeout=5.0)
-    assert not t.is_alive(), "handle.call_method test thread hung"
-    if exc:
-        raise exc[0]
+            # Register slow as a global, then build an object whose
+            # method calls it. Handle.call_method on that object
+            # triggers the async host fn during the method's body.
+            ctx.register("slow", slow)
+            obj = ctx.eval_handle(
+                "({ invoke(n) { return slow(n); } })"
+            )
+            try:
+                with pytest.raises(ConcurrentEvalError):
+                    obj.call_method("invoke", 1)
+            finally:
+                obj.dispose()
 
 
 async def test_cancelling_counter_preserved_after_absorption() -> None:

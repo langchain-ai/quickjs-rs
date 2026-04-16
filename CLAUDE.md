@@ -27,7 +27,10 @@ Before writing code for any section, re-read that section of the spec.
 
 ## The north star
 
-`tests/test_smoke.py` contains the acceptance test from §13. Every assertion in it represents functionality that must work for v0.1 to ship. Work through it assertion-by-assertion. Each passing assertion is a natural commit boundary.
+`tests/test_smoke.py` contains the acceptance tests from §13.
+
+- `test_acceptance` (§13.1) — the v0.1 north star. Remains green through v0.2 and beyond.
+- `test_async_acceptance` (§13.2) — the v0.2 north star. Every assertion represents functionality that must work for v0.2 to ship. Work through it assertion-by-assertion; each passing assertion is a natural commit boundary.
 
 ```bash
 pytest tests/test_smoke.py -v   # check current status
@@ -199,6 +202,65 @@ Do not ship a feature-flip commit that leaves the spec claiming the
 feature still raises NotImplementedError. That's a silent spec-code
 disagreement of exactly the kind §"Authoritative docs" forbids.
 
+## Spec-conformance tripwires
+
+When implementing a design choice from the spec that isn't obvious
+from reading the code — cancellation absorption semantics, budget
+independence across sync/async evals, cleanup ordering, structural
+detection over heuristics — add a single test whose docstring states
+the choice and references the spec section.
+
+The test exists not to prove "the feature works" (other tests cover
+that) but to fail red if a future refactor silently reverts the
+design choice. Growing test files accumulate a tripwire section
+alongside functional tests.
+
+Existing examples:
+
+- `test_cancel_finally_host_calls_also_cancelled` — §7.4
+  cancellation-during-cleanup: finally-block host calls are cancelled
+  alongside the rest, rather than being allowed to delay cancellation
+  indefinitely.
+- `test_swallowed_host_raise_does_not_leak_cause_into_later_eval` —
+  §10.2: the bridge's `_last_host_exception` side-channel is cleared
+  at each sync-eval entry so a swallowed raise doesn't wrongly
+  attach to an unrelated later `HostError`.
+- `test_sync_eval_pure_js_promise_is_not_error` — §7.4: sync-eval-
+  with-async-hostfn detection is dispatcher-level (flag set when a
+  registered async host fn is invoked), not eval-return-type-level
+  (returning a Promise doesn't, by itself, mean the user did
+  something wrong).
+- `test_sync_eval_does_not_decrement_cumulative_budget` — §7.4:
+  sync eval and async eval have independent timeout accounting.
+- `test_non_error_throw_coerces_to_jserror` — §10.1: `throw 'x'` /
+  `throw 42` surface as `JSError(name='Error', message=ToString(x))`
+  not as a missing-`.name` error.
+
+## Integration tests are load-bearing
+
+`test_smoke.py`'s §13.x acceptance tests are not redundant with the
+focused tests in `test_async.py`, `test_async_host_functions.py`,
+etc. The v0.2 §13.2 smoke test caught two real bugs in the
+cancellation machinery that focused tests missed:
+
+- Leaked `_pending_tasks` dict entries on cancel: focused tests
+  cancel and check propagation, but don't inspect continuation
+  state. The integration sequence (cancel → DeadlockError on a
+  later call) did.
+- TaskGroup scope gap for initial-eval dispatches: the TaskGroup
+  only wrapped the driving loop, not the initial eval — so host
+  tasks scheduled during the initial eval were bare
+  `loop.create_task` children the TaskGroup never saw. Focused
+  cancellation tests used "cancel mid-driving-loop" flows that
+  dodged the gap.
+
+Focused tests verify behavior through the API surface; integration
+tests exercise continuation state and long sequences where behavior
+composes. Do not skip or defer integration tests on the grounds
+that "focused tests already cover this" — that reasoning produced
+two production-quality bugs that would have shipped if v0.2 had
+tagged without §13.2 integrated.
+
 ## File map
 
 ```
@@ -218,8 +280,17 @@ quickjs_wasm/handle.py      §7.2 — Handle class
 quickjs_wasm/globals.py     §7.2 — Globals proxy
 quickjs_wasm/errors.py      §10 — exception hierarchy
 quickjs_wasm/_resources/quickjs.wasm   Built artifact
-tests/test_smoke.py         §13 acceptance test
-tests/test_*.py             §11.1 test files
+tests/test_smoke.py         §13.1 + §13.2 acceptance tests
+tests/test_async.py         §11.1 — eval_async / eval_handle_async
+tests/test_async_host_functions.py
+                            §11.1 — async host fn registration,
+                            cancellation, sync-eval-async-hostfn guard
+tests/test_errors.py        §11.1 — exception-class conformance tripwires
+tests/test_*.py             §11.1 v0.1 test files (primitives,
+                            objects, handles, globals, limits,
+                            exceptions, host_functions)
+tests/shim/                 Shim-level integration tests (direct
+                            Bridge access, not through Context)
 ```
 
 ## Quick reference — where things are specified
@@ -231,7 +302,11 @@ tests/test_*.py             §11.1 test files
 | MessagePack format | `spec/implementation.md` §8 |
 | Limits, WASI stubs | `spec/implementation.md` §9 |
 | Error types and propagation | `spec/implementation.md` §10 |
+| Async execution model (v0.2) | `spec/implementation.md` §7.4 |
+| Async error types (v0.2) | `spec/implementation.md` §10.3 |
+| Exception-propagation implementation notes | `spec/implementation.md` §10.4 |
 | Test layout | `spec/implementation.md` §11 |
 | Build toolchain | `spec/implementation.md` §4 |
-| Acceptance criteria | `spec/implementation.md` §13 |
-| What's in v0.1 vs later | `spec/implementation.md` §14, §16 |
+| Acceptance criteria | `spec/implementation.md` §13.1 (v0.1), §13.2 (v0.2) |
+| Implementation order | `spec/implementation.md` §17.1 (v0.1), §17.2 (v0.2) |
+| What's in v0.1 / v0.2 vs later | `spec/implementation.md` §14, §16 |
