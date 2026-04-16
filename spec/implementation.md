@@ -467,7 +467,14 @@ class Context:
         """
 
     @property
-    def timeout(self) -> float: ...
+    def timeout(self) -> float:
+        """Timeout semantics:
+
+        - sync eval: per-call, starts at eval entry, clears on return.
+        - eval_async: cumulative across all eval_async calls on this
+          context, starting from context creation. Per-call override via
+          the timeout= kwarg on eval_async itself.
+        """
     @timeout.setter
     def timeout(self, value: float) -> None: ...
 ```
@@ -777,7 +784,7 @@ If that JS error propagates back out to Python uncaught, it's rewrapped as `Host
 
 ### 10.3 Async-specific errors
 
-`HostCancellationError` is surfaced when the enclosing asyncio task is cancelled during `eval_async`. It appears to JS as an error with `name='HostCancellationError'` that can be caught with try/catch for cleanup. If uncaught in JS, `eval_async` re-raises `asyncio.CancelledError` to the caller.
+`HostCancellationError` is surfaced when the enclosing asyncio task is cancelled during `eval_async`. It appears to JS as an error with a `.name` property of the string `"HostCancellationError"`, injected by the shim's cancellation-encoding path (same pattern as `HostError` in §10.2 — the Python class name matches the injected string literal by convention, and renaming either side requires keeping both in sync). JS code can catch with try/catch for cleanup. If uncaught in JS, `eval_async` re-raises `asyncio.CancelledError` to the caller.
 
 `ConcurrentEvalError` is raised in two cases:
 - A second `eval_async` starts on a context with one already in flight.
