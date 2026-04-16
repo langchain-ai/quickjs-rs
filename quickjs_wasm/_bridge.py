@@ -82,6 +82,11 @@ class Bridge:
         # Instrumentation so tests can assert the copy-out-first invariant
         # (see §9 re-entrancy note). Each dispatch increments.
         self._host_call_counter = 0
+        # Side-channel for HostError.__cause__ threading (§10.2): the most
+        # recent Python exception raised inside a host dispatch, waiting
+        # to be picked up by Context._raise_from_exception_slot. Cleared
+        # after consumption so a second eval can't see a stale cause.
+        self._last_host_exception: BaseException | None = None
 
         self._instance = linker.instantiate(self._store, self._module)
 
@@ -179,6 +184,36 @@ class Bridge:
             return 0, self.read_bytes(data_ptr, data_len)
         finally:
             self.free(out_ptr)
+
+    def exception_to_msgpack(self, ctx: int, exc_slot: int) -> tuple[int, bytes]:
+        """Return (status, {name, message, stack} msgpack payload)."""
+        out_ptr = self.malloc(8)
+        if out_ptr == 0:
+            raise MemoryError("guest OOM allocating exception_to_msgpack out-params")
+        try:
+            status = int(
+                self._call(
+                    "qjs_exception_to_msgpack", ctx, exc_slot, out_ptr, out_ptr + 4
+                )
+            )
+            if status != 0:
+                return status, b""
+            header = self.read_bytes(out_ptr, 8)
+            data_ptr = int.from_bytes(header[0:4], "little")
+            data_len = int.from_bytes(header[4:8], "little")
+            return 0, self.read_bytes(data_ptr, data_len)
+        finally:
+            self.free(out_ptr)
+
+    def take_last_host_exception(self) -> BaseException | None:
+        """Pop the most recent Python exception raised in a host dispatch.
+
+        Context.eval calls this after catching a JS HostError so the
+        raised HostError.__cause__ can point at the original traceback.
+        """
+        exc = self._last_host_exception
+        self._last_host_exception = None
+        return exc
 
     def from_msgpack(self, ctx: int, payload: bytes) -> tuple[int, int]:
         """Return (status, slot). status: 0 ok, <0 shim error."""
@@ -315,6 +350,11 @@ class Bridge:
             reply = _msgpack.encode(result)
             return self._write_host_reply(out_ptr_addr, out_len_addr, reply, status=0)
         except BaseException as exc:  # noqa: BLE001 — bridge across languages
+            # Stash the live Python exception so Context.eval can attach
+            # it as HostError.__cause__ if/when the JS side surfaces the
+            # error back to Python. Overwritten on each dispatch; cleared
+            # when Context consumes it.
+            self._last_host_exception = exc
             reply = _msgpack.encode(
                 {
                     "name": "HostError",
@@ -355,6 +395,7 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_eval",
     "qjs_to_msgpack",
     "qjs_from_msgpack",
+    "qjs_exception_to_msgpack",
     "qjs_get_global_object",
     "qjs_get_prop",
     "qjs_set_prop",

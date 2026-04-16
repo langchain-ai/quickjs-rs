@@ -1022,12 +1022,57 @@ QJS_EXPORT int32_t qjs_from_msgpack(uint32_t ctx_id,
     return 0;
 }
 
+/* §10.1: marshal a JS exception as a {name, message, stack} map into the
+ * per-context scratch buffer. Missing fields are emitted as null. */
+static int32_t encode_exc_field(ShimContext *c, DynBuf *b, int32_t off,
+                                JSValueConst exc, const char *key) {
+    off = encode_str_bytes(b, off, (const uint8_t *)key, strlen(key));
+    if (off < 0) return -1;
+    JSValue v = JS_GetPropertyStr(c->ctx, exc, key);
+    if (JS_IsException(v)) {
+        /* Reading a property threw — drop it and emit null rather than
+         * fail the whole extraction. */
+        JSValue swallowed = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, swallowed);
+        return buf_write_u8(b, off, 0xc0);
+    }
+    if (JS_IsUndefined(v) || JS_IsNull(v)) {
+        JS_FreeValue(c->ctx, v);
+        return buf_write_u8(b, off, 0xc0);
+    }
+    size_t slen;
+    const char *s = JS_ToCStringLen(c->ctx, &slen, v);
+    JS_FreeValue(c->ctx, v);
+    if (!s) {
+        JSValue swallowed = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, swallowed);
+        return buf_write_u8(b, off, 0xc0);
+    }
+    off = encode_str_bytes(b, off, (const uint8_t *)s, slen);
+    JS_FreeCString(c->ctx, s);
+    return off;
+}
+
 QJS_EXPORT int32_t qjs_exception_to_msgpack(uint32_t ctx_id, uint32_t exc_slot,
                                             uint32_t *out_ptr, uint32_t *out_len) {
-    (void)ctx_id; (void)exc_slot;
-    if (out_ptr) *out_ptr = 0;
-    if (out_len) *out_len = 0;
-    return -1; /* Not yet implemented. */
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_ptr || !out_len || !slot_valid(c, exc_slot)) return -1;
+    dynbuf_reset(&c->scratch);
+
+    JSValue exc = c->slots[exc_slot].value;
+    int32_t off = encode_map_header(&c->scratch, 0, 3);
+    if (off < 0) return -1;
+    off = encode_exc_field(c, &c->scratch, off, exc, "name");
+    if (off < 0) return -1;
+    off = encode_exc_field(c, &c->scratch, off, exc, "message");
+    if (off < 0) return -1;
+    off = encode_exc_field(c, &c->scratch, off, exc, "stack");
+    if (off < 0) return -1;
+
+    c->scratch.len = (uint32_t)off;
+    *out_ptr = (uint32_t)(uintptr_t)c->scratch.data;
+    *out_len = c->scratch.len;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

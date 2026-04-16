@@ -75,13 +75,33 @@ def test_smoke_primitives() -> None:
             ctx.register("say_hi", lambda who: f"hi {who}")
             assert ctx.eval("say_hi('world')") == "hi world"
 
-            # Host exception propagates out as HostError
+            # Host exception propagates out as HostError with __cause__
+            # threaded back to the original Python exception.
             @ctx.function
             def boom() -> None:
                 raise ValueError("from python")
 
-            with pytest.raises(HostError):
+            with pytest.raises(HostError) as excinfo:
                 ctx.eval("boom()")
+            assert isinstance(excinfo.value.__cause__, ValueError)
+
+            # JS-side visibility: a try/catch inside JS sees the error's
+            # name and message and can round-trip them back as a string.
+            assert (
+                ctx.eval(
+                    "try { boom(); 'unreachable'; }"
+                    " catch (e) { e.name + ': ' + e.message }"
+                )
+                == "HostError: from python"
+            )
+
+            # JS-thrown TypeError (not a host error) surfaces as JSError
+            # with name=TypeError, message, and a populated stack.
+            with pytest.raises(JSError) as js_excinfo:
+                ctx.eval("throw new TypeError('bad thing')")
+            assert js_excinfo.value.name == "TypeError"
+            assert js_excinfo.value.message == "bad thing"
+            assert js_excinfo.value.stack is not None
 
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")

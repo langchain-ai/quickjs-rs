@@ -63,6 +63,13 @@ class Context:
             flags |= 0x1
         if strict:
             flags |= 0x4
+        # Clear the host-exception side-channel so a synthetic JS
+        # "HostError" from this eval can't inherit a stale __cause__
+        # from an earlier eval's host-fn raise that was caught by JS.
+        # Any host raise *within* this eval overwrites the channel
+        # through the host_call trampoline, so nested behavior is
+        # unchanged.
+        self._bridge.take_last_host_exception()
         status, slot = self._bridge.eval(self._ctx_id, code, flags)
         if status < 0:
             raise QuickJSError(f"shim error from qjs_eval: status={status}")
@@ -86,45 +93,42 @@ class Context:
             self._bridge.slot_drop(self._ctx_id, slot)
 
     def _raise_from_exception_slot(self, exc_slot: int) -> None:
-        """Extract name/message/stack off a JS exception slot and raise.
+        """Extract {name, message, stack} off a JS exception and raise.
 
-        Uses the existing qjs_get_prop + qjs_to_msgpack machinery rather
-        than qjs_exception_to_msgpack — the shim export for the dedicated
-        path is still stubbed and this is a strict subset of its behavior.
-        When qjs_exception_to_msgpack lands (error-hierarchy commit) this
-        helper can switch to it for symmetry, no caller changes needed.
+        Routes HostError-named exceptions to HostError with the original
+        Python exception attached as __cause__ (§10.2), so round-trips
+        through JS preserve Python-side debugging info.
         """
-        name = self._read_prop(exc_slot, "name") or "Error"
-        message = self._read_prop(exc_slot, "message") or ""
-        stack = self._read_prop(exc_slot, "stack")
+        status, payload = self._bridge.exception_to_msgpack(
+            self._ctx_id, exc_slot
+        )
+        if status < 0:
+            raise QuickJSError(
+                f"shim error from qjs_exception_to_msgpack: status={status}"
+            )
+        record = _msgpack.decode(payload)
+        if not isinstance(record, dict):
+            raise QuickJSError(
+                f"qjs_exception_to_msgpack returned {type(record).__name__}, "
+                "expected dict"
+            )
+        name = record.get("name") or "Error"
+        message = record.get("message") or ""
+        stack = record.get("stack")
         if not isinstance(name, str):
             name = str(name)
         if not isinstance(message, str):
             message = str(message)
         stack_str: str | None = stack if isinstance(stack, str) else None
         if name == "HostError":
-            # TODO(host-cause): thread the original Python exception through
-            # HostError.__cause__ in a follow-up commit so JS-side round-trips
-            # preserve Python-side debugging info.
-            raise HostError(name, message, stack_str)
+            cause = self._bridge.take_last_host_exception()
+            err = HostError(name, message, stack_str)
+            if cause is not None:
+                # Use `raise ... from cause` so __cause__ is set without us
+                # having to touch attributes directly.
+                raise err from cause
+            raise err
         raise JSError(name, message, stack_str)
-
-    def _read_prop(self, obj_slot: int, key: str) -> Any:
-        status, value_slot = self._bridge.get_prop(self._ctx_id, obj_slot, key)
-        if status != 0 or value_slot == 0:
-            if value_slot:
-                self._bridge.slot_drop(self._ctx_id, value_slot)
-            return None
-        try:
-            mp_status, payload = self._bridge.to_msgpack(self._ctx_id, value_slot)
-            if mp_status < 0:
-                return None
-            decoded = _msgpack.decode(payload)
-            if isinstance(decoded, Undefined):
-                return None
-            return decoded
-        finally:
-            self._bridge.slot_drop(self._ctx_id, value_slot)
 
     def eval_handle(
         self,
