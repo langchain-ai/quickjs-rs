@@ -197,10 +197,22 @@ class Handle:
             method.dispose()
 
     def new(self, *args: Handle | Any) -> Handle:
-        raise NotImplementedError(
-            "Handle.new (JS `new`) lands when qjs_new_instance is wired; "
-            "§13 acceptance doesn't exercise it."
-        )
+        """Call this handle as a JS constructor — equivalent to `new self(...)`.
+
+        See spec §7.2. Use when ``self.type_of == "function"`` and the
+        function is constructor-callable (most are, except arrow
+        functions which JS itself throws TypeError on when ``new``d).
+        """
+        self._check_live()
+        arg_slots, owned_slots = self._coerce_args(args)
+        try:
+            status, result_slot = self._bridge.new_instance(
+                self._ctx_id, self._slot, arg_slots
+            )
+            return self._slot_to_handle_or_raise(status, result_slot)
+        finally:
+            for s in owned_slots:
+                self._bridge.slot_drop(self._ctx_id, s)
 
     def to_python(self, *, allow_opaque: bool = False) -> Any:
         self._check_live()

@@ -160,6 +160,39 @@ def test_handle_holds_function_that_would_fail_marshaling() -> None:
                     result.dispose()
 
 
+def test_handle_new_constructs_instances() -> None:
+    """§7.2 Handle.new: invoke the handle as a JS constructor. Uses Date
+    because it's a canonical built-in constructor with observable state
+    (the JS month argument is zero-indexed, so January = 0)."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle("Date") as date_ctor:
+                d = date_ctor.new(2024, 0, 1)
+                try:
+                    year_handle = d.call_method("getFullYear")
+                    try:
+                        assert year_handle.to_python() == 2024
+                    finally:
+                        year_handle.dispose()
+                finally:
+                    d.dispose()
+
+
+def test_handle_new_propagates_constructor_exceptions() -> None:
+    """A constructor that throws surfaces the throw as JSError, same as
+    Handle.call — constructor vs function call is a JS-semantic
+    distinction, not an error-handling one."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle(
+                "function Bad() { throw new TypeError('no can do'); } Bad"
+            ) as ctor:
+                with pytest.raises(JSError) as excinfo:
+                    ctor.new()
+                assert excinfo.value.name == "TypeError"
+                assert excinfo.value.message == "no can do"
+
+
 def test_js_throw_inside_handle_call_surfaces_as_jserror() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:

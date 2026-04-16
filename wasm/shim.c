@@ -1261,14 +1261,45 @@ QJS_EXPORT int32_t qjs_call(uint32_t ctx_id, uint32_t fn_slot, uint32_t this_slo
     return 0;
 }
 
+/* Call a JS constructor: `new ctor(...args)`. Same argv encoding as
+ * qjs_call. Returns:
+ *   0 = ok, *out_slot owns the newly-constructed instance
+ *   1 = JS exception, *out_slot owns the exception
+ *  <0 = shim error */
 QJS_EXPORT int32_t qjs_new_instance(uint32_t ctx_id, uint32_t ctor_slot,
                                     uint32_t argc, uint32_t argv_ptr,
                                     uint32_t *out_slot) {
-    (void)ctx_id; (void)ctor_slot; (void)argc; (void)argv_ptr;
-    if (out_slot) *out_slot = 0;
-    /* TODO(handles): Handle.new wires JS_CallConstructor; not exercised by
-     * the v0.1 acceptance test (§13), so left stubbed for now. */
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c || !out_slot || !slot_valid(c, ctor_slot)) return -1;
+    *out_slot = 0;
+
+    JSValue *argv = NULL;
+    if (argc > 0) {
+        argv = (JSValue *)malloc(sizeof(JSValue) * argc);
+        if (!argv) return -1;
+        const uint32_t *arg_slots = (const uint32_t *)(uintptr_t)argv_ptr;
+        for (uint32_t i = 0; i < argc; i++) {
+            uint32_t s = arg_slots[i];
+            if (!slot_valid(c, s)) { free(argv); return -1; }
+            argv[i] = c->slots[s].value;
+        }
+    }
+
+    JSValue result = JS_CallConstructor(c->ctx, c->slots[ctor_slot].value,
+                                        (int)argc, argv);
+    free(argv);
+
+    if (JS_IsException(result)) {
+        JSValue exc = JS_GetException(c->ctx);
+        uint32_t slot = slot_alloc(c, exc);
+        if (slot == 0) { JS_FreeValue(c->ctx, exc); return -1; }
+        *out_slot = slot;
+        return 1;
+    }
+    uint32_t slot = slot_alloc(c, result);
+    if (slot == 0) { JS_FreeValue(c->ctx, result); return -1; }
+    *out_slot = slot;
+    return 0;
 }
 
 /* §7.2 ValueKind enum. Keep in sync with quickjs_wasm.handle.ValueKind. */
