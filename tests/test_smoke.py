@@ -122,15 +122,27 @@ def test_smoke_primitives() -> None:
             # Handles: eval_handle returns a Handle that outlives
             # its creating eval call, supports property access, method
             # invocation, and to_python marshaling for the subset of
-            # values that are marshalable.
+            # values that are marshalable. allow_opaque=True substitutes
+            # child Handles for unmarshalable values (functions here).
             with ctx.eval_handle(
                 "({x: 1, y: 2, add(a, b) { return a + b }})"
             ) as obj:
                 assert obj.type_of == "object"
-                assert obj.get("x").to_python() == 1
+                x_handle = obj.get("x")
+                try:
+                    assert x_handle.to_python() == 1
+                finally:
+                    x_handle.dispose()
                 result = obj.call_method("add", 10, 20)
                 assert result.to_python() == 30
                 result.dispose()
+
+                as_dict = obj.to_python(allow_opaque=True)
+                assert as_dict["x"] == 1
+                assert as_dict["y"] == 2
+                assert hasattr(as_dict["add"], "call")
+                assert as_dict["add"].type_of == "function"
+                as_dict["add"].dispose()
 
             # Multi-context isolation: globals don't leak across
             # contexts sharing the same Runtime.
@@ -140,7 +152,6 @@ def test_smoke_primitives() -> None:
                 assert ctx.eval("typeof y") == "undefined"
 
 
-@pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:

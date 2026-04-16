@@ -160,6 +160,69 @@ def test_handle_holds_function_that_would_fail_marshaling() -> None:
                     result.dispose()
 
 
+def test_to_python_allow_opaque_substitutes_child_handles() -> None:
+    """§7.2: allow_opaque=True produces marshalable leaves and child
+    Handles at positions where msgpack would fail."""
+    from quickjs_wasm import MarshalError
+
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle(
+                "({n: 1, s: 'ok', f: () => 42, nested: {g: () => 'deep'}})"
+            ) as obj:
+                # Without allow_opaque, the function member fails
+                # marshaling for the whole value.
+                with pytest.raises(MarshalError):
+                    obj.to_python()
+
+                as_dict = obj.to_python(allow_opaque=True)
+                try:
+                    assert as_dict["n"] == 1
+                    assert as_dict["s"] == "ok"
+                    assert as_dict["f"].type_of == "function"
+                    # Recursion into plain nested object with a function.
+                    assert as_dict["nested"]["g"].type_of == "function"
+                    # Calling the materialized handle works.
+                    r = as_dict["f"].call()
+                    try:
+                        assert r.to_python() == 42
+                    finally:
+                        r.dispose()
+                finally:
+                    as_dict["f"].dispose()
+                    as_dict["nested"]["g"].dispose()
+
+
+def test_to_python_allow_opaque_arrays_recurse() -> None:
+    """Arrays under allow_opaque walk element-by-element so mixed
+    marshalable / opaque contents work."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle("[1, 'two', () => 3, {inner: 4}]") as arr:
+                values = arr.to_python(allow_opaque=True)
+                try:
+                    assert values[0] == 1
+                    assert values[1] == "two"
+                    assert values[2].type_of == "function"
+                    assert values[3] == {"inner": 4}
+                finally:
+                    values[2].dispose()
+
+
+def test_to_python_allow_opaque_cycle_raises_marshalerror() -> None:
+    """Cycles raise MarshalError even under allow_opaque — documented
+    behavior. Detection is indirect (via depth cap) rather than via a
+    same-value check, which is fine for v0.1 since the depth cap of 128
+    fails fast long before the walk does anything harmful."""
+    from quickjs_wasm import MarshalError
+
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle("const a = {}; a.self = a; a") as cyclic:
+                with pytest.raises(MarshalError):
+                    cyclic.to_python(allow_opaque=True)
+
+
 def test_handle_new_constructs_instances() -> None:
     """§7.2 Handle.new: invoke the handle as a JS constructor. Uses Date
     because it's a canonical built-in constructor with observable state

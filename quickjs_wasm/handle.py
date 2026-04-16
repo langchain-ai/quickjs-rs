@@ -215,11 +215,28 @@ class Handle:
                 self._bridge.slot_drop(self._ctx_id, s)
 
     def to_python(self, *, allow_opaque: bool = False) -> Any:
+        """Marshal this handle out to a Python value.
+
+        With ``allow_opaque=False`` (default): round-trip via msgpack.
+        Any child that would fail marshaling — a function, symbol, or
+        a graph that exceeds the depth limit (including cycles) —
+        raises :class:`MarshalError`.
+
+        With ``allow_opaque=True``: walk the value recursively.
+        Marshalable leaves are materialized; children that would
+        otherwise fail get substituted with a child :class:`Handle` that
+        the caller is responsible for disposing. Cycles still raise
+        :class:`MarshalError` — a self-referential object with a Handle
+        at the cycle point isn't meaningfully different from raising,
+        and detecting cycles cheaply would require an extra shim
+        export (``JS_IsSameValue``) we don't need for v0.1. The
+        recursion depth cap (128, matching the encoder's
+        ``MARSHAL_MAX_DEPTH``) bounds the walk so a cyclic object
+        fails fast.
+        """
         self._check_live()
         if allow_opaque:
-            raise NotImplementedError(
-                "to_python(allow_opaque=True) lands in the next commit."
-            )
+            return self._to_python_opaque(depth=0)
         mp_status, payload = self._bridge.to_msgpack(self._ctx_id, self._slot)
         if mp_status < 0:
             raise MarshalError(
@@ -234,6 +251,132 @@ class Handle:
             if not preserve:
                 return None
         return value
+
+    # Matches MARSHAL_MAX_DEPTH in wasm/shim.c.
+    _OPAQUE_MAX_DEPTH = 128
+
+    def _to_python_opaque(self, *, depth: int) -> Any:
+        """Recursive walk for to_python(allow_opaque=True).
+
+        Called only on a live Handle. Produces marshalable values where
+        possible and substitutes child Handles where not. The caller
+        (top-level ``to_python``) doesn't consume ``self`` — a caller
+        that wants to dispose the root handle does so themselves.
+        """
+        if depth > self._OPAQUE_MAX_DEPTH:
+            raise MarshalError(
+                f"to_python(allow_opaque=True) exceeded depth limit "
+                f"({self._OPAQUE_MAX_DEPTH}); the value likely contains "
+                "a cycle"
+            )
+        kind = self.type_of
+        if kind in ("null", "undefined", "boolean", "number", "bigint",
+                    "string"):
+            # Atomic — msgpack handles it; decode and return.
+            mp_status, payload = self._bridge.to_msgpack(self._ctx_id, self._slot)
+            if mp_status < 0:
+                raise MarshalError(
+                    f"unexpected msgpack failure on atomic kind {kind!r}"
+                )
+            value = _msgpack.decode(payload)
+            if isinstance(value, Undefined):
+                ctx = self._context_ref()
+                preserve = getattr(ctx, "preserve_undefined", False) if ctx else False
+                if not preserve:
+                    return None
+            return value
+
+        if kind in ("function", "symbol"):
+            # Not marshalable — return a child Handle that duplicates
+            # the underlying slot so disposing `self` doesn't invalidate
+            # the returned Handle.
+            return self._dup_as_child_handle()
+
+        if kind == "array":
+            # Walk indices. JS arrays are dense-indexed 0..length-1; we
+            # materialize each slot as its own Handle, recurse, and
+            # dispose the intermediate.
+            length_handle = self.get("length")
+            try:
+                length = length_handle.to_python()
+            finally:
+                length_handle.dispose()
+            if not isinstance(length, (int, float)):
+                raise MarshalError(
+                    f"array.length marshaled as {type(length).__name__}, "
+                    "expected number"
+                )
+            result: list[Any] = []
+            for i in range(int(length)):
+                child = self.get(i)
+                try:
+                    result.append(child._to_python_opaque(depth=depth + 1))
+                finally:
+                    child.dispose()
+            return result
+
+        if kind == "object":
+            # Special-case Uint8Array — bytes round-trip through the
+            # atomic path even though type_of returns "object".
+            mp_status, payload = self._bridge.to_msgpack(
+                self._ctx_id, self._slot
+            )
+            if mp_status == 0:
+                # Fully marshalable (plain object with marshalable
+                # children). Decode and return.
+                return _msgpack.decode(payload)
+            # Otherwise, walk own enumerable string-keyed properties.
+            # Use qjs_get_prop per key; iterate via Object.keys (cheap
+            # enough for v0.1, avoids adding a qjs_own_keys export).
+            keys_handle = self._own_keys()
+            try:
+                keys = keys_handle.to_python()
+            finally:
+                keys_handle.dispose()
+            if not isinstance(keys, list):
+                raise MarshalError(
+                    f"Object.keys returned {type(keys).__name__}, expected list"
+                )
+            result_map: dict[str, Any] = {}
+            for key in keys:
+                if not isinstance(key, str):
+                    raise MarshalError(
+                        f"Object.keys returned non-string entry: {key!r}"
+                    )
+                child = self.get(key)
+                try:
+                    result_map[key] = child._to_python_opaque(depth=depth + 1)
+                finally:
+                    child.dispose()
+            return result_map
+
+        # Unknown kind (shouldn't happen given the full enumeration
+        # above, but defensive).
+        return self._dup_as_child_handle()
+
+    def _dup_as_child_handle(self) -> Handle:
+        new_slot = self._bridge.slot_dup(self._ctx_id, self._slot)
+        if new_slot == 0:
+            raise MarshalError("failed to dup handle slot")
+        ctx = self._context_ref()
+        if ctx is None:
+            raise InvalidHandleError("owning context closed")
+        return Handle(ctx, self._bridge, self._ctx_id, new_slot)
+
+    def _own_keys(self) -> Handle:
+        """Return a Handle to Object.keys(self). Used by the allow_opaque
+        walk to enumerate own enumerable string-keyed properties without
+        adding a dedicated shim export."""
+        # Resolve Object.keys via the global object, call it with self
+        # as the single argument.
+        ctx = self._context_ref()
+        if ctx is None:
+            raise InvalidHandleError("owning context closed")
+        keys_fn_handle = ctx.eval_handle("Object.keys")
+        try:
+            return keys_fn_handle.call(self)
+        finally:
+            keys_fn_handle.dispose()
 
     def await_promise(self, *, deadline: float | None = None) -> Handle:
         raise NotImplementedError("await_promise lands in v0.3; see spec §7.2.")
