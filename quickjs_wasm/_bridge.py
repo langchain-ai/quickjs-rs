@@ -120,26 +120,20 @@ class Bridge:
             self._call("qjs_slot_drop", ctx, slot)
 
     def eval(self, ctx: int, code: str, flags: int = 0) -> tuple[int, int]:
-        """Return (status, slot). status: 0 ok, 1 exception, <0 shim error.
-
-        The trailing NUL matters: quickjs-ng's parser one-past overreads the
-        input buffer during token lookahead despite being given an explicit
-        length, and trips a "SyntaxError: invalid UTF-8 sequence" on
-        whatever uninitialized byte follows. Padding with NUL makes the
-        overread harmless.
-        """
-        encoded = code.encode("utf-8") + b"\x00"
-        code_ptr = self.malloc(len(encoded))
-        if code_ptr == 0:
+        """Return (status, slot). status: 0 ok, 1 exception, <0 shim error."""
+        encoded = code.encode("utf-8")
+        code_ptr = self.malloc(len(encoded)) if encoded else 0
+        if encoded and code_ptr == 0:
             raise MemoryError("guest OOM allocating eval code buffer")
         out_ptr = self.malloc(4)
         if out_ptr == 0:
             self.free(code_ptr)
             raise MemoryError("guest OOM allocating eval out-slot pointer")
         try:
-            self.write_bytes(code_ptr, encoded)
+            if encoded:
+                self.write_bytes(code_ptr, encoded)
             status = int(
-                self._call("qjs_eval", ctx, code_ptr, len(encoded) - 1, flags, out_ptr)
+                self._call("qjs_eval", ctx, code_ptr, len(encoded), flags, out_ptr)
             )
             slot_bytes = self.read_bytes(out_ptr, 4)
             slot = int.from_bytes(slot_bytes, "little")

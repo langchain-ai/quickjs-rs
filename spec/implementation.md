@@ -250,6 +250,7 @@ int32_t host_interrupt(void);
 - The scratch MessagePack buffer for `qjs_to_msgpack` belongs to the context; subsequent calls invalidate it. Python side must fully read before making another call.
 - `qjs_runtime_install_interrupt` must be called before any `qjs_eval` that should be interruptible; in practice the Python `Runtime` calls it in its constructor path.
 - QuickJS is built with `CONFIG_BIGNUM=y`. BigInts are supported.
+- `qjs_eval` internally NUL-pads its input before handing to the underlying QuickJS parser; callers pass raw `(code_ptr, code_len)` without trailing-NUL padding. QuickJS's tokenizer does one-past-end lookahead during token scanning despite taking an explicit length, and without the pad it trips a spurious `SyntaxError: invalid UTF-8 sequence` on whatever uninitialized byte follows. The shim absorbs this so no caller — Python bridge, future WIT-component host, test harness — has to remember.
 
 ## 7. Python package
 

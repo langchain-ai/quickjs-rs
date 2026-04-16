@@ -285,8 +285,16 @@ QJS_EXPORT int32_t qjs_eval(uint32_t ctx_id,
     if (flags & 0x2) eval_flags |= JS_EVAL_FLAG_COMPILE_ONLY;
     if (flags & 0x4) eval_flags |= JS_EVAL_FLAG_STRICT;
 
-    const char *code = (const char *)(uintptr_t)code_ptr;
+    /* §6.4: quickjs-ng's tokenizer one-past-overreads the input buffer
+     * during lookahead despite being given an explicit length; copy into
+     * a NUL-terminated buffer so callers don't have to pad. */
+    char *code = (char *)malloc((size_t)code_len + 1);
+    if (!code) return -1;
+    if (code_len > 0) memcpy(code, (const void *)(uintptr_t)code_ptr, code_len);
+    code[code_len] = '\0';
+
     JSValue result = JS_Eval(c->ctx, code, (size_t)code_len, "<eval>", eval_flags);
+    free(code);
 
     if (JS_IsException(result)) {
         JSValue exc = JS_GetException(c->ctx);
