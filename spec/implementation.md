@@ -168,9 +168,26 @@ uint32_t qjs_slot_dup(uint32_t ctx, uint32_t slot);
 void     qjs_slot_drop(uint32_t ctx, uint32_t slot);
 
 /* Eval.
- * flags: bit 0 = module, bit 1 = compile-only, bit 2 = strict.
+ * flags: bit 0 = module, bit 1 = compile-only, bit 2 = strict,
+ *        bit 3 = async (top-level await enabled; result is a Promise).
  * On success (0), *out_slot is the result.
  * On exception (1), *out_slot is the exception (call qjs_exception_to_msgpack to extract).
+ *
+ * When bit 3 is set, the eval compiles as an implicit async function:
+ * a Promise is returned, and the Promise's fulfilled value has the
+ * ECMA iterator-result shape {value, done: true} because quickjs-ng
+ * wraps async-function completions that way. The shim does not
+ * unwrap the envelope — callers extract `.value` from the resolved
+ * slot themselves. Preserving the raw shape at the ABI means
+ * raw-ABI callers (test harnesses, future component-model hosts)
+ * see the same shape the shim sees, and the unwrap lives in one
+ * place on the caller side rather than a silent shim-layer mutation.
+ *
+ * Bit 3 is only valid with bit 0 clear — quickjs-ng's top-level-await
+ * support is script-mode-only (JS_EVAL_FLAG_ASYNC requires
+ * JS_EVAL_TYPE_GLOBAL). True ES module mode (bit 0 set) without
+ * async is legal; true module mode with top-level await via bit 3
+ * is not, and passing both is rejected by the underlying parser.
  */
 int32_t qjs_eval(uint32_t ctx, uint32_t code_ptr, uint32_t code_len,
                  uint32_t flags, uint32_t *out_slot);
@@ -310,6 +327,7 @@ int32_t host_interrupt(void);
 - **v0.2** Pending IDs returned from `host_call_async` are monotonically increasing per context and unique. The shim-side map from `pending_id → (resolve, reject)` is cleaned up when either resolver fires. Calling `qjs_promise_resolve` or `qjs_promise_reject` with an already-settled or unknown `pending_id` returns negative status without side effects.
 - **v0.2** `qjs_promise_result` on a pending promise returns negative status; callers must check `qjs_promise_state` first.
 - **v0.2** When a runtime's interrupt fires while async host calls are in flight, the shim does not attempt to cancel those host calls — cancellation is a host-side concern. The shim does drop its side of the pending map entries for the interrupted context, so late `qjs_promise_resolve` / `qjs_promise_reject` calls from the host become benign no-ops.
+- **v0.2** When a runtime's interrupt deadline is active, cleanup paths (`qjs_slot_drop`, `qjs_context_free`, any call that re-enters QuickJS) must run after the deadline is cleared by the host. The shim's interrupt handler doesn't distinguish cleanup traffic from user-driven JS, so a `slot_drop` inside a `finally` block that follows a timeout will trap on the still-elapsed deadline. Bridge-side callers clear the deadline (e.g. via `set_deadline(None)`) before releasing wasm resources; failure to do so surfaces as a `wasmtime.Trap("interrupt")` from the cleanup call rather than the intended `TimeoutError` from the original operation.
 
 ## 7. Python package
 
@@ -424,13 +442,24 @@ class Context:
         Promise settles. Required when the evaluated code awaits, or when
         any registered async host function fires during execution.
 
-        ``module=True`` (default) compiles with QuickJS's script mode plus
-        the top-level-await flag (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC),
-        which combines script-mode completion-value semantics (a bare
-        expression yields its result) with top-level await. The kwarg is
-        named ``module`` to match the JS-developer concept; the underlying
-        mechanism is technically a global-mode script with the async flag.
-        ``module=False`` compiles as plain script mode (no top-level await).
+        ``module=True`` (default) is a JS-developer-facing convenience:
+        top-level ``await`` works in the evaluated source, and a bare
+        expression yields its result (script completion-value semantics).
+        It is NOT an ES-module-semantics guarantee — ``import`` / ``export``
+        statements will not resolve against a filesystem or a registry,
+        there is no module-record caching, and the evaluated unit has no
+        stable identity that could be imported from elsewhere. Real ES
+        module loading lands in v0.4 (see §14) with a Python-side resolver
+        callback.
+
+        Under the hood, ``module=True`` compiles as script mode plus
+        QuickJS's top-level-await flag (JS_EVAL_TYPE_GLOBAL |
+        JS_EVAL_FLAG_ASYNC), because quickjs-ng's top-level-await support
+        is script-mode-only. ``module=False`` compiles as plain script
+        mode (no top-level await; awaited expressions will be a syntax
+        error). If you need true ES module semantics in v0.2, it doesn't
+        exist — use ``eval_handle_async`` on an IIFE that explicitly
+        returns what you want, or wait for v0.4.
 
         See §7.4 for the detailed execution model.
 
@@ -647,6 +676,19 @@ Internals rely on 3.11+ primitives: `asyncio.TaskGroup` for structured concurren
 - regular `def` functions → registered as sync (`is_async=0`)
 
 Auto-detection fails for some wrapped callables (notably those decorated in ways that don't preserve the `__wrapped__` chain or expose the underlying coroutine). Use `ctx.register(name, fn, is_async=True/False)` to force the mode.
+
+#### `module=True` is not ES-module-semantics
+
+`eval_async`'s `module: bool = True` default enables top-level `await` in the evaluated source and preserves script-mode completion-value semantics (a bare expression yields its result). It does **not** provide ES-module semantics:
+
+- `import` / `export` statements have no filesystem or registry to resolve against in v0.1/v0.2.
+- There is no module-record caching: each call to `eval_async` compiles fresh.
+- The evaluated unit has no stable identity (no URL, no specifier) that other code could import.
+- Module-scoped bindings are not isolated from the global object in the way ES modules are; variables declared at the top level behave as in script mode.
+
+Under the hood, `module=True` compiles as `JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC` because quickjs-ng's top-level-await support is script-mode-only. The public kwarg is named `module` to match the JS-developer mental model ("I'm using modules, so `await` works at the top level"); the implementation mechanism is an implementation detail that callers don't need to care about — but raw-ABI callers who pass bit 3 directly to `qjs_eval` see the same shape described in §6.2, including the `{value, done: true}` completion envelope.
+
+True ES module loading lands in v0.4 with a Python-side resolver callback (see §14). Until then, code that needs module-level isolation should use `eval_handle_async` on an IIFE that explicitly returns what it wants to expose.
 
 #### JS-side shape
 
