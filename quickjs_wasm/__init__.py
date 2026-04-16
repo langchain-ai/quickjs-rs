@@ -6,6 +6,9 @@ See spec/implementation.md §7 for the public API.
 from quickjs_wasm._msgpack import UNDEFINED, Undefined
 from quickjs_wasm.context import Context
 from quickjs_wasm.errors import (
+    ConcurrentEvalError,
+    DeadlockError,
+    HostCancellationError,
     HostError,
     InterruptError,
     InvalidHandleError,
@@ -18,7 +21,7 @@ from quickjs_wasm.errors import (
 from quickjs_wasm.handle import Handle
 from quickjs_wasm.runtime import Runtime
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Runtime",
@@ -34,4 +37,8 @@ __all__ = [
     "MemoryLimitError",
     "TimeoutError",
     "InvalidHandleError",
+    # v0.2 additions
+    "HostCancellationError",
+    "ConcurrentEvalError",
+    "DeadlockError",
 ]

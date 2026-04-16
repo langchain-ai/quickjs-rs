@@ -52,3 +52,47 @@ class MemoryLimitError(QuickJSError):
 
 class InvalidHandleError(QuickJSError):
     """A Handle was used after dispose() or across contexts."""
+
+
+# v0.2 additions. See spec/implementation.md §7.2, §10.3.
+
+
+class HostCancellationError(QuickJSError):
+    """The enclosing asyncio task was cancelled during ``eval_async``.
+
+    Surfaces in JS as an error with ``.name == "HostCancellationError"``
+    that JS code can catch and recover from (absorption). If uncaught in
+    JS, ``eval_async`` re-raises ``asyncio.CancelledError`` to the caller.
+
+    The JS-side name is a string literal injected by the shim's
+    cancellation-encoding path — same pattern as ``HostError`` in §10.2.
+    The Python class name matches by convention; renaming either side
+    requires keeping both in sync.
+    """
+
+
+class ConcurrentEvalError(QuickJSError):
+    """Concurrent eval violation. Two cases:
+
+    1. A second ``eval_async`` started on a context that already has one
+       in flight.
+    2. Sync ``eval`` encountered an async host call during execution.
+
+    Use separate contexts for concurrent workloads; use ``eval_async``
+    when any registered host function is async.
+    """
+
+
+class DeadlockError(QuickJSError):
+    """``eval_async`` detected a pending top-level Promise with no async
+    work in flight to settle it.
+
+    Typical causes:
+
+    - A registered function that should have been async was registered
+      sync (auto-detection misidentified a wrapped callable — pass
+      ``is_async=True`` to ``ctx.register`` explicitly).
+    - A user-written JS Promise that never resolves
+      (``new Promise(() => {})`` with no resolver capture).
+    - Logic bug in evaluated code (forgot to call ``resolve()``, etc.).
+    """
