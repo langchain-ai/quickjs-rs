@@ -7,9 +7,10 @@ host_call_async + driving loop.
 
 from __future__ import annotations
 
+import pytest
 from pytest_codspeed import BenchmarkFixture
 
-from quickjs_wasm import Context, Runtime
+from quickjs_wasm import Context
 
 
 def bench_host_call_noop(benchmark: BenchmarkFixture, ctx: Context) -> None:
@@ -62,9 +63,6 @@ def bench_host_call_100x_loop(benchmark: BenchmarkFixture, ctx: Context) -> None
         })()
     """
     benchmark(ctx.eval, code)
-
-
-import pytest
 
 
 @pytest.mark.benchmark
