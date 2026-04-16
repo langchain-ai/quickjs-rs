@@ -35,7 +35,6 @@ async def test_async_dispatch_fulfilled() -> None:
     rt = b.runtime_new()
     ctx = b.context_new(rt)
 
-    @wants_async
     async def slow(x: int) -> int:
         await asyncio.sleep(0.001)
         return x * 2
@@ -90,7 +89,6 @@ async def test_async_dispatch_rejected_on_python_raise() -> None:
     rt = b.runtime_new()
     ctx = b.context_new(rt)
 
-    @wants_async
     async def failing() -> None:
         await asyncio.sleep(0)
         raise ValueError("boom from async")
@@ -133,7 +131,6 @@ async def test_run_pending_jobs_drains_then_reactions() -> None:
     rt = b.runtime_new()
     ctx = b.context_new(rt)
 
-    @wants_async
     async def value() -> int:
         return 7
 
@@ -176,10 +173,3 @@ async def test_run_pending_jobs_drains_then_reactions() -> None:
     b.close()
 
 
-# Tiny no-op decorator so the `@wants_async` mark is visible in the test
-# source. Auto-detection via inspect.iscoroutinefunction picks up the
-# underlying coroutine through our register_host_function regardless, but
-# the visual marker reminds readers that these are the functions whose
-# async-ness we're exercising.
-def wants_async(fn):  # type: ignore[no-untyped-def]
-    return fn

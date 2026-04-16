@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -27,6 +28,44 @@ _log = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from quickjs_wasm.handle import Handle
     from quickjs_wasm.runtime import Runtime
+
+
+def _detect_is_async(fn: Callable[..., Any]) -> bool:
+    """§7.4: infer async-ness of a registered host function.
+
+    Uses ``inspect.iscoroutinefunction`` directly. If it says False but
+    the ``__wrapped__`` chain reveals a coroutine function underneath
+    (the common case of a decorator that didn't preserve the coroutine
+    marker), we raise ``TypeError`` rather than silently register as
+    sync — the latter fails at runtime in confusing ways. The user
+    gets an explicit-override instruction in the error message.
+
+    Anything else (C extensions, objects with ``__call__``, partials
+    of partials of coroutines beyond the ``__wrapped__`` chain) falls
+    through to whatever ``iscoroutinefunction`` reports; if that's
+    wrong, ``is_async=True/False`` is the escape hatch.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return True
+    # Follow the __wrapped__ chain (functools.wraps populates this).
+    # Cap iterations to avoid cycles; five is plenty for the
+    # decorator stacks we'd reasonably encounter.
+    probe: Any = fn
+    for _ in range(5):
+        wrapped = getattr(probe, "__wrapped__", None)
+        if wrapped is None:
+            break
+        probe = wrapped
+        if inspect.iscoroutinefunction(probe):
+            raise TypeError(
+                f"could not auto-detect async/sync for {fn!r}: the "
+                "callable is not itself a coroutine function but its "
+                "__wrapped__ chain contains one. This usually means a "
+                "decorator dropped the coroutine marker. Pass "
+                "is_async=True explicitly to ctx.register / "
+                "@ctx.function(is_async=True)."
+            )
+    return False
 
 
 class Context:
@@ -499,25 +538,29 @@ class Context:
         *,
         is_async: bool | None = None,
     ) -> None:
-        """Register a Python callable as a JS global function. §7.2.
+        """Register a Python callable as a JS global function. §7.2, §7.4.
 
         ``is_async``:
-            ``None`` (default) — auto-detect via
-            ``inspect.iscoroutinefunction`` (§7.4).
-            ``True`` / ``False`` — explicit override, for wrapped
-            callables where auto-detection picks wrong.
 
-        Auto-detection itself lands in step 6 of §17.2; for step 5 the
-        parameter is present and honoured when explicitly passed, and
-        ``None`` falls back to sync (v0.1 behaviour). This preserves
-        the spec signature so tests can use ``is_async=True`` today.
+        - ``None`` (default) — auto-detect via
+          ``inspect.iscoroutinefunction(fn)``. If ``fn`` is a
+          coroutine function, it's registered as async and JS-side
+          calls return a Promise. Otherwise sync.
+        - ``True`` / ``False`` — explicit override, for callables
+          where auto-detection can't see through a wrapper.
+
+        If auto-detection says sync but the callable's
+        ``__wrapped__`` chain reveals a coroutine underneath, the
+        detection can't be trusted and we raise ``TypeError`` rather
+        than silently registering sync. That's the common source of
+        detection failures (decorators that forget to preserve the
+        coroutine marker), and the right fix is ``is_async=True``
+        on the registration — not heuristic guessing.
         """
         if self._closed:
             raise QuickJSError("context is closed")
         if is_async is None:
-            # TODO(step 6): inspect.iscoroutinefunction(fn). For now
-            # default to sync so v0.1 call sites continue to work.
-            is_async_resolved = False
+            is_async_resolved = _detect_is_async(fn)
         else:
             is_async_resolved = is_async
         self._bridge.register_host_function(

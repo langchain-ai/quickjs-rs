@@ -33,8 +33,9 @@ async def test_eval_async_first_assertion_from_132() -> None:
                 await asyncio.sleep(n / 1000)
                 return "slept"
 
-            # Explicit is_async=True until auto-detection lands in step 6.
-            ctx.register("sleep_ms", sleep_ms, is_async=True)
+            # §7.4 auto-detection: async def → is_async=True
+            # without an explicit kwarg. Matches §13.2's @ctx.function form.
+            ctx.register("sleep_ms", sleep_ms)
             assert await ctx.eval_async("await sleep_ms(10)") == "slept"
 
 
@@ -48,7 +49,7 @@ async def test_promise_all_fan_out() -> None:
                 await asyncio.sleep(n / 1000)
                 return "slept"
 
-            ctx.register("sleep_ms", sleep_ms, is_async=True)
+            ctx.register("sleep_ms", sleep_ms)
             result = await ctx.eval_async("""
                 const results = await Promise.all([
                     sleep_ms(5),
@@ -70,7 +71,7 @@ async def test_concurrent_eval_async_raises() -> None:
                 await asyncio.sleep(0.05)
                 return "ok"
 
-            ctx.register("slow", slow, is_async=True)
+            ctx.register("slow", slow)
 
             async def first() -> None:
                 await ctx.eval_async("await slow()")
@@ -108,8 +109,8 @@ async def test_mixed_sync_and_async_host_calls() -> None:
                 await asyncio.sleep(0.001)
                 return n * 2
 
-            ctx.register("double", double, is_async=False)
-            ctx.register("slow_double", slow_double, is_async=True)
+            ctx.register("double", double)
+            ctx.register("slow_double", slow_double)
 
             result = await ctx.eval_async("""
                 const a = double(5);
@@ -130,7 +131,7 @@ async def test_eval_handle_async_returns_handle() -> None:
                 await asyncio.sleep(0)
                 return {"value": 7}
 
-            ctx.register("settle", settle, is_async=True)
+            ctx.register("settle", settle)
 
             h = await ctx.eval_handle_async("await settle()")
             try:
@@ -156,7 +157,7 @@ async def test_eval_async_propagates_js_rejection() -> None:
                 await asyncio.sleep(0)
                 raise ValueError("from async host")
 
-            ctx.register("fail", fail, is_async=True)
+            ctx.register("fail", fail)
 
             with pytest.raises(HostError) as excinfo:
                 await ctx.eval_async("await fail()")
@@ -177,7 +178,7 @@ async def test_eval_async_per_call_timeout_override() -> None:
                 await asyncio.sleep(5.0)  # way longer than override
                 return "done"
 
-            ctx.register("very_slow", very_slow, is_async=True)
+            ctx.register("very_slow", very_slow)
 
             with pytest.raises(_TimeoutError):
                 await ctx.eval_async("await very_slow()", timeout=0.05)
