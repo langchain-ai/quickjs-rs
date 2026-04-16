@@ -18,5 +18,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+htmlcov/
 .venv/
 venv/
+
+# Local package manager lockfiles — §12 pins deps in pyproject.toml;
+# uv/poetry lockfiles are a local tooling choice and don't belong in
+# the repo.
+uv.lock
+poetry.lock
+Pipfile.lock
