@@ -94,7 +94,7 @@ quickjs-wasm/
 | WASI-SDK | 24 | Clang toolchain for wasm32-wasi |
 | CMake | 3.24+ | |
 | wasm-opt (binaryen) | 119+ | |
-| Python | 3.10+ | |
+| Python | 3.11+ | Raised from 3.10 in v0.2 for `asyncio.TaskGroup` |
 | wasmtime-py | 27+ | Component support not required for v0.1/v0.2 |
 | msgpack | 1.1+ | Pure Python fine; C ext preferred |
 | pytest | 8+ | |
@@ -1238,7 +1238,7 @@ Additionally: tests in `test_async.py` and `test_async_host_functions.py` pass u
 - **QuickJS build config**: `CONFIG_BIGNUM=y` is assumed. Confirm compile size is acceptable (~150 KB added). If not, bigint support becomes optional.
 - **Scratch starting size**: 64 KB per context. Tune after profiling against realistic agent workloads.
 - **ResourceWarning on leaked handles**: keep as warning, or escalate to always-error under a config flag? Default: warning, consistent with stdlib.
-- **Python 3.9 support**: dropping costs us nothing and gains `match` and `|`-union types. Staying at 3.10 minimum.
+- **Python floor**: v0.1 shipped on 3.10 minimum (gained `match` and `|`-union types over 3.9). v0.2 raised to 3.11 for `asyncio.TaskGroup`. Next bump would target 3.12's typing improvements once a concrete need appears.
 - **Windows wheel testing**: wasmtime-py supports Windows, but WASI filesystem behavior differs. Smoke-test only; real platform coverage when someone files a bug.
 - **v0.2 sync eval with async host fns**: currently raises `ConcurrentEvalError` on the first promise-drive attempt. Alternative: eagerly raise at the host_call boundary. Current design picked for simplicity; revisit if users find the error point confusing.
 - **v0.2 cumulative timeout for eval_async**: chosen over per-call as the default because long-running agent loops benefit more from a total budget. Revisit if the semantic causes confusion.
