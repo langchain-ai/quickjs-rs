@@ -64,6 +64,25 @@ def test_smoke_primitives() -> None:
             ctx.globals["deep"] = {"nested": {"list": [1, 2, {"leaf": "value"}]}}
             assert ctx.eval("deep.nested.list[2].leaf") == "value"
 
+            # Host functions: decorator form
+            @ctx.function
+            def add(a: int, b: int) -> int:
+                return a + b
+
+            assert ctx.eval("add(1, 2)") == 3
+
+            # Host functions: explicit form with a name override
+            ctx.register("say_hi", lambda who: f"hi {who}")
+            assert ctx.eval("say_hi('world')") == "hi world"
+
+            # Host exception propagates out as HostError
+            @ctx.function
+            def boom() -> None:
+                raise ValueError("from python")
+
+            with pytest.raises(HostError):
+                ctx.eval("boom()")
+
 
 @pytest.mark.skip(reason="Pending the rest of §7.2; greens assertion-by-assertion.")
 def test_acceptance() -> None:

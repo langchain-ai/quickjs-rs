@@ -11,10 +11,14 @@ here — the public API is responsible for surfacing the error.
 
 from __future__ import annotations
 
+import traceback
+from collections.abc import Callable
 from importlib import resources
 from typing import Any
 
 import wasmtime
+
+from quickjs_wasm import _msgpack
 
 _WASM_FILE = "quickjs.wasm"
 
@@ -60,6 +64,24 @@ class Bridge:
             wasmtime.FuncType([], [wasmtime.ValType.i32()]),
             lambda: 0,
         )
+
+        # env::host_call — dispatched when JS calls a host-registered
+        # function. Signature: (fn_id, args_ptr, args_len, out_ptr, out_len)
+        # -> int32. See §6.3.
+        i32 = wasmtime.ValType.i32()
+        linker.define_func(
+            "env",
+            "host_call",
+            wasmtime.FuncType([i32, i32, i32, i32, i32], [i32]),
+            self._host_call_dispatch,
+        )
+
+        # fn_id → Python callable. Populated by Bridge.register_host_function.
+        self._host_fns: dict[int, Callable[..., Any]] = {}
+        self._next_fn_id = 1
+        # Instrumentation so tests can assert the copy-out-first invariant
+        # (see §9 re-entrancy note). Each dispatch increments.
+        self._host_call_counter = 0
 
         self._instance = linker.instantiate(self._store, self._module)
 
@@ -227,6 +249,98 @@ class Bridge:
         finally:
             self.free(key_ptr)
 
+    # ---- Host-function registry -----------------------------------------
+
+    def register_host_function(
+        self, ctx: int, name: str, fn: Callable[..., Any]
+    ) -> None:
+        fn_id = self._next_fn_id
+        self._next_fn_id += 1
+        self._host_fns[fn_id] = fn
+        name_ptr, name_len = self._write_key(name)
+        try:
+            rc = int(
+                self._call(
+                    "qjs_register_host_function", ctx, name_ptr, name_len, fn_id
+                )
+            )
+            if rc != 0:
+                del self._host_fns[fn_id]
+                raise RuntimeError(
+                    f"qjs_register_host_function failed: status={rc}"
+                )
+        finally:
+            self.free(name_ptr)
+
+    def _host_call_dispatch(
+        self,
+        fn_id: int,
+        args_ptr: int,
+        args_len: int,
+        out_ptr_addr: int,
+        out_len_addr: int,
+    ) -> int:
+        """env::host_call implementation. See §6.3.
+
+        Returns 0 on host-side success (reply is a marshaled value) or 1 on
+        host-side raise (reply is a {name, message, stack} record). Negative
+        returns are reserved for marshaling failures.
+        """
+        self._host_call_counter += 1
+
+        # §9 re-entrancy: copy args out of guest memory immediately. The
+        # shim owns the args buffer for the duration of this call, but if
+        # the Python callable synchronously calls back into ctx.eval the
+        # shim's scratch will be reused — so snapshot now, decode after.
+        args_payload = self.read_bytes(args_ptr, args_len) if args_len else b""
+
+        fn = self._host_fns.get(fn_id)
+        if fn is None:
+            reply = _msgpack.encode(
+                {
+                    "name": "HostError",
+                    "message": f"no host function registered with fn_id={fn_id}",
+                    "stack": None,
+                }
+            )
+            return self._write_host_reply(out_ptr_addr, out_len_addr, reply, status=1)
+
+        try:
+            args = _msgpack.decode(args_payload)
+            if not isinstance(args, list):
+                raise TypeError(
+                    f"host_call args must decode to a list, got {type(args).__name__}"
+                )
+            result = fn(*args)
+            reply = _msgpack.encode(result)
+            return self._write_host_reply(out_ptr_addr, out_len_addr, reply, status=0)
+        except BaseException as exc:  # noqa: BLE001 — bridge across languages
+            reply = _msgpack.encode(
+                {
+                    "name": "HostError",
+                    "message": str(exc),
+                    "stack": "".join(traceback.format_exception(exc)),
+                }
+            )
+            return self._write_host_reply(out_ptr_addr, out_len_addr, reply, status=1)
+
+    def _write_host_reply(
+        self, out_ptr_addr: int, out_len_addr: int, reply: bytes, status: int
+    ) -> int:
+        """Allocate a guest buffer via qjs_malloc, write the reply, store
+        (ptr, len) at the two shim-provided out-pointers. §6.3 stipulates
+        the shim qjs_free's the buffer after reading."""
+        if reply:
+            ptr = self.malloc(len(reply))
+            if ptr == 0:
+                return -1
+            self.write_bytes(ptr, reply)
+        else:
+            ptr = 0
+        self.write_bytes(out_ptr_addr, ptr.to_bytes(4, "little"))
+        self.write_bytes(out_len_addr, len(reply).to_bytes(4, "little"))
+        return status
+
 
 _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_runtime_new",
@@ -244,6 +358,7 @@ _EXPORT_NAMES: tuple[str, ...] = (
     "qjs_get_global_object",
     "qjs_get_prop",
     "qjs_set_prop",
+    "qjs_register_host_function",
     "qjs_malloc",
     "qjs_free",
 )

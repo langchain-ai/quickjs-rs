@@ -22,6 +22,14 @@ class Globals:
 
     Each __getitem__ / __setitem__ refreshes against the live global —
     §7.3: "Reads perform get-global each time (no caching)".
+
+    ``key in ctx.globals`` treats a global whose value is JS ``undefined``
+    as absent, matching ``typeof x !== 'undefined'`` and what Python
+    callers mean by "is this set." JS also distinguishes "own property
+    set to undefined" from "never defined"; Python's ``in`` doesn't have
+    vocabulary for that distinction, so it collapses. If you need the
+    strict JS semantics, add ``has_own(key)`` backed by JS_HasProperty —
+    not needed for v0.1.
     """
 
     def __init__(self, bridge: Bridge, ctx_id: int) -> None:

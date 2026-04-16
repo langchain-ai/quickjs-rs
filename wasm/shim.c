@@ -43,17 +43,48 @@ typedef struct Slot {
     uint32_t next_free; /* free-list pointer when refcount == 0 */
 } Slot;
 
+typedef struct DynBuf {
+    uint8_t *data;
+    uint32_t cap;
+    uint32_t len;
+} DynBuf;
+
 typedef struct ShimContext {
     JSContext *ctx;
     Slot *slots;
     uint32_t slot_cap;
     uint32_t slot_count; /* high-water mark of allocated slots */
     uint32_t free_head; /* 0 means empty */
-    uint8_t *scratch;
-    uint32_t scratch_cap;
-    uint32_t scratch_len;
+    DynBuf scratch;
     bool alive;
 } ShimContext;
+
+static bool dynbuf_init(DynBuf *b, uint32_t cap) {
+    b->data = (uint8_t *)malloc(cap);
+    if (!b->data) return false;
+    b->cap = cap;
+    b->len = 0;
+    return true;
+}
+
+static void dynbuf_free(DynBuf *b) {
+    free(b->data);
+    b->data = NULL;
+    b->cap = b->len = 0;
+}
+
+static bool dynbuf_reserve(DynBuf *b, uint32_t need) {
+    if (need <= b->cap) return true;
+    uint32_t new_cap = b->cap > 0 ? b->cap : 64;
+    while (new_cap < need) new_cap *= 2;
+    uint8_t *n = (uint8_t *)realloc(b->data, new_cap);
+    if (!n) return false;
+    b->data = n;
+    b->cap = new_cap;
+    return true;
+}
+
+static void dynbuf_reset(DynBuf *b) { b->len = 0; }
 
 /* The shim supports multiple contexts, but v0.1 only needs a handful.
  * Contexts are addressed by small integer IDs so they fit in uint32_t.
@@ -79,13 +110,10 @@ static uint32_t ctx_alloc(JSContext *ctx) {
             c->slot_cap = SLOT_INITIAL_CAP;
             c->slot_count = 1; /* skip slot 0 */
             c->free_head = 0;
-            c->scratch = (uint8_t *)malloc(SCRATCH_INITIAL_CAP);
-            if (!c->scratch) {
+            if (!dynbuf_init(&c->scratch, SCRATCH_INITIAL_CAP)) {
                 free(c->slots);
                 return 0;
             }
-            c->scratch_cap = SCRATCH_INITIAL_CAP;
-            c->scratch_len = 0;
             c->alive = true;
             return i + 1;
         }
@@ -102,7 +130,7 @@ static void ctx_release(ShimContext *c) {
         }
     }
     free(c->slots);
-    free(c->scratch);
+    dynbuf_free(&c->scratch);
     JS_FreeContext(c->ctx);
     memset(c, 0, sizeof(*c));
 }
@@ -320,21 +348,6 @@ QJS_EXPORT int32_t qjs_eval(uint32_t ctx_id,
 /* Marshaling — minimal: numbers only (§8)                             */
 /* ------------------------------------------------------------------ */
 
-static bool scratch_reserve(ShimContext *c, uint32_t need) {
-    if (need <= c->scratch_cap) return true;
-    uint32_t new_cap = c->scratch_cap;
-    while (new_cap < need) new_cap *= 2;
-    uint8_t *n = (uint8_t *)realloc(c->scratch, new_cap);
-    if (!n) return false;
-    c->scratch = n;
-    c->scratch_cap = new_cap;
-    return true;
-}
-
-static void scratch_reset(ShimContext *c) {
-    c->scratch_len = 0;
-}
-
 static void be_store_u64(uint8_t *p, uint64_t v) {
     p[0] = (uint8_t)(v >> 56);
     p[1] = (uint8_t)(v >> 48);
@@ -357,28 +370,21 @@ static void be_store_u64(uint8_t *p, uint64_t v) {
 /* convention so each child append runs in sequence.                   */
 /* ------------------------------------------------------------------ */
 
-static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth);
+static int32_t encode_value(ShimContext *c, DynBuf *b, JSValue v, int32_t off, int depth);
 
 /* Max nested container depth. QuickJS's own parser caps at ~1000; we
  * stay well below that to keep the recursion predictable. */
 #define MARSHAL_MAX_DEPTH 128
 
-static int32_t write_u8(ShimContext *c, int32_t off, uint8_t b) {
-    if (!scratch_reserve(c, (uint32_t)off + 1)) return -1;
-    c->scratch[off] = b;
+static int32_t buf_write_u8(DynBuf *b, int32_t off, uint8_t byte) {
+    if (!dynbuf_reserve(b, (uint32_t)off + 1)) return -1;
+    b->data[off] = byte;
     return off + 1;
 }
 
-static int32_t write_bytes(ShimContext *c, int32_t off,
-                           const uint8_t *src, size_t len) {
-    if (!scratch_reserve(c, (uint32_t)off + (uint32_t)len)) return -1;
-    if (len > 0) memcpy(c->scratch + off, src, len);
-    return off + (int32_t)len;
-}
-
-static int32_t encode_number(ShimContext *c, int32_t off, double d) {
-    if (!scratch_reserve(c, (uint32_t)off + 9)) return -1;
-    uint8_t *p = c->scratch + off;
+static int32_t encode_number(DynBuf *b, int32_t off, double d) {
+    if (!dynbuf_reserve(b, (uint32_t)off + 9)) return -1;
+    uint8_t *p = b->data + off;
     p[0] = 0xcb; /* float64 */
     union { double d; uint64_t u; } conv;
     conv.d = d;
@@ -386,7 +392,7 @@ static int32_t encode_number(ShimContext *c, int32_t off, double d) {
     return off + 9;
 }
 
-static int32_t encode_str_bytes(ShimContext *c, int32_t off,
+static int32_t encode_str_bytes(DynBuf *b, int32_t off,
                                 const uint8_t *bytes, size_t len) {
     uint32_t header_len;
     if (len <= 31) header_len = 1;
@@ -394,8 +400,8 @@ static int32_t encode_str_bytes(ShimContext *c, int32_t off,
     else if (len <= 0xffff) header_len = 3;
     else if (len <= 0xffffffffu) header_len = 5;
     else return -1;
-    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)len)) return -1;
-    uint8_t *p = c->scratch + off;
+    if (!dynbuf_reserve(b, (uint32_t)off + header_len + (uint32_t)len)) return -1;
+    uint8_t *p = b->data + off;
     if (len <= 31) {
         p[0] = (uint8_t)(0xa0 | len);
     } else if (len <= 0xff) {
@@ -415,15 +421,15 @@ static int32_t encode_str_bytes(ShimContext *c, int32_t off,
     return off + (int32_t)header_len + (int32_t)len;
 }
 
-static int32_t encode_bin_bytes(ShimContext *c, int32_t off,
+static int32_t encode_bin_bytes(DynBuf *b, int32_t off,
                                 const uint8_t *bytes, size_t len) {
     uint32_t header_len;
     if (len <= 0xff) header_len = 2;
     else if (len <= 0xffff) header_len = 3;
     else if (len <= 0xffffffffu) header_len = 5;
     else return -1;
-    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)len)) return -1;
-    uint8_t *p = c->scratch + off;
+    if (!dynbuf_reserve(b, (uint32_t)off + header_len + (uint32_t)len)) return -1;
+    uint8_t *p = b->data + off;
     if (len <= 0xff) {
         p[0] = 0xc4; p[1] = (uint8_t)len;
     } else if (len <= 0xffff) {
@@ -444,7 +450,7 @@ static int32_t encode_bin_bytes(ShimContext *c, int32_t off,
 /* Encode a BigInt as msgpack ext1 (body = UTF-8 decimal string). §8.
  * JS_ToCStringLen on a BigInt yields the decimal form with no "n" suffix
  * and a leading "-" for negatives. */
-static int32_t encode_bigint(ShimContext *c, int32_t off, JSValue v) {
+static int32_t encode_bigint(ShimContext *c, DynBuf *b, int32_t off, JSValue v) {
     size_t slen;
     const char *s = JS_ToCStringLen(c->ctx, &slen, v);
     if (!s) return -1;
@@ -461,11 +467,11 @@ static int32_t encode_bigint(ShimContext *c, int32_t off, JSValue v) {
             break;
     }
 
-    if (!scratch_reserve(c, (uint32_t)off + header_len + (uint32_t)slen)) {
+    if (!dynbuf_reserve(b, (uint32_t)off + header_len + (uint32_t)slen)) {
         JS_FreeCString(c->ctx, s);
         return -1;
     }
-    uint8_t *p = c->scratch + off;
+    uint8_t *p = b->data + off;
     switch (slen) {
         case 1:  p[0] = 0xd4; p[1] = 0x01; break;
         case 2:  p[0] = 0xd5; p[1] = 0x01; break;
@@ -495,19 +501,19 @@ static int32_t encode_bigint(ShimContext *c, int32_t off, JSValue v) {
     return off + (int32_t)header_len + (int32_t)slen;
 }
 
-static int32_t encode_array_header(ShimContext *c, int32_t off, uint32_t n) {
+static int32_t encode_array_header(DynBuf *b, int32_t off, uint32_t n) {
     if (n <= 15) {
-        return write_u8(c, off, (uint8_t)(0x90 | n));
+        return buf_write_u8(b, off, (uint8_t)(0x90 | n));
     } else if (n <= 0xffff) {
-        if (!scratch_reserve(c, (uint32_t)off + 3)) return -1;
-        uint8_t *p = c->scratch + off;
+        if (!dynbuf_reserve(b, (uint32_t)off + 3)) return -1;
+        uint8_t *p = b->data + off;
         p[0] = 0xdc;
         p[1] = (uint8_t)(n >> 8);
         p[2] = (uint8_t)n;
         return off + 3;
     } else {
-        if (!scratch_reserve(c, (uint32_t)off + 5)) return -1;
-        uint8_t *p = c->scratch + off;
+        if (!dynbuf_reserve(b, (uint32_t)off + 5)) return -1;
+        uint8_t *p = b->data + off;
         p[0] = 0xdd;
         p[1] = (uint8_t)(n >> 24);
         p[2] = (uint8_t)(n >> 16);
@@ -517,38 +523,38 @@ static int32_t encode_array_header(ShimContext *c, int32_t off, uint32_t n) {
     }
 }
 
-static int32_t encode_array(ShimContext *c, int32_t off, JSValue arr, int depth) {
+static int32_t encode_array(ShimContext *c, DynBuf *b, int32_t off, JSValue arr, int depth) {
     int64_t length64 = 0;
     if (JS_GetLength(c->ctx, arr, &length64) < 0) return -1;
     if (length64 < 0 || length64 > 0xffffffffLL) return -1;
     uint32_t length = (uint32_t)length64;
 
-    off = encode_array_header(c, off, length);
+    off = encode_array_header(b, off, length);
     if (off < 0) return -1;
 
     for (uint32_t i = 0; i < length; i++) {
         JSValue elem = JS_GetPropertyUint32(c->ctx, arr, i);
         if (JS_IsException(elem)) return -1;
-        off = encode_value(c, elem, off, depth + 1);
+        off = encode_value(c, b, elem, off, depth + 1);
         JS_FreeValue(c->ctx, elem);
         if (off < 0) return -1;
     }
     return off;
 }
 
-static int32_t encode_map_header(ShimContext *c, int32_t off, uint32_t n) {
+static int32_t encode_map_header(DynBuf *b, int32_t off, uint32_t n) {
     if (n <= 15) {
-        return write_u8(c, off, (uint8_t)(0x80 | n));
+        return buf_write_u8(b, off, (uint8_t)(0x80 | n));
     } else if (n <= 0xffff) {
-        if (!scratch_reserve(c, (uint32_t)off + 3)) return -1;
-        uint8_t *p = c->scratch + off;
+        if (!dynbuf_reserve(b, (uint32_t)off + 3)) return -1;
+        uint8_t *p = b->data + off;
         p[0] = 0xde;
         p[1] = (uint8_t)(n >> 8);
         p[2] = (uint8_t)n;
         return off + 3;
     } else {
-        if (!scratch_reserve(c, (uint32_t)off + 5)) return -1;
-        uint8_t *p = c->scratch + off;
+        if (!dynbuf_reserve(b, (uint32_t)off + 5)) return -1;
+        uint8_t *p = b->data + off;
         p[0] = 0xdf;
         p[1] = (uint8_t)(n >> 24);
         p[2] = (uint8_t)(n >> 16);
@@ -562,7 +568,7 @@ static int32_t encode_map_header(ShimContext *c, int32_t off, uint32_t n) {
  * JS_GetOwnPropertyNames with JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY returns
  * own enumerable string-keyed properties in insertion order, matching
  * for...in / Object.keys / JSON.stringify semantics. */
-static int32_t encode_object(ShimContext *c, int32_t off, JSValue obj, int depth) {
+static int32_t encode_object(ShimContext *c, DynBuf *b, int32_t off, JSValue obj, int depth) {
     JSPropertyEnum *props = NULL;
     uint32_t n = 0;
     if (JS_GetOwnPropertyNames(c->ctx, &props, &n, obj,
@@ -570,7 +576,7 @@ static int32_t encode_object(ShimContext *c, int32_t off, JSValue obj, int depth
         return -1;
     }
 
-    int32_t new_off = encode_map_header(c, off, n);
+    int32_t new_off = encode_map_header(b, off, n);
     if (new_off < 0) goto fail;
 
     for (uint32_t i = 0; i < n; i++) {
@@ -578,13 +584,13 @@ static int32_t encode_object(ShimContext *c, int32_t off, JSValue obj, int depth
         const char *key = JS_AtomToCStringLen(c->ctx, &klen, props[i].atom);
         if (!key) { new_off = -1; goto fail; }
 
-        new_off = encode_str_bytes(c, new_off, (const uint8_t *)key, klen);
+        new_off = encode_str_bytes(b, new_off, (const uint8_t *)key, klen);
         JS_FreeCString(c->ctx, key);
         if (new_off < 0) goto fail;
 
         JSValue val = JS_GetProperty(c->ctx, obj, props[i].atom);
         if (JS_IsException(val)) { new_off = -1; goto fail; }
-        new_off = encode_value(c, val, new_off, depth + 1);
+        new_off = encode_value(c, b, val, new_off, depth + 1);
         JS_FreeValue(c->ctx, val);
         if (new_off < 0) goto fail;
     }
@@ -594,40 +600,40 @@ fail:
     return new_off;
 }
 
-static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
+static int32_t encode_value(ShimContext *c, DynBuf *b, JSValue v, int32_t off, int depth) {
     if (depth > MARSHAL_MAX_DEPTH) return -1;
     int tag = JS_VALUE_GET_TAG(v);
 
     if (tag == JS_TAG_INT) {
-        return encode_number(c, off, (double)JS_VALUE_GET_INT(v));
+        return encode_number(b, off, (double)JS_VALUE_GET_INT(v));
     }
     if (JS_TAG_IS_FLOAT64(tag)) {
-        return encode_number(c, off, JS_VALUE_GET_FLOAT64(v));
+        return encode_number(b, off, JS_VALUE_GET_FLOAT64(v));
     }
     if (tag == JS_TAG_BOOL) {
-        return write_u8(c, off, JS_VALUE_GET_BOOL(v) ? 0xc3 : 0xc2);
+        return buf_write_u8(b, off, JS_VALUE_GET_BOOL(v) ? 0xc3 : 0xc2);
     }
     if (tag == JS_TAG_NULL) {
-        return write_u8(c, off, 0xc0);
+        return buf_write_u8(b, off, 0xc0);
     }
     if (tag == JS_TAG_UNDEFINED) {
         /* §8: ext type 0, empty body. ext8 is the smallest zero-length ext. */
-        off = write_u8(c, off, 0xc7);
+        off = buf_write_u8(b, off, 0xc7);
         if (off < 0) return -1;
-        off = write_u8(c, off, 0x00);
+        off = buf_write_u8(b, off, 0x00);
         if (off < 0) return -1;
-        return write_u8(c, off, 0x00);
+        return buf_write_u8(b, off, 0x00);
     }
     if (tag == JS_TAG_STRING || tag == JS_TAG_STRING_ROPE) {
         size_t slen;
         const char *s = JS_ToCStringLen(c->ctx, &slen, v);
         if (!s) return -1;
-        int32_t rc = encode_str_bytes(c, off, (const uint8_t *)s, slen);
+        int32_t rc = encode_str_bytes(b, off, (const uint8_t *)s, slen);
         JS_FreeCString(c->ctx, s);
         return rc;
     }
     if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT) {
-        return encode_bigint(c, off, v);
+        return encode_bigint(c, b, off, v);
     }
     if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
         size_t byte_offset = 0, byte_length = 0;
@@ -636,12 +642,12 @@ static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
         size_t ab_len = 0;
         uint8_t *ab_data = JS_GetArrayBuffer(c->ctx, &ab_len, ab);
         if (!ab_data) { JS_FreeValue(c->ctx, ab); return -1; }
-        int32_t rc = encode_bin_bytes(c, off, ab_data + byte_offset, byte_length);
+        int32_t rc = encode_bin_bytes(b, off, ab_data + byte_offset, byte_length);
         JS_FreeValue(c->ctx, ab);
         return rc;
     }
     if (JS_IsArray(v)) {
-        return encode_array(c, off, v, depth);
+        return encode_array(c, b, off, v, depth);
     }
     if (JS_IsObject(v)) {
         /* §8: functions in eval results are not marshalable — they must be
@@ -653,7 +659,7 @@ static int32_t encode_value(ShimContext *c, JSValue v, int32_t off, int depth) {
         if (JS_IsFunction(c->ctx, v)) return -1;
         if (JS_IsPromise(v)) return -1;
         if (JS_GetTypedArrayType(v) >= 0) return -1;
-        return encode_object(c, off, v, depth);
+        return encode_object(c, b, off, v, depth);
     }
     if (tag == JS_TAG_SYMBOL) {
         /* §8: symbols are not marshalable in eval results. */
@@ -669,13 +675,13 @@ QJS_EXPORT int32_t qjs_to_msgpack(uint32_t ctx_id, uint32_t slot,
                                   uint32_t *out_ptr, uint32_t *out_len) {
     ShimContext *c = ctx_lookup(ctx_id);
     if (!c || !out_ptr || !out_len || !slot_valid(c, slot)) return -1;
-    scratch_reset(c);
+    dynbuf_reset(&c->scratch);
 
-    int32_t end = encode_value(c, c->slots[slot].value, 0, 0);
+    int32_t end = encode_value(c, &c->scratch, c->slots[slot].value, 0, 0);
     if (end < 0) return -1;
-    c->scratch_len = (uint32_t)end;
-    *out_ptr = (uint32_t)(uintptr_t)c->scratch;
-    *out_len = c->scratch_len;
+    c->scratch.len = (uint32_t)end;
+    *out_ptr = (uint32_t)(uintptr_t)c->scratch.data;
+    *out_len = c->scratch.len;
     return 0;
 }
 
@@ -1154,11 +1160,156 @@ QJS_EXPORT int32_t qjs_promise_state(uint32_t ctx_id, uint32_t slot) {
     return -1;
 }
 
+/* ------------------------------------------------------------------ */
+/* Host-function bridge (§6.2, §6.3)                                   */
+/* ------------------------------------------------------------------ */
+
+/* JSCFunctionData wrapper: called by QuickJS when JS invokes a host-
+ * registered function. We encode argv as a msgpack array, call out to
+ * the Python host via host_call, and either return the decoded result
+ * or throw the JS-side error the host produced.
+ *
+ * Re-entrancy: `func_data` stashes the shim-context id and the fn id.
+ * The args are encoded into a fresh DynBuf rather than the per-context
+ * scratch so a host function that synchronously calls back into
+ * ctx.eval (which uses the scratch for its own to_msgpack) won't
+ * clobber the args mid-dispatch.
+ */
+static JSValue shim_host_call_trampoline(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv,
+                                         int magic, JSValueConst *func_data) {
+    (void)this_val; (void)magic;
+
+    int32_t ctx_id_val = 0, fn_id_val = 0;
+    if (JS_ToInt32(ctx, &ctx_id_val, func_data[0]) < 0) return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &fn_id_val, func_data[1]) < 0) return JS_EXCEPTION;
+    uint32_t ctx_id = (uint32_t)ctx_id_val;
+    uint32_t fn_id = (uint32_t)fn_id_val;
+
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c) return JS_ThrowInternalError(ctx, "host shim-context vanished");
+
+    DynBuf args;
+    if (!dynbuf_init(&args, 64)) {
+        return JS_ThrowOutOfMemory(ctx);
+    }
+
+    /* Encode argv as a msgpack array. */
+    int32_t off = encode_array_header(&args, 0, (uint32_t)argc);
+    if (off < 0) { dynbuf_free(&args); return JS_ThrowInternalError(ctx, "host arg encode failed"); }
+    for (int i = 0; i < argc; i++) {
+        off = encode_value(c, &args, argv[i], off, 0);
+        if (off < 0) {
+            dynbuf_free(&args);
+            /* TODO(handles): §8 error-copy polish; for now a plain TypeError
+             * keeps the JS side informed. */
+            return JS_ThrowTypeError(ctx,
+                "host function arg %d is not marshalable per §8", i);
+        }
+    }
+    args.len = (uint32_t)off;
+
+    uint32_t reply_ptr = 0, reply_len = 0;
+    int32_t rc = host_call(fn_id,
+                           (uint32_t)(uintptr_t)args.data, args.len,
+                           &reply_ptr, &reply_len);
+    dynbuf_free(&args);
+
+    if (rc < 0) {
+        return JS_ThrowInternalError(ctx, "host_call marshaling failure");
+    }
+
+    /* Decode host reply from guest memory. */
+    DecCursor cur = {
+        .data = (const uint8_t *)(uintptr_t)reply_ptr,
+        .len = reply_len,
+        .off = 0,
+        .error = false,
+    };
+    JSValue decoded = decode_value(c, &cur, 0);
+    bool decode_ok = !cur.error && !JS_IsException(decoded) && cur.off == cur.len;
+    if (!decode_ok && !JS_IsException(decoded)) {
+        JS_FreeValue(ctx, decoded);
+    }
+    /* §6.3: the shim qjs_free's the host-provided reply buffer. */
+    if (reply_ptr) free((void *)(uintptr_t)reply_ptr);
+
+    if (!decode_ok) {
+        if (JS_IsException(decoded)) {
+            /* propagate whatever QuickJS already set */
+            return JS_EXCEPTION;
+        }
+        return JS_ThrowInternalError(ctx, "host reply decode failed");
+    }
+
+    if (rc == 1) {
+        /* Host raised. §10.2: the reply is a JS error record
+         * {name, message, stack}. Build a matching Error object whose
+         * `name` property is whatever the host sent (typically "HostError"),
+         * and throw it. */
+        JSValue err = JS_NewError(ctx);
+        if (JS_IsException(err)) { JS_FreeValue(ctx, decoded); return err; }
+
+        /* Copy name/message/stack across from the decoded record. */
+        JSValue name_v = JS_GetPropertyStr(ctx, decoded, "name");
+        JSValue msg_v = JS_GetPropertyStr(ctx, decoded, "message");
+        JSValue stack_v = JS_GetPropertyStr(ctx, decoded, "stack");
+        JS_FreeValue(ctx, decoded);
+
+        if (!JS_IsUndefined(name_v)) JS_SetPropertyStr(ctx, err, "name", name_v);
+        else JS_FreeValue(ctx, name_v);
+        if (!JS_IsUndefined(msg_v)) JS_SetPropertyStr(ctx, err, "message", msg_v);
+        else JS_FreeValue(ctx, msg_v);
+        if (!JS_IsUndefined(stack_v)) JS_SetPropertyStr(ctx, err, "stack", stack_v);
+        else JS_FreeValue(ctx, stack_v);
+
+        return JS_Throw(ctx, err);
+    }
+
+    return decoded;
+}
+
 QJS_EXPORT int32_t qjs_register_host_function(uint32_t ctx_id,
                                               uint32_t name_ptr, uint32_t name_len,
                                               uint32_t fn_id) {
-    (void)ctx_id; (void)name_ptr; (void)name_len; (void)fn_id;
-    return -1;
+    ShimContext *c = ctx_lookup(ctx_id);
+    if (!c) return -1;
+
+    char stack_name[256];
+    bool on_heap = false;
+    char *name = key_to_cstr(name_ptr, name_len, stack_name, sizeof(stack_name), &on_heap);
+    if (!name) return -1;
+
+    JSValue data[2] = {
+        JS_NewInt32(c->ctx, (int32_t)ctx_id),
+        JS_NewInt32(c->ctx, (int32_t)fn_id),
+    };
+
+    JSValue fn = JS_NewCFunctionData(c->ctx, shim_host_call_trampoline,
+                                     /*length=*/0, /*magic=*/0,
+                                     /*data_len=*/2, data);
+    /* JS_NewCFunctionData dups the data values, so release our originals. */
+    JS_FreeValue(c->ctx, data[0]);
+    JS_FreeValue(c->ctx, data[1]);
+
+    if (JS_IsException(fn)) {
+        if (on_heap) free(name);
+        JSValue exc = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, exc);
+        return -1;
+    }
+
+    JSValue global = JS_GetGlobalObject(c->ctx);
+    int rc = JS_SetPropertyStr(c->ctx, global, name, fn);  /* consumes fn */
+    JS_FreeValue(c->ctx, global);
+    if (on_heap) free(name);
+
+    if (rc < 0) {
+        JSValue exc = JS_GetException(c->ctx);
+        JS_FreeValue(c->ctx, exc);
+        return -1;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
