@@ -296,16 +296,15 @@ class Handle:
                 self._bridge.slot_drop(self._ctx_id, slot)
             raise QuickJSError(f"shim error from handle operation: status={status}")
         if status == 1:
-            # Route through Context's exception extraction so we get
-            # HostError / TimeoutError / MemoryLimitError routing and
-            # the __cause__ threading. Dispose the exception slot in
-            # any path.
+            # Bridge.raise_from_exception_slot handles §10.1 / §10.2
+            # routing (HostError / TimeoutError / MemoryLimitError /
+            # JSError); drop the slot in any path.
             try:
-                ctx._raise_from_exception_slot(slot)
+                self._bridge.raise_from_exception_slot(self._ctx_id, slot)
             finally:
                 self._bridge.slot_drop(self._ctx_id, slot)
-            # _raise_from_exception_slot always raises; if for some
-            # reason it doesn't, fall through to a generic error so
-            # we never return None from a method typed `-> Handle`.
+            # Defensive: raise_from_exception_slot always raises, but
+            # this line prevents a silent None return from a method
+            # typed `-> Handle` if the contract ever changes.
             raise QuickJSError("exception path failed to raise")
         return Handle(ctx, self._bridge, self._ctx_id, slot)

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
-from quickjs_wasm.errors import HostError, JSError, MarshalError, QuickJSError
+from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
 
 if TYPE_CHECKING:
     from quickjs_wasm._bridge import Bridge
@@ -50,7 +50,7 @@ class Globals:
                 raise QuickJSError(f"shim error from qjs_get_prop: status={status}")
             if status == 1:
                 try:
-                    self._raise_from_exception_slot(value_slot)
+                    self._bridge.raise_from_exception_slot(self._ctx_id, value_slot)
                 finally:
                     self._bridge.slot_drop(self._ctx_id, value_slot)
             try:
@@ -117,7 +117,7 @@ class Globals:
                 raise QuickJSError(f"shim error from qjs_get_prop: status={status}")
             if status == 1:
                 try:
-                    self._raise_from_exception_slot(value_slot)
+                    self._bridge.raise_from_exception_slot(self._ctx_id, value_slot)
                 finally:
                     self._bridge.slot_drop(self._ctx_id, value_slot)
             try:
@@ -133,34 +133,3 @@ class Globals:
 
     def get_handle(self, key: str) -> Handle:
         raise NotImplementedError("get_handle lands with handle support (§7.2).")
-
-    def _raise_from_exception_slot(self, exc_slot: int) -> None:
-        """Same extraction logic as Context._raise_from_exception_slot.
-
-        Kept local rather than extracted to avoid a circular import
-        between Context and Globals; lifting into a shared helper is
-        the right move once there's a third caller.
-        """
-        status, payload = self._bridge.exception_to_msgpack(
-            self._ctx_id, exc_slot
-        )
-        if status < 0:
-            raise QuickJSError(
-                f"shim error from qjs_exception_to_msgpack: status={status}"
-            )
-        record = _msgpack.decode(payload)
-        if not isinstance(record, dict):
-            raise QuickJSError(
-                f"qjs_exception_to_msgpack returned {type(record).__name__}"
-            )
-        name = str(record.get("name") or "Error")
-        message = str(record.get("message") or "")
-        stack = record.get("stack")
-        stack_str: str | None = stack if isinstance(stack, str) else None
-        if name == "HostError":
-            cause = self._bridge.take_last_host_exception()
-            err = HostError(name, message, stack_str)
-            if cause is not None:
-                raise err from cause
-            raise err
-        raise JSError(name, message, stack_str)

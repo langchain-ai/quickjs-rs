@@ -21,6 +21,13 @@ from typing import Any
 import wasmtime
 
 from quickjs_wasm import _msgpack
+from quickjs_wasm.errors import (
+    HostError,
+    JSError,
+    MemoryLimitError,
+    QuickJSError,
+    TimeoutError,
+)
 
 # Cadence at which the engine epoch ticks. Every Context.eval sets an
 # epoch deadline in ticks — timeout_seconds / _EPOCH_TICK_SECONDS — so the
@@ -272,6 +279,60 @@ class Bridge:
         exc = self._last_host_exception
         self._last_host_exception = None
         return exc
+
+    def raise_from_exception_slot(self, ctx: int, exc_slot: int) -> None:
+        """Extract {name, message, stack} off a JS exception slot and raise.
+
+        Single source of truth for §10.1 + §10.2 routing:
+
+        - InternalError + "out of memory" → MemoryLimitError
+        - InternalError + "interrupted"   → TimeoutError
+        - name == "HostError"             → HostError with __cause__
+                                            threaded from the bridge's
+                                            side-channel (§10.2)
+        - everything else                 → JSError(name, message, stack)
+
+        Does not drop ``exc_slot`` — the caller owns its lifetime and
+        disposes it in a finally so this helper can be called from both
+        Context.eval's "drop after" path and from contexts that want to
+        keep the slot alive for debugging (none today, but the
+        responsibility split keeps options open).
+        """
+        status, payload = self.exception_to_msgpack(ctx, exc_slot)
+        if status < 0:
+            raise QuickJSError(
+                f"shim error from qjs_exception_to_msgpack: status={status}"
+            )
+        record = _msgpack.decode(payload)
+        if not isinstance(record, dict):
+            raise QuickJSError(
+                f"qjs_exception_to_msgpack returned {type(record).__name__}, "
+                "expected dict"
+            )
+        name = record.get("name") or "Error"
+        message = record.get("message") or ""
+        stack = record.get("stack")
+        if not isinstance(name, str):
+            name = str(name)
+        if not isinstance(message, str):
+            message = str(message)
+        stack_str: str | None = stack if isinstance(stack, str) else None
+
+        # §10.1 InternalError routing — markers confirmed against
+        # quickjs-ng v0.14.0 (quickjs.c:8082 / quickjs.c:8167).
+        if name == "InternalError":
+            if "out of memory" in message:
+                raise MemoryLimitError(message)
+            if "interrupted" in message:
+                raise TimeoutError(message)
+
+        if name == "HostError":
+            cause = self.take_last_host_exception()
+            err = HostError(name, message, stack_str)
+            if cause is not None:
+                raise err from cause
+            raise err
+        raise JSError(name, message, stack_str)
 
     def from_msgpack(self, ctx: int, payload: bytes) -> tuple[int, int]:
         """Return (status, slot). status: 0 ok, <0 shim error."""

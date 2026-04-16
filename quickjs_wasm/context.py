@@ -13,10 +13,8 @@ import wasmtime
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
 from quickjs_wasm.errors import (
-    HostError,
     JSError,
     MarshalError,
-    MemoryLimitError,
     QuickJSError,
     TimeoutError,
 )
@@ -141,52 +139,14 @@ class Context:
             self._bridge.slot_drop(self._ctx_id, slot)
 
     def _raise_from_exception_slot(self, exc_slot: int) -> None:
-        """Extract {name, message, stack} off a JS exception and raise.
+        """Thin passthrough to Bridge.raise_from_exception_slot.
 
-        Routes:
-        - InternalError containing "out of memory" → MemoryLimitError (§10.1)
-        - InternalError containing "interrupted" → TimeoutError (§10.1)
-        - name == "HostError" → HostError with __cause__ threaded (§10.2)
-        - everything else → JSError with name/message/stack preserved
+        Kept as a method on Context for callers (Handle, mostly) that
+        already hold a Context reference but not a Bridge — one less
+        attribute hop. All exception routing lives in Bridge to keep
+        §10.1 / §10.2 logic in one place.
         """
-        status, payload = self._bridge.exception_to_msgpack(
-            self._ctx_id, exc_slot
-        )
-        if status < 0:
-            raise QuickJSError(
-                f"shim error from qjs_exception_to_msgpack: status={status}"
-            )
-        record = _msgpack.decode(payload)
-        if not isinstance(record, dict):
-            raise QuickJSError(
-                f"qjs_exception_to_msgpack returned {type(record).__name__}, "
-                "expected dict"
-            )
-        name = record.get("name") or "Error"
-        message = record.get("message") or ""
-        stack = record.get("stack")
-        if not isinstance(name, str):
-            name = str(name)
-        if not isinstance(message, str):
-            message = str(message)
-        stack_str: str | None = stack if isinstance(stack, str) else None
-
-        # §10.1 InternalError routing — quickjs-ng emits fixed strings for
-        # both OOM and interrupt, confirmed against the pinned submodule:
-        # quickjs.c:8082 ("out of memory") and quickjs.c:8167 ("interrupted").
-        if name == "InternalError":
-            if "out of memory" in message:
-                raise MemoryLimitError(message)
-            if "interrupted" in message:
-                raise TimeoutError(message)
-
-        if name == "HostError":
-            cause = self._bridge.take_last_host_exception()
-            err = HostError(name, message, stack_str)
-            if cause is not None:
-                raise err from cause
-            raise err
-        raise JSError(name, message, stack_str)
+        self._bridge.raise_from_exception_slot(self._ctx_id, exc_slot)
 
     def eval_handle(
         self,
