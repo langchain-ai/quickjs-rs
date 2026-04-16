@@ -749,8 +749,11 @@ The absorption behavior in step 5 is a design choice that prioritizes JS-side cl
 
 Timeout applies via the same `host_interrupt` mechanism as sync eval, with these differences:
 
-- **Default**: the context's `timeout=` kwarg (at creation) becomes a *cumulative budget* spanning all `eval_async` calls on that context. If total time across calls exceeds the budget, the next interrupt check aborts with `TimeoutError`. This is the right default because async eval is often used in long-running agent loops where each call is short but the total should be bounded.
-- **Explicit `timeout=N` on `eval_async`**: applies only to that call. The context budget is not consulted.
+- **Default**: the context's `timeout=` kwarg (at creation) becomes a *cumulative budget* spanning all `eval_async` calls on that context. This is the right default because async eval is often used in long-running agent loops where each call is short but the total should be bounded.
+
+  Once the cumulative budget is exhausted, subsequent `eval_async` calls on the context raise `TimeoutError` **immediately, before evaluating any code**. This applies even to trivially-fast or zero-work evals that would otherwise never trip QuickJS's bytecode-counting interrupt — the budget check is a pre-eval gate, not an in-eval probe. This matches the user-intuitive "depleted context is depleted" semantic: once the budget runs out, any further `eval_async` bounces, regardless of what it would have done.
+
+- **Explicit `timeout=N` on `eval_async`**: applies only to that call. The context cumulative budget is not consulted, and the override does not consume or refund the cumulative budget — it is a parallel, independent budget for the duration of the single call. Subsequent `eval_async` calls without an override fall back on whatever remains of the cumulative budget from before the overridden call.
 
 Sync `eval` timeout semantics are unchanged — per-call, cleared on return.
 
