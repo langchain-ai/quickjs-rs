@@ -44,7 +44,10 @@ QJS_EXPORT void     qjs_slot_drop(uint32_t ctx, uint32_t slot);
 
 /* ---- Eval (§6.2) --------------------------------------------------- */
 
-/* flags: bit 0 = module, bit 1 = compile-only, bit 2 = strict. */
+/* flags: bit 0 = module, bit 1 = compile-only, bit 2 = strict,
+ *        bit 3 = async (top-level await, returns Promise; §7.4).
+ * Bit 3 is only valid when bit 0 is clear — quickjs-ng restricts
+ * top-level await to script mode (JS_EVAL_TYPE_GLOBAL). */
 QJS_EXPORT int32_t qjs_eval(uint32_t ctx,
                             uint32_t code_ptr, uint32_t code_len,
                             uint32_t flags,

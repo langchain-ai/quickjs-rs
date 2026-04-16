@@ -415,7 +415,7 @@ class Context:
         self,
         code: str,
         *,
-        module: bool = True,           # defaults to module mode for top-level await
+        module: bool = True,           # defaults to top-level-await-enabled script
         strict: bool = False,
         filename: str = "<eval>",
         timeout: float | None = None,  # per-call override of context cumulative budget
@@ -423,6 +423,14 @@ class Context:
         """Evaluate asynchronously, driving pending jobs until any top-level
         Promise settles. Required when the evaluated code awaits, or when
         any registered async host function fires during execution.
+
+        ``module=True`` (default) compiles with QuickJS's script mode plus
+        the top-level-await flag (JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC),
+        which combines script-mode completion-value semantics (a bare
+        expression yields its result) with top-level await. The kwarg is
+        named ``module`` to match the JS-developer concept; the underlying
+        mechanism is technically a global-mode script with the async flag.
+        ``module=False`` compiles as plain script mode (no top-level await).
 
         See §7.4 for the detailed execution model.
 

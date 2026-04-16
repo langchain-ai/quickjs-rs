@@ -13,6 +13,8 @@ import wasmtime
 from quickjs_wasm import _msgpack
 from quickjs_wasm._msgpack import Undefined
 from quickjs_wasm.errors import (
+    ConcurrentEvalError,
+    DeadlockError,
     JSError,
     MarshalError,
     QuickJSError,
@@ -39,6 +41,13 @@ class Context:
         self._closed = False
         self.preserve_undefined = False
         self._globals = Globals(self._bridge, self._ctx_id)
+        # §7.4 / §7.3: cumulative timeout budget for eval_async. Starts
+        # counting from context creation. Per-call timeout= on
+        # eval_async overrides for the duration of that call.
+        self._cumulative_deadline = time.monotonic() + timeout
+        # §7.4 concurrency rule: only one eval_async in flight per
+        # context. Set on entry, cleared on exit via try/finally.
+        self._eval_async_in_flight = False
 
     def __enter__(self) -> Context:
         return self
@@ -194,6 +203,259 @@ class Context:
         from quickjs_wasm.handle import Handle as _Handle
         return _Handle(self, self._bridge, self._ctx_id, slot)
 
+    # ---- Async API (§7.4) ---------------------------------------------
+
+    async def eval_async(
+        self,
+        code: str,
+        *,
+        module: bool = True,
+        strict: bool = False,
+        filename: str = "<eval>",
+        timeout: float | None = None,
+    ) -> Any:
+        """See §7.4. Defaults to module mode so top-level await works."""
+        settled_slot = await self._eval_and_drive(
+            code, module=module, strict=strict, filename=filename, timeout=timeout
+        )
+        try:
+            mp_status, payload = self._bridge.to_msgpack(
+                self._ctx_id, settled_slot
+            )
+            if mp_status < 0:
+                raise MarshalError(
+                    "eval_async result is not marshalable; use "
+                    "eval_handle_async to keep the value as a Handle"
+                )
+            value = _msgpack.decode(payload)
+            if isinstance(value, Undefined) and not self.preserve_undefined:
+                return None
+            return value
+        finally:
+            self._bridge.slot_drop(self._ctx_id, settled_slot)
+
+    async def eval_handle_async(
+        self,
+        code: str,
+        *,
+        module: bool = True,
+        strict: bool = False,
+        filename: str = "<eval>",
+        timeout: float | None = None,
+    ) -> Handle:
+        settled_slot = await self._eval_and_drive(
+            code, module=module, strict=strict, filename=filename, timeout=timeout
+        )
+        from quickjs_wasm.handle import Handle as _Handle
+        return _Handle(self, self._bridge, self._ctx_id, settled_slot)
+
+    async def _eval_and_drive(
+        self,
+        code: str,
+        *,
+        module: bool,
+        strict: bool,
+        filename: str,
+        timeout: float | None,
+    ) -> int:
+        """Shared prologue + eval + driving loop for the two async
+        entry points. Returns a slot owning the settled value; caller
+        disposes or wraps it. Raises on JS exception via the standard
+        §10.1 routing.
+        """
+        if self._closed:
+            raise QuickJSError("context is closed")
+        # §7.4 concurrency rule. Check BEFORE touching the shim so a
+        # concurrent violation is cheap and leaves no side effects.
+        if self._eval_async_in_flight:
+            raise ConcurrentEvalError(
+                "another eval_async is already in flight on this context; "
+                "use a separate context for concurrent JS workloads"
+            )
+        del filename
+        # §7.2 / §7.4: module=True means "top-level await enabled" at
+        # the user level. Under the hood that's script-mode (bit 0
+        # clear) plus the async flag (bit 3). module=False is plain
+        # script mode. True ES module mode (bit 0 set) is not exposed
+        # through eval_async because quickjs-ng's top-level-await
+        # support is script-mode-only.
+        flags = 0
+        if module:
+            flags |= 0x8  # async flag
+        if strict:
+            flags |= 0x4
+
+        self._eval_async_in_flight = True
+        self._bridge.take_last_host_exception()
+        # §7.4 timeout semantics. Per-call timeout= overrides the
+        # cumulative budget for the duration of this call only.
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
+        else:
+            deadline = self._cumulative_deadline
+        self._bridge.set_deadline(deadline)
+        try:
+            try:
+                status, slot = self._bridge.eval(self._ctx_id, code, flags)
+            except wasmtime.Trap as trap:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"JS evaluation exceeded timeout "
+                        f"(epoch trap: {trap})"
+                    ) from None
+                _log.debug("non-timeout wasm trap during eval_async: %s", trap)
+                raise JSError(
+                    "InternalError",
+                    f"wasm trap during JS evaluation: {trap}",
+                    None,
+                ) from None
+            if status < 0:
+                raise QuickJSError(f"shim error from qjs_eval: status={status}")
+            if status == 1:
+                try:
+                    self._raise_from_exception_slot(slot)
+                finally:
+                    self._bridge.slot_drop(self._ctx_id, slot)
+            settled_slot = await self._drive_promise(slot, deadline)
+            # §7.4 / quickjs-ng async-eval envelope: when bit 3 (async)
+            # was set, the resolved value is wrapped as {value: x, done}
+            # (iterator-result shape). Unwrap the `value` property before
+            # handing back to the caller. module=False doesn't set bit 3
+            # and returns the raw expression result, so only unwrap when
+            # we know we asked for the async mode.
+            if module:
+                try:
+                    status_g, value_slot = self._bridge.get_prop(
+                        self._ctx_id, settled_slot, "value"
+                    )
+                    if status_g != 0:
+                        raise QuickJSError(
+                            "unable to unwrap async-eval {value: x} envelope"
+                        )
+                finally:
+                    self._bridge.slot_drop(self._ctx_id, settled_slot)
+                return value_slot
+            return settled_slot
+        finally:
+            self._bridge.set_deadline(None)
+            self._eval_async_in_flight = False
+
+    async def _drive_promise(self, slot: int, deadline: float) -> int:
+        """§7.4 driving loop. Consumes ``slot`` (drops on any exit path
+        that doesn't return it); returns a new slot owning the settled
+        value.
+
+        Fast path: if ``slot`` is not a promise, it's already settled.
+        Pure-sync code like ``eval_async("1 + 2")`` skips the loop and
+        marshals directly.
+        """
+        # Fast path: non-promise results don't need the driving loop.
+        if not self._bridge.is_promise(self._ctx_id, slot):
+            return slot
+
+        # From here, `slot` holds the top-level promise. The loop owns
+        # its lifetime; the finally block drops it on any exit (return
+        # or raise). The returned result_slot on the fulfilled path is
+        # a fresh allocation from promise_result, so dropping the
+        # outer promise slot is always safe.
+        try:
+            while True:
+                # §7.4 step 1: drain microtasks first.
+                # Ordering matters: drain-then-check, not check-then-drain.
+                # A just-completed host call may have queued a microtask
+                # that settles the top-level promise; running jobs first
+                # lets state transitions propagate before we inspect.
+                rc, _count = self._bridge.runtime_run_pending_jobs(
+                    self._runtime._rt_id
+                )
+                if rc < 0:
+                    raise QuickJSError(
+                        f"shim error from runtime_run_pending_jobs: {rc}"
+                    )
+                # rc == 1 means a microtask raised. The exception stays
+                # on the context; it'll surface via the promise's
+                # rejected state on the next iteration or via the
+                # next state check below.
+
+                # §7.4 step 2: check promise state.
+                state = self._bridge.promise_state(self._ctx_id, slot)
+
+                # §7.4 step 3: fulfilled → marshal and return.
+                if state == 1:
+                    _, result_slot = self._bridge.promise_result(
+                        self._ctx_id, slot
+                    )
+                    return result_slot
+
+                # §7.4 step 4: rejected → extract reason and raise.
+                if state == 2:
+                    _, reason_slot = self._bridge.promise_result(
+                        self._ctx_id, slot
+                    )
+                    try:
+                        self._raise_from_exception_slot(reason_slot)
+                    finally:
+                        self._bridge.slot_drop(self._ctx_id, reason_slot)
+
+                # §7.4 step 5 / step 6: pending. Dispatch based on
+                # whether any async host calls are in flight.
+                if not self._bridge._pending_tasks:
+                    # §7.4 step 6: nothing will settle this promise.
+                    # Actionable error message — users in this loop
+                    # will read it first when debugging.
+                    raise DeadlockError(
+                        "eval_async's top-level promise is pending but "
+                        "no async host calls are in flight. Did you "
+                        "forget to register a function as async "
+                        "(is_async=True)? Or is a JS Promise missing "
+                        "its resolver?"
+                    )
+
+                # §7.4 step 5: wait for the next host-call completion.
+                # The Event was lazy-created by the first dispatch; by
+                # the time we reach here with _pending_tasks non-empty,
+                # it exists. Single-waiter invariant: the driving loop
+                # is the only consumer of this Event. Multi-waiter
+                # semantics (debuggers, monitoring) would require an
+                # asyncio.Condition or per-dispatch futures — revisit
+                # in v0.3+ (see step-3 flag in v0.2 plan).
+                event = self._bridge._pending_completed
+                assert event is not None, (
+                    "pending task present but completion event is None; "
+                    "indicates a race in _host_call_async_dispatch"
+                )
+                # Wait/clear ordering: wait first, then clear, then
+                # loop back to drain + re-check. If we cleared first,
+                # a set() that fires between clear and wait would be
+                # lost. If we forgot to clear, the next wait returns
+                # immediately and the loop busy-spins.
+                await event.wait()
+                event.clear()
+                # Timeout enforcement: host_interrupt fires against
+                # the deadline we set earlier, so QuickJS itself will
+                # abort the next job-drain with an interrupted error.
+                # But a task that's blocked in Python-land awaiting
+                # something outside the shim (e.g. asyncio.sleep)
+                # won't see the interrupt. Check here as a belt-and-
+                # suspenders deadline tripwire for the async path.
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "eval_async exceeded its deadline"
+                    )
+        finally:
+            # Clear the epoch deadline BEFORE cleanup calls enter wasm
+            # — otherwise a deadline that just elapsed (the very thing
+            # that triggered this finally) would trap slot_drop. The
+            # outer caller re-sets the deadline for any subsequent
+            # operation; for cleanup we want the unbounded deadline.
+            self._bridge.set_deadline(None)
+            # Always drop the promise's own slot. On the happy path
+            # we return result_slot (a fresh allocation from
+            # promise_result); on error paths we drop any reason_slot
+            # inline above. The outer promise slot is always ours to
+            # clean up here.
+            self._bridge.slot_drop(self._ctx_id, slot)
+
     @property
     def globals(self) -> Globals:
         if self._closed:
@@ -230,10 +492,37 @@ class Context:
         self.register(fn.__name__, fn)
         return fn
 
-    def register(self, name: str, fn: Callable[..., Any]) -> None:
+    def register(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        is_async: bool | None = None,
+    ) -> None:
+        """Register a Python callable as a JS global function. §7.2.
+
+        ``is_async``:
+            ``None`` (default) — auto-detect via
+            ``inspect.iscoroutinefunction`` (§7.4).
+            ``True`` / ``False`` — explicit override, for wrapped
+            callables where auto-detection picks wrong.
+
+        Auto-detection itself lands in step 6 of §17.2; for step 5 the
+        parameter is present and honoured when explicitly passed, and
+        ``None`` falls back to sync (v0.1 behaviour). This preserves
+        the spec signature so tests can use ``is_async=True`` today.
+        """
         if self._closed:
             raise QuickJSError("context is closed")
-        self._bridge.register_host_function(self._ctx_id, name, fn)
+        if is_async is None:
+            # TODO(step 6): inspect.iscoroutinefunction(fn). For now
+            # default to sync so v0.1 call sites continue to work.
+            is_async_resolved = False
+        else:
+            is_async_resolved = is_async
+        self._bridge.register_host_function(
+            self._ctx_id, name, fn, is_async=is_async_resolved
+        )
 
     @property
     def timeout(self) -> float:
