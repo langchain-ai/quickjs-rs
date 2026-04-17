@@ -1,15 +1,12 @@
-# WASI-SDK, installed by scripts/install-wasi-sdk.sh
-toolchain/
-
 # Build outputs
-wasm/build/
 build/
 dist/
 *.egg-info/
+target/
 
-# Built wasm artifact (rebuilt locally or fetched from CI)
-quickjs_rs/_resources/quickjs.wasm
-quickjs_rs/_resources/quickjs.wasm.sha256
+# Stale wasi-sdk install from the wasm era; left on disk for local
+# users to delete at their leisure. Never committed.
+toolchain/
 
 # Python
 __pycache__/

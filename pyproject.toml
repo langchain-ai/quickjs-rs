@@ -23,10 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Interpreters",
 ]
-dependencies = [
-    "wasmtime>=27.0.0",
-    "msgpack>=1.1.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -48,7 +45,7 @@ Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 include = ["quickjs_rs*"]
 
 [tool.setuptools.package-data]
-quickjs_rs = ["py.typed", "_resources/quickjs.wasm"]
+quickjs_rs = ["py.typed"]
 
 [tool.ruff]
 line-length = 100
