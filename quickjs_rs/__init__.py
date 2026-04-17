@@ -3,6 +3,7 @@
 See spec/implementation.md §7 for the public API.
 """
 
+from quickjs_rs.context import Context
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
@@ -28,6 +29,7 @@ __version__ = "0.3.0.dev0"
 # continuing into phase 1 until the relevant step lands.
 __all__ = [
     "Runtime",
+    "Context",
     "QuickJSError",
     "JSError",
     "HostError",

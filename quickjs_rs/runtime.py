@@ -71,9 +71,13 @@ class Runtime:
         self._closed = True
 
     def new_context(self, *, timeout: float = 5.0) -> Any:
-        raise NotImplementedError(
-            "Context lands in phase 1 step 2 (§15). See spec/implementation.md §7."
-        )
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        from quickjs_rs.context import Context
+
+        ctx = Context(self, timeout=timeout)
+        self._contexts.append(ctx)
+        return ctx
 
     def _unregister_context(self, ctx: Any) -> None:
         try:
