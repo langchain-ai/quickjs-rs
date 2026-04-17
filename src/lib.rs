@@ -8,8 +8,8 @@ use rquickjs::{
     convert::{Coerced, FromJs},
     object::Filter,
     runtime::InterruptHandler,
-    Array, BigInt, CatchResultExt, CaughtError, Context, Ctx, Error, Function, Object, Runtime,
-    String as JsString, Type, TypedArray, Value,
+    Array, BigInt, CatchResultExt, CaughtError, Context, Ctx, Error, Function, Object, Persistent,
+    Runtime, String as JsString, Type, TypedArray, Value,
 };
 
 // §10 exception hierarchy. PyO3 needs native classes to raise; the
@@ -205,10 +205,7 @@ fn js_value_to_py<'js>(py: Python<'_>, val: &Value<'js>, depth: u32) -> PyResult
     }
 }
 
-/// Marshal a Python object to a JS value per §6.6. Step 4 (globals
-/// write) and step 5 (host function args/returns) are the first
-/// call sites.
-#[allow(dead_code)]
+/// Marshal a Python object to a JS value per §6.6.
 fn py_to_js_value<'js>(
     ctx: &Ctx<'js>,
     py_val: &Bound<'_, PyAny>,
@@ -469,6 +466,22 @@ impl QjsContext {
     fn is_closed(&self) -> bool {
         self.inner.is_none()
     }
+
+    /// Return a handle to the global object. §6.3 global_object.
+    fn global_object(&self) -> PyResult<QjsHandle> {
+        let ctx = self.context()?;
+        let persistent = ctx.with(|ctx| {
+            let globals = ctx.globals();
+            // Persistent::save needs a Value, not an Object. Convert
+            // via into_value — the 'static-lifetimed Persistent can
+            // live outside the closure.
+            Persistent::save(&ctx, globals.into_value())
+        });
+        Ok(QjsHandle {
+            context: Some(ctx.clone()),
+            persistent: Some(persistent),
+        })
+    }
 }
 
 impl QjsContext {
@@ -479,10 +492,156 @@ impl QjsContext {
     }
 }
 
+/// Minimal step-4 QjsHandle — owns a `Persistent<Value>` plus the
+/// context reference needed to restore it. Step 7 adds the full
+/// lifecycle (dispose, is_disposed, ResourceWarning, cross-context
+/// guard, call/new_instance/to_python/type_of, etc). For now the
+/// handle just needs to support globals-proxy prop access.
+#[pyclass(module = "quickjs_rs._engine", unsendable)]
+struct QjsHandle {
+    context: Option<Context>,
+    persistent: Option<Persistent<Value<'static>>>,
+}
+
+#[pymethods]
+impl QjsHandle {
+    /// Read a property from the object this handle wraps.
+    /// Missing properties marshal as `undefined` → Python `None` at
+    /// the root. Returns `MarshalError` only if the value itself
+    /// isn't marshalable (function, symbol, etc).
+    fn get_prop(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let (context, persistent) = self.parts()?;
+        let persistent = persistent.clone();
+        context.with(|ctx| {
+            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = val.try_into_object().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not an object ({}), cannot get property",
+                    v.type_of()
+                ))
+            })?;
+            let result: Value<'_> = obj.get(key).map_err(|e| {
+                QuickJSError::new_err(format!("get property {:?} failed: {}", key, e))
+            })?;
+            js_value_to_py(py, &result, 0)
+        })
+    }
+
+    /// Set a property on the object this handle wraps.
+    fn set_prop(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (context, persistent) = self.parts()?;
+        let persistent = persistent.clone();
+        context.with(|ctx| {
+            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = val.try_into_object().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not an object ({}), cannot set property",
+                    v.type_of()
+                ))
+            })?;
+            let js_value = py_to_js_value(&ctx, value, 0)?;
+            obj.set(key, js_value).map_err(|e| {
+                QuickJSError::new_err(format!("set property {:?} failed: {}", key, e))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// True iff the object has own-or-inherited property `key` whose
+    /// value is not `undefined`. §7.3-adjacent: `in` collapses the
+    /// "own but set to undefined" / "not defined" distinction that
+    /// JS makes — both are "not present" Python-side. Matches the
+    /// v0.2 tripwire test_contains_false_when_value_is_undefined.
+    fn has_prop(&self, key: &str) -> PyResult<bool> {
+        let (context, persistent) = self.parts()?;
+        let persistent = persistent.clone();
+        context.with(|ctx| {
+            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = val.try_into_object().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not an object ({}), cannot check property",
+                    v.type_of()
+                ))
+            })?;
+            if !obj.contains_key(key).map_err(|e| {
+                QuickJSError::new_err(format!("contains_key {:?} failed: {}", key, e))
+            })? {
+                return Ok(false);
+            }
+            // Present: collapse `undefined` to "not present".
+            let v: Value<'_> = obj.get(key).map_err(|e| {
+                QuickJSError::new_err(format!("get property {:?} failed: {}", key, e))
+            })?;
+            Ok(!matches!(
+                v.type_of(),
+                Type::Undefined | Type::Uninitialized
+            ))
+        })
+    }
+
+    /// Restore-and-drop the persistent ref inside a Ctx so QuickJS
+    /// can decrement the JSValue refcount, then release the context
+    /// clone. Step 7 adds ResourceWarning / is_disposed / __del__.
+    ///
+    /// §6.7: rquickjs's Persistent has no Drop — it holds a Value
+    /// with a 'static-lifetime lie, and Value::Drop needs a live
+    /// Ctx to call JS_FreeValue. Forgetting to restore-drop leaks
+    /// the JS ref and, on runtime teardown, triggers QuickJS's
+    /// `list_empty(&rt->gc_obj_list)` assertion.
+    fn dispose(&mut self) -> PyResult<()> {
+        if let (Some(context), Some(persistent)) = (self.context.take(), self.persistent.take()) {
+            context.with(|ctx| {
+                // restore() produces a live Value whose Drop frees
+                // the JS ref via the Ctx. The `let _ =` pattern
+                // ensures the returned Value drops at the end of
+                // this closure while ctx is still valid.
+                let _ = persistent.restore(&ctx);
+            });
+        }
+        Ok(())
+    }
+}
+
+// Fallback Drop: if Python's GC disposes the handle without calling
+// .dispose(), release the JS ref here. Step 7 adds the
+// ResourceWarning that the v0.2 contract requires on leaked handles.
+impl Drop for QjsHandle {
+    fn drop(&mut self) {
+        if let (Some(context), Some(persistent)) = (self.context.take(), self.persistent.take()) {
+            context.with(|ctx| {
+                let _ = persistent.restore(&ctx);
+            });
+        }
+    }
+}
+
+impl QjsHandle {
+    fn parts(&self) -> PyResult<(&Context, &Persistent<Value<'static>>)> {
+        let context = self
+            .context
+            .as_ref()
+            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))?;
+        let persistent = self
+            .persistent
+            .as_ref()
+            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))?;
+        Ok((context, persistent))
+    }
+}
+
+fn map_handle_error(err: Error) -> PyErr {
+    // Error::UnrelatedRuntime is the canonical cross-context signal
+    // from Persistent::restore — Python-side maps it to
+    // InvalidHandleError in step 7. For step 4 a QuickJSError is
+    // fine; globals don't cross contexts.
+    QuickJSError::new_err(format!("handle restore failed: {}", err))
+}
+
 #[pymodule]
 fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QjsRuntime>()?;
     m.add_class::<QjsContext>()?;
+    m.add_class::<QjsHandle>()?;
     m.add_class::<Undefined>()?;
     m.add("UNDEFINED", Undefined.into_pyobject(m.py())?)?;
     m.add("QuickJSError", m.py().get_type::<QuickJSError>())?;
