@@ -74,14 +74,17 @@ From §7.4 (async — unchanged from predecessor):
 - eval_async timeout is cumulative across calls on the same context. timeout= kwarg overrides per-call.
 - Cancellation: catch CancelledError at the driving loop's await, cancel the internal TaskGroup, reject in-flight promises with HostCancellationError, run pending jobs one final time, re-raise unless JS absorbed it.
 
-From `spec/module-loading.md` §4 (module resolver — v0.4):
-- Scopes are flat. A nested ModuleScope's keys are filenames with no `/` in them. Enforced at ModuleScope construction — `ValueError` on violation.
-- Two levels max. Outer ModuleScope maps specifiers to strings (single-file modules) or nested ModuleScope values (multi-file scopes). Nested scopes map filenames to strings only. No third level — nested scopes cannot contain further ModuleScope values.
-- `./` resolves within the containing scope's file map only. Strip the `./`, look up the remainder in the scope's files, yield `scopeName/filename` as the canonical module name. Not found → resolution error.
-- `../` is always an error. Scopes are closed namespaces; there is no parent to traverse to.
-- Bare specifiers (no leading `./`) always resolve at the top level. This is how `@agent/fs/index.js` can import from `@agent/utils` — bare-at-top-level is the only cross-scope import mechanism.
+From `spec/module-loading.md` §3.1 + §4 (module scopes + resolver — v0.4):
+- Scopes are recursive. A ModuleScope can contain `str` values (files) and/or other ModuleScope values (dependencies) at any depth. No two-level cap; the dependency graph shape is whatever the user hands us.
+- A scope with any `str` entries must have `index.js` — that's what a bare `import "scope-name"` resolves to. A pure-dependency container (only ModuleScope values) doesn't need an index.js.
+- `str`-keyed entries cannot contain `/` in the key (flat namespace within a scope; subdirectories are represented as nested scopes). Enforced at ModuleScope construction with `ValueError`.
+- Top-level / any-level keys cannot start with `./` or `../` — those are import specifiers, not valid as scope or file names.
+- Resolver rule is scope-local. Identify the referrer's containing scope. `./X` → look up `"X"` as a `str` child of that scope. Bare `X` → look up `"X"` as a ModuleScope child of that scope. No parent traversal, no sibling visibility, no root fallback.
+- A scope that uses a dependency must declare it in its own dict. Shared deps are expressed by spreading (`**base.modules`) into each scope that needs them — each spread creates an independent canonical path, which QuickJS caches independently.
+- `../` is always an error. Bare specifier that resolves to a `str` (a file) is an error (tell the user to use `./X`).
 - `Context.install()` is additive. Multiple calls insert into the same backing store; no flag, no guard, no "already installed" error. Re-inserting a name that hasn't been imported yet overwrites the source.
-- QuickJS caches modules per context. Re-installing a name that has been imported is a silent no-op — the cached record wins. Document this as a caveat; don't try to defeat it.
+- QuickJS caches modules per canonical path per context. Re-installing a name that has been imported is a silent no-op — the cached record wins. Document this as a caveat; don't try to defeat it.
+- The backing store is per-runtime, not per-context. rquickjs's `set_loader` operates at the runtime level; all contexts on the same runtime see the same module set.
 
 ## Commit discipline
 
