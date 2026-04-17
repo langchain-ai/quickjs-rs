@@ -15,7 +15,6 @@ rquickjs = { version = "0.11", features = [
     "properties",
     "futures",
     "bindgen",
-    "rust-alloc",
 ] }
 
 [profile.release]

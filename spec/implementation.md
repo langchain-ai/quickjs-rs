@@ -198,7 +198,13 @@ rquickjs = { version = "0.11", features = [
     "properties",
     "futures",
     "bindgen",       # cross-platform bindings generation
-    "rust-alloc",    # use Rust's allocator, not libc — cleaner memory tracking
+    # NOT "rust-alloc": with rust-alloc enabled, allocations bypass
+    # QuickJS's internal accounting and Runtime::set_memory_limit
+    # silently becomes a no-op (see rquickjs-core/src/runtime/raw.rs:
+    # "Noop when a custom allocator is being used"). The §9 64MB
+    # memory-limit invariant is load-bearing — test_memory_limit_*
+    # depends on it — so we stay on libc malloc where
+    # JS_SetMemoryLimit actually works.
 ] }
 
 [profile.release]

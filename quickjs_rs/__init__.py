@@ -3,8 +3,6 @@
 See spec/implementation.md §7 for the public API.
 """
 
-from quickjs_rs._msgpack import UNDEFINED, Undefined
-from quickjs_rs.context import Context
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
@@ -18,17 +16,18 @@ from quickjs_rs.errors import (
     QuickJSError,
     TimeoutError,
 )
-from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 
-__version__ = "0.2.0"
+__version__ = "0.3.0.dev0"
 
+# Public API surface is built up step-by-step through phase 1. Context,
+# Handle, Undefined, and the full §7 surface land with their respective
+# steps (see spec/implementation.md §15). `__all__` is the source of
+# truth for "what's ready"; tests that import names not here will
+# ImportError cleanly — that's the phase-0 "fail cleanly" contract
+# continuing into phase 1 until the relevant step lands.
 __all__ = [
     "Runtime",
-    "Context",
-    "Handle",
-    "Undefined",
-    "UNDEFINED",
     "QuickJSError",
     "JSError",
     "HostError",
@@ -37,7 +36,6 @@ __all__ = [
     "MemoryLimitError",
     "TimeoutError",
     "InvalidHandleError",
-    # v0.2 additions
     "HostCancellationError",
     "ConcurrentEvalError",
     "DeadlockError",

@@ -1,32 +1,26 @@
-"""Runtime. See spec/implementation.md §7.2."""
+"""Runtime. See spec/implementation.md §7."""
 
 from __future__ import annotations
 
+import time
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import Any
 
-from quickjs_rs._bridge import Bridge
+import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
-
-if TYPE_CHECKING:
-    from quickjs_rs.context import Context
 
 
 class Runtime:
-    """Owns the JS heap, memory/stack limits, and the wasm instance.
+    """Owns the QuickJS runtime (JS heap, memory/stack limits, interrupt
+    handler). Thin wrapper over ``_engine.QjsRuntime``.
 
-    Internals worth knowing for tuning:
-
-    - A daemon thread per Runtime increments the wasmtime engine's epoch
-      at a fixed 50 ms cadence. This is what gives ``set_epoch_deadline``
-      (§9's trap-based backup to ``host_interrupt``) a clock to race
-      against. Don't lower the cadence without understanding what it's
-      protecting against: the wall-clock interrupt path is primary, and
-      the epoch backup only matters when QuickJS is in a C-level loop
-      that doesn't poll interrupts. 50 ms gives ~100 ms worst-case lag
-      on that already-catastrophic scenario, which is acceptable; 5 ms
-      would cut lag at the cost of 10× the per-tick wakeups for the
-      common case where nothing has gone wrong.
+    A single wall-clock interrupt handler is installed at construction.
+    Per-eval deadlines are written into ``self._deadline`` by the
+    ``Context`` layer before each eval and cleared after; the handler
+    reads that slot on every QuickJS interrupt poll and returns True
+    once the deadline has elapsed. This is the same design as v0.2's
+    bridge — single shared deadline per runtime — now without the
+    wasmtime epoch backup (§8 "No wasm epoch interruption").
     """
 
     def __init__(
@@ -35,19 +29,26 @@ class Runtime:
         memory_limit: int | None = 64 * 1024 * 1024,
         stack_limit: int | None = 1 * 1024 * 1024,
     ) -> None:
-        self._bridge = Bridge()
-        rt_id = self._bridge.runtime_new()
-        if rt_id == 0:
-            raise QuickJSError("failed to create QuickJS runtime")
-        self._rt_id = rt_id
-        self._closed = False
-        self._contexts: list[Context] = []
+        try:
+            self._engine_rt = _engine.QjsRuntime(
+                memory_limit=memory_limit,
+                stack_limit=stack_limit,
+            )
+        except _engine.QuickJSError as e:
+            raise QuickJSError(str(e)) from e
 
-        if memory_limit is not None:
-            self._bridge.runtime_set_memory_limit(rt_id, memory_limit)
-        if stack_limit is not None:
-            self._bridge.runtime_set_stack_limit(rt_id, stack_limit)
-        self._bridge.runtime_install_interrupt(rt_id)
+        self._closed = False
+        self._contexts: list[Any] = []  # list[Context] once step 2 lands
+
+        # Per-eval deadline slot (monotonic-clock absolute time, seconds).
+        # Context writes it before eval, clears it after.
+        self._deadline: float | None = None
+
+        def _interrupt() -> bool:
+            d = self._deadline
+            return d is not None and time.monotonic() >= d
+
+        self._engine_rt.set_interrupt_handler(_interrupt)
 
     def __enter__(self) -> Runtime:
         return self
@@ -63,34 +64,26 @@ class Runtime:
     def close(self) -> None:
         if self._closed:
             return
-        # Close contexts first (§7.3).
         for ctx in list(self._contexts):
             ctx.close()
         self._contexts.clear()
-        self._bridge.runtime_free(self._rt_id)
-        self._bridge.close()
+        self._engine_rt.close()
         self._closed = True
 
-    def new_context(self, *, timeout: float = 5.0) -> Context:
-        if self._closed:
-            raise QuickJSError("runtime is closed")
-        from quickjs_rs.context import Context
+    def new_context(self, *, timeout: float = 5.0) -> Any:
+        raise NotImplementedError(
+            "Context lands in phase 1 step 2 (§15). See spec/implementation.md §7."
+        )
 
-        ctx = Context(self, timeout=timeout)
-        self._contexts.append(ctx)
-        return ctx
-
-    def _unregister_context(self, ctx: Context) -> None:
+    def _unregister_context(self, ctx: Any) -> None:
         try:
             self._contexts.remove(ctx)
         except ValueError:
             pass
 
-    # ---- Public job helpers --------------------------------------------
-
     def run_pending_jobs(self) -> int:
-        raise NotImplementedError("run_pending_jobs lands with async support (§7.2).")
+        raise NotImplementedError("run_pending_jobs lands with async support (§7.4).")
 
     @property
     def has_pending_jobs(self) -> bool:
-        raise NotImplementedError("has_pending_jobs lands with async support (§7.2).")
+        raise NotImplementedError("has_pending_jobs lands with async support (§7.4).")
