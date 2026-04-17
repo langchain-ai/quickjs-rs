@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project]
 name = "quickjs-rs"
@@ -41,11 +41,11 @@ bench = [
 Homepage = "https://github.com/langchain-ai/quickjs-rs"
 Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 
-[tool.setuptools.packages.find]
-include = ["quickjs_rs*"]
-
-[tool.setuptools.package-data]
-quickjs_rs = ["py.typed"]
+[tool.maturin]
+python-source = "."
+module-name = "quickjs_rs._engine"
+features = ["pyo3/extension-module"]
+include = [{ path = "quickjs_rs/py.typed", format = "sdist" }]
 
 [tool.ruff]
 line-length = 100

@@ -144,9 +144,9 @@ What's removed:
 
 | Dependency | Version | Notes |
 |---|---|---|
-| Rust | stable (1.75+) | MSRV for PyO3 0.22+ |
+| Rust | stable (1.75+) | MSRV for PyO3 0.28+ |
 | rquickjs | 0.11+ | Binds quickjs-ng; features: `classes`, `properties`, `futures`, `parallel` |
-| PyO3 | 0.22+ | Python↔Rust FFI |
+| PyO3 | 0.28+ | Python↔Rust FFI |
 | maturin | 1.5+ | Build backend for PyO3 projects |
 | Python | 3.11+ | Unchanged from v0.2 |
 | pytest | 8+ | |
@@ -192,7 +192,7 @@ name = "_engine"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 rquickjs = { version = "0.11", features = [
     "classes",
     "properties",
@@ -233,7 +233,11 @@ bench = [
 ]
 
 [tool.maturin]
-python-source = "quickjs_rs"
+# Mixed-layout: the Python package sits at ./quickjs_rs/ and maturin
+# compiles the native extension into quickjs_rs/_engine.<ext>. The
+# python-source field is the directory *containing* the package, not
+# the package itself.
+python-source = "."
 module-name = "quickjs_rs._engine"
 features = ["pyo3/extension-module"]
 

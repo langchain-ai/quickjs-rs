@@ -1,0 +1,24 @@
+[package]
+name = "quickjs-rs-python"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+name = "_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+rquickjs = { version = "0.11", features = [
+    "classes",
+    "properties",
+    "futures",
+    "bindgen",
+    "rust-alloc",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

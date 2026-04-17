@@ -4,6 +4,12 @@ dist/
 *.egg-info/
 target/
 
+# Maturin build artifact — rebuilt by `maturin develop`; platform-
+# specific so it doesn't belong in the repo.
+quickjs_rs/_engine*.so
+quickjs_rs/_engine*.pyd
+quickjs_rs/_engine*.dylib
+
 # Stale wasi-sdk install from the wasm era; left on disk for local
 # users to delete at their leisure. Never committed.
 toolchain/
