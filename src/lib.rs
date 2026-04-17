@@ -12,8 +12,9 @@ use rquickjs::{
     Array, BigInt, CatchResultExt, CaughtError, Context, Ctx, Error, Function, Object, Persistent,
     Runtime, String as JsString, Type, TypedArray, Value,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 // §10 exception hierarchy. PyO3 needs native classes to raise; the
 // Python side re-exports these names from `quickjs_rs.errors`.
@@ -487,6 +488,18 @@ impl QjsRuntime {
     }
 }
 
+/// Stored resolver pair for an in-flight async host call Promise.
+/// §6.5 / §7.4: the Rust trampoline creates a Promise via
+/// `ctx.promise()`, stashes (resolve_fn, reject_fn) here keyed by
+/// `pending_id`, and calls back into Python with (fn_id, args,
+/// pending_id). When the Python async task completes, it calls
+/// `resolve_pending` / `reject_pending` which restores these
+/// functions and invokes them with the settlement value.
+struct PendingResolver {
+    resolve: Persistent<Function<'static>>,
+    reject: Persistent<Function<'static>>,
+}
+
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 struct QjsContext {
     inner: Option<Context>,
@@ -495,6 +508,29 @@ struct QjsContext {
     /// result. Set via set_host_call_dispatcher from the Python
     /// Context layer before any host function is registered.
     host_dispatcher: Option<Py<PyAny>>,
+    /// §7.4 async host function dispatcher. Called from the async
+    /// trampoline with (fn_id, args_tuple, pending_id). Schedules
+    /// an asyncio task; on completion it calls resolve_pending /
+    /// reject_pending to settle the JS Promise.
+    async_host_dispatcher: Option<Py<PyAny>>,
+    /// §7.4 pending Promise resolvers, keyed by host-allocated
+    /// pending_id. Each entry is removed when resolve_pending or
+    /// reject_pending settles it. On context close, remaining
+    /// entries are drained + restored to release JSValue refs
+    /// (§6.7). Wrapped in an `Rc` so the async trampoline closures
+    /// can insert into it.
+    pending_resolvers: Rc<RefCell<HashMap<u32, PendingResolver>>>,
+    next_pending_id: Rc<Cell<u32>>,
+    /// §7.4 / §10.3: set by the async trampoline when an async host
+    /// fn is dispatched from inside a sync eval (i.e. while
+    /// `in_sync_eval` is true). Context.eval consumes this after
+    /// the eval returns and raises ConcurrentEvalError.
+    sync_eval_hit_async_call: Rc<Cell<bool>>,
+    /// §7.4: set by Python Context.eval around the synchronous
+    /// eval entry so the async trampoline can detect
+    /// sync-eval-with-async-hostfn regardless of whether an asyncio
+    /// loop is ambient.
+    in_sync_eval: Rc<Cell<bool>>,
 }
 
 #[pymethods]
@@ -506,6 +542,11 @@ impl QjsContext {
         Ok(Self {
             inner: Some(ctx),
             host_dispatcher: None,
+            async_host_dispatcher: None,
+            pending_resolvers: Rc::new(RefCell::new(HashMap::new())),
+            next_pending_id: Rc::new(Cell::new(1)),
+            sync_eval_hit_async_call: Rc::new(Cell::new(false)),
+            in_sync_eval: Rc::new(Cell::new(false)),
         })
     }
 
@@ -517,6 +558,56 @@ impl QjsContext {
     fn set_host_call_dispatcher(&mut self, dispatcher: Py<PyAny>) -> PyResult<()> {
         self.host_dispatcher = Some(dispatcher);
         Ok(())
+    }
+
+    /// §7.4: install the async-host dispatcher. Invoked from the
+    /// async trampoline when JS calls a registered async host fn.
+    /// Signature: `dispatcher(fn_id: int, args: tuple, pending_id:
+    /// int) -> int`. Returns 0 on successful scheduling, -1 if the
+    /// call came from inside a sync eval (sets the
+    /// sync_eval_hit_async_call flag — the Python sync-eval path
+    /// consumes it and raises ConcurrentEvalError).
+    fn set_async_host_dispatcher(&mut self, dispatcher: Py<PyAny>) -> PyResult<()> {
+        self.async_host_dispatcher = Some(dispatcher);
+        Ok(())
+    }
+
+    fn set_in_sync_eval(&self, value: bool) {
+        self.in_sync_eval.set(value);
+    }
+
+    /// Pop the sync-eval-hit-async-call flag. Context.eval calls
+    /// this after a sync eval to decide whether to raise
+    /// ConcurrentEvalError.
+    fn take_sync_eval_hit_async_call(&self) -> bool {
+        self.sync_eval_hit_async_call.replace(false)
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        // §7.4: free any outstanding pending resolvers before the
+        // Context drops. Each Persistent<Function> holds a JSValue
+        // ref that needs a live Ctx to release (§6.7). Forgetting
+        // this trips QuickJS's list_empty(&rt->gc_obj_list) at
+        // runtime teardown.
+        if let Some(context) = self.inner.as_ref() {
+            let entries: Vec<(u32, PendingResolver)> =
+                self.pending_resolvers.borrow_mut().drain().collect();
+            if !entries.is_empty() {
+                let _ = with_active_ctx(context, |ctx| {
+                    for (_, entry) in entries {
+                        let _ = entry.resolve.restore(ctx);
+                        let _ = entry.reject.restore(ctx);
+                    }
+                    Ok(())
+                });
+            }
+        }
+        self.inner = None;
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_none()
     }
 
     #[pyo3(signature = (code, *, module=false, strict=false, filename="<eval>"))]
@@ -544,15 +635,19 @@ impl QjsContext {
     }
 
     /// Eval that returns a QjsHandle instead of marshaling the
-    /// result to Python. The handle is bound to this context —
-    /// cross-context use raises InvalidHandleError at the Python
-    /// layer. §6.3 eval_handle.
-    #[pyo3(signature = (code, *, module=false, strict=false, filename="<eval>"))]
+    /// result to Python. §6.3 eval_handle.
+    ///
+    /// `promise=true` sets QuickJS's JS_EVAL_FLAG_ASYNC so the
+    /// evaluator enables top-level `await` and returns a Promise
+    /// that resolves to `{value, done}`. eval_async uses this;
+    /// ordinary sync eval_handle doesn't.
+    #[pyo3(signature = (code, *, module=false, strict=false, promise=false, filename="<eval>"))]
     fn eval_handle(
         &self,
         code: &str,
         module: bool,
         strict: bool,
+        promise: bool,
         filename: &str,
     ) -> PyResult<QjsHandle> {
         let context = self.context()?.clone();
@@ -561,6 +656,7 @@ impl QjsContext {
             let mut options = EvalOptions::default();
             options.global = !module;
             options.strict = strict;
+            options.promise = promise;
             options.filename = Some(filename.to_string());
             let result: Result<Value<'_>, CaughtError<'_>> =
                 ctx.eval_with_options::<Value<'_>, _>(code, options).catch(ctx);
@@ -576,15 +672,6 @@ impl QjsContext {
         })
     }
 
-    fn close(&mut self) -> PyResult<()> {
-        self.inner = None;
-        Ok(())
-    }
-
-    fn is_closed(&self) -> bool {
-        self.inner.is_none()
-    }
-
     /// §6.5 host function registration. Installs a JS function on
     /// `globalThis` under `name` that, when called from JS, marshals
     /// args to Python via js_value_to_py, calls the host_dispatcher
@@ -593,8 +680,12 @@ impl QjsContext {
     /// name/message come from the _engine.JSError re-raised by the
     /// Python dispatcher.
     ///
-    /// `is_async` is ignored in step 5 (sync path only). Step 9 adds
-    /// the async branch that produces a pending promise.
+    /// With `is_async=true`, the trampoline creates a JS Promise,
+    /// stashes (resolve, reject) keyed by a fresh pending_id, calls
+    /// the Python async dispatcher with (fn_id, args, pending_id)
+    /// — the dispatcher schedules an asyncio task that calls
+    /// resolve_pending/reject_pending when done — and returns the
+    /// Promise synchronously to JS. §7.4.
     #[pyo3(signature = (name, fn_id, is_async=false))]
     fn register_host_function(
         &self,
@@ -603,29 +694,204 @@ impl QjsContext {
         fn_id: u32,
         is_async: bool,
     ) -> PyResult<()> {
-        if is_async {
-            return Err(QuickJSError::new_err(
-                "async host functions land in step 9 (§15)",
-            ));
-        }
-        let dispatcher = self
-            .host_dispatcher
-            .as_ref()
-            .ok_or_else(|| QuickJSError::new_err("host_dispatcher not set"))?
-            .clone_ref(py);
-
         let name_owned = name.to_string();
         let context = self.context()?;
+        if is_async {
+            let dispatcher = self
+                .async_host_dispatcher
+                .as_ref()
+                .ok_or_else(|| QuickJSError::new_err("async_host_dispatcher not set"))?
+                .clone_ref(py);
+            let pending = Rc::clone(&self.pending_resolvers);
+            let next_id = Rc::clone(&self.next_pending_id);
+            let sync_hit = Rc::clone(&self.sync_eval_hit_async_call);
+            let in_sync = Rc::clone(&self.in_sync_eval);
+            with_active_ctx(context, |ctx| {
+                let js_fn = build_async_host_trampoline(
+                    ctx, dispatcher, fn_id, &name_owned, pending, next_id, sync_hit, in_sync,
+                )?;
+                ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "failed to install async host function {:?} on globalThis: {}",
+                        name_owned, e
+                    ))
+                })?;
+                Ok(())
+            })
+        } else {
+            let dispatcher = self
+                .host_dispatcher
+                .as_ref()
+                .ok_or_else(|| QuickJSError::new_err("host_dispatcher not set"))?
+                .clone_ref(py);
+            with_active_ctx(context, |ctx| {
+                let js_fn = build_host_trampoline(ctx, dispatcher, fn_id, &name_owned)?;
+                ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "failed to install host function {:?} on globalThis: {}",
+                        name_owned, e
+                    ))
+                })?;
+                Ok(())
+            })
+        }
+    }
+
+    /// §7.4: called by the Python driving loop to resolve a
+    /// pending-host-call Promise with `value`. `value` is marshaled
+    /// via py_to_js_value. Missing pending_id is a benign no-op
+    /// (§6.4: double-resolve/close-race treated as idempotent).
+    fn resolve_pending(&self, pending_id: u32, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let context = self.context()?;
+        let entry = match self.pending_resolvers.borrow_mut().remove(&pending_id) {
+            Some(e) => e,
+            None => return Ok(()),
+        };
         with_active_ctx(context, |ctx| {
-            let js_fn = build_host_trampoline(ctx, dispatcher, fn_id, &name_owned)?;
-            ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
-                QuickJSError::new_err(format!(
-                    "failed to install host function {:?} on globalThis: {}",
-                    name_owned, e
-                ))
+            let resolve = entry.resolve.restore(ctx).map_err(map_handle_error)?;
+            let _ = entry.reject.restore(ctx); // drop to free the JS ref
+            let js_value = py_to_js_value(ctx, value, 0)?;
+            let _: Value<'_> = resolve.call((js_value,)).map_err(|e| {
+                QuickJSError::new_err(format!("resolve call failed: {}", e))
             })?;
             Ok(())
         })
+    }
+
+    /// §7.4: called by the Python driving loop to reject a
+    /// pending-host-call Promise with a JS Error carrying
+    /// (name, message, stack). Missing pending_id: benign no-op.
+    #[pyo3(signature = (pending_id, name, message, stack=None))]
+    fn reject_pending(
+        &self,
+        pending_id: u32,
+        name: &str,
+        message: &str,
+        stack: Option<&str>,
+    ) -> PyResult<()> {
+        let context = self.context()?;
+        let entry = match self.pending_resolvers.borrow_mut().remove(&pending_id) {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        with_active_ctx(context, |ctx| {
+            let _ = entry.resolve.restore(ctx); // drop to free
+            let reject = entry.reject.restore(ctx).map_err(map_handle_error)?;
+            let exc = rquickjs::Exception::from_message(ctx.clone(), message).map_err(|e| {
+                QuickJSError::new_err(format!("Exception::from_message failed: {}", e))
+            })?;
+            let _ = exc.as_object().set(PredefinedAtom::Name, name.to_string());
+            if let Some(s) = stack {
+                let _ = exc.as_object().set(PredefinedAtom::Stack, s.to_string());
+            }
+            let _: Value<'_> = reject.call((exc.into_value(),)).map_err(|e| {
+                QuickJSError::new_err(format!("reject call failed: {}", e))
+            })?;
+            Ok(())
+        })
+    }
+
+    /// §7.4: Promise state — 0=pending, 1=fulfilled, 2=rejected,
+    /// -1=not a promise. Used by the driving loop.
+    fn promise_state(&self, handle: &QjsHandle) -> PyResult<i32> {
+        if handle.context_ptr != self.context()?.as_raw().as_ptr() as usize {
+            return Err(InvalidHandleError::new_err(
+                "handle belongs to a different context",
+            ));
+        }
+        let persistent = handle.persistent_clone()?;
+        let context = self.context()?;
+        with_active_ctx(context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            if !val.is_promise() {
+                return Ok(-1);
+            }
+            let promise = val.as_promise().expect("is_promise");
+            Ok(match promise.state() {
+                rquickjs::promise::PromiseState::Pending => 0,
+                rquickjs::promise::PromiseState::Resolved => 1,
+                rquickjs::promise::PromiseState::Rejected => 2,
+            })
+        })
+    }
+
+    /// §7.4: return a QjsHandle to the Promise's settled value
+    /// (result or reason). Only defined for Resolved/Rejected
+    /// states; Pending returns a handle to undefined so the driving
+    /// loop can still inspect safely.
+    fn promise_result(&self, handle: &QjsHandle) -> PyResult<QjsHandle> {
+        if handle.context_ptr != self.context()?.as_raw().as_ptr() as usize {
+            return Err(InvalidHandleError::new_err(
+                "handle belongs to a different context",
+            ));
+        }
+        let persistent = handle.persistent_clone()?;
+        let context = self.context()?.clone();
+        let context_ptr = handle.context_ptr;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let promise = val.as_promise().ok_or_else(|| {
+                QuickJSError::new_err("promise_result on a non-promise handle")
+            })?;
+            // rquickjs's Promise::result returns Option<Result<T>> where
+            // T is the FromJs target. We want the raw Value<'js>.
+            let settled: Option<rquickjs::Result<Value<'_>>> = promise.result();
+            let settled_val: Value<'_> = match settled {
+                Some(Ok(v)) => v,
+                Some(Err(_)) => {
+                    // Rejected case: re-pull via ctx.catch. Actually
+                    // rquickjs gives us the reason via the Err path
+                    // as a JS Error. Fall back to restoring raw via
+                    // JS_PromiseResult — but rquickjs doesn't expose
+                    // a raw accessor. For rejected, construct a fresh
+                    // read through the Promise's `catch` property
+                    // is overkill; easier: re-read through a .then
+                    // side effect. For the driving loop we only need
+                    // this when the state is Rejected, and rquickjs's
+                    // FromJs<Value> for the Err variant is the reason
+                    // Value itself encoded as an Error's args — but
+                    // simpler to use the Option<Result> variant.
+                    //
+                    // Actually Promise::result::<Value>() returns
+                    // Some(Ok(v)) on fulfilled with v the value, and
+                    // Some(Err(e)) on rejected where e is rquickjs
+                    // Error::Exception + ctx.catch() holds the reason.
+                    // Call ctx.catch() to retrieve the reason Value.
+                    ctx.catch()
+                }
+                None => Value::new_undefined(ctx.clone()),
+            };
+            Ok(Persistent::save(ctx, settled_val))
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
+    /// §7.4: drain QuickJS's job queue (Promise reactions).
+    /// Returns negative on job-error, otherwise the count of jobs
+    /// executed. The driving loop polls this between promise-state
+    /// checks.
+    fn run_pending_jobs(&self) -> PyResult<i32> {
+        let runtime = self.context()?.runtime().clone();
+        let mut count: i32 = 0;
+        loop {
+            match runtime.execute_pending_job() {
+                Ok(true) => count += 1,
+                Ok(false) => break,
+                Err(_) => {
+                    // Job-level exception: the reaction threw. QuickJS
+                    // reports this via a return value; we surface it
+                    // as a negative count so the Python driving loop
+                    // can decide whether to raise.
+                    count = -1;
+                    break;
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// Return a handle to the global object. §6.3 global_object.
@@ -1160,6 +1426,151 @@ fn build_host_trampoline<'js>(
         .map_err(|e| QuickJSError::new_err(format!("Function::new failed: {}", e)))?
         .with_name(name)
         .map_err(|e| QuickJSError::new_err(format!("Function::with_name failed: {}", e)))
+}
+
+/// Build an async host function trampoline. When JS calls the
+/// returned function, the trampoline creates a Promise via
+/// `ctx.promise()`, stashes the resolve/reject functions keyed by
+/// a fresh pending_id, and calls the Python async dispatcher with
+/// (fn_id, args, pending_id). The dispatcher schedules an asyncio
+/// task; on completion it calls `resolve_pending` / `reject_pending`
+/// on the QjsContext to settle the Promise. §7.4.
+#[allow(clippy::too_many_arguments)]
+fn build_async_host_trampoline<'js>(
+    ctx: &Ctx<'js>,
+    dispatcher: Py<PyAny>,
+    fn_id: u32,
+    name: &str,
+    pending: Rc<RefCell<HashMap<u32, PendingResolver>>>,
+    next_id: Rc<Cell<u32>>,
+    sync_hit: Rc<Cell<bool>>,
+    in_sync: Rc<Cell<bool>>,
+) -> PyResult<Function<'js>> {
+    let trampoline = move |cx: Ctx<'js>,
+                           args: rquickjs::function::Rest<Value<'js>>|
+          -> rquickjs::Result<Value<'js>> {
+        dispatch_async_host_fn(
+            &cx,
+            &dispatcher,
+            fn_id,
+            args.0,
+            &pending,
+            &next_id,
+            &sync_hit,
+            &in_sync,
+        )
+    };
+    Function::new(ctx.clone(), trampoline)
+        .map_err(|e| QuickJSError::new_err(format!("Function::new failed: {}", e)))?
+        .with_name(name)
+        .map_err(|e| QuickJSError::new_err(format!("Function::with_name failed: {}", e)))
+}
+
+/// Shared body for the async host trampoline. On entry:
+///   1. Allocate a fresh pending_id.
+///   2. Create a JS Promise + resolver pair via `ctx.promise()`.
+///   3. If we're inside a sync eval, set the sync_hit flag and
+///      immediately reject the promise with a sentinel so JS sees
+///      a rejected promise rather than hanging. Python's sync-eval
+///      path consumes the sync_hit flag on return and raises
+///      ConcurrentEvalError before the rejection matters.
+///   4. Otherwise, stash (resolve, reject) keyed by pending_id,
+///      marshal args to Python, call the dispatcher with
+///      (fn_id, args, pending_id). The dispatcher returns 0 on
+///      successful scheduling or negative on error — on error, pop
+///      the entry and reject the Promise locally.
+///   5. Return the Promise synchronously to JS.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_async_host_fn<'js>(
+    ctx: &Ctx<'js>,
+    dispatcher: &Py<PyAny>,
+    fn_id: u32,
+    args: Vec<Value<'js>>,
+    pending: &Rc<RefCell<HashMap<u32, PendingResolver>>>,
+    next_id: &Rc<Cell<u32>>,
+    sync_hit: &Rc<Cell<bool>>,
+    in_sync: &Rc<Cell<bool>>,
+) -> rquickjs::Result<Value<'js>> {
+    let (promise, resolve, reject) = ctx.promise()?;
+
+    // §7.4: sync-eval hit async host fn. Set the flag so the
+    // Python sync-eval surface raises ConcurrentEvalError; also
+    // reject the Promise locally so the JS expression evaluates
+    // to a rejected Promise rather than never settling. The sync
+    // eval returns before any driving loop could observe the
+    // rejection, so this is effectively just bookkeeping.
+    if in_sync.get() {
+        sync_hit.set(true);
+        // Reject with a sentinel message; Python never surfaces it
+        // because sync_hit takes priority.
+        let exc = rquickjs::Exception::from_message(
+            ctx.clone(),
+            "async host fn dispatched from sync eval",
+        )?;
+        let _ = exc
+            .as_object()
+            .set(PredefinedAtom::Name, "ConcurrentEvalError");
+        let _: Value<'_> = reject.call((exc.into_value(),))?;
+        return Ok(promise.into_value());
+    }
+
+    // Allocate pending_id and stash the resolver pair.
+    let pid = next_id.get();
+    next_id.set(pid.wrapping_add(1));
+    let entry = PendingResolver {
+        resolve: Persistent::save(ctx, resolve),
+        reject: Persistent::save(ctx, reject.clone()),
+    };
+    pending.borrow_mut().insert(pid, entry);
+
+    // Marshal args to Python and call the dispatcher.
+    let rc: i32 = Python::attach(|py| -> rquickjs::Result<i32> {
+        let py_args: Vec<Py<PyAny>> = args
+            .iter()
+            .map(|v| js_value_to_py(py, v, 0))
+            .collect::<PyResult<Vec<_>>>()
+            .map_err(|e| rquickjs::Error::IntoJs {
+                from: "python",
+                to: "js",
+                message: Some(format!("arg marshal failed: {}", e)),
+            })?;
+        let args_tuple = pyo3::types::PyTuple::new(py, &py_args).map_err(|e| {
+            rquickjs::Error::IntoJs {
+                from: "python",
+                to: "js",
+                message: Some(format!("arg tuple build failed: {}", e)),
+            }
+        })?;
+        let result = dispatcher
+            .bind(py)
+            .call1((fn_id, args_tuple, pid))
+            .map_err(|e| rquickjs::Error::IntoJs {
+                from: "python",
+                to: "js",
+                message: Some(format!("async dispatcher raised: {}", e)),
+            })?;
+        Ok(result.extract::<i32>().unwrap_or(0))
+    })?;
+
+    if rc < 0 {
+        // Dispatcher signaled failure (typically a registration
+        // mismatch). Pop the entry and reject locally with a
+        // HostError so JS sees a clean rejection rather than a
+        // dangling pending Promise.
+        if let Some(entry) = pending.borrow_mut().remove(&pid) {
+            let resolve = entry.resolve.restore(ctx)?;
+            let reject_fn = entry.reject.restore(ctx)?;
+            let _ = resolve; // drop to free
+            let exc = rquickjs::Exception::from_message(
+                ctx.clone(),
+                "async host dispatcher rejected",
+            )?;
+            let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
+            let _: Value<'_> = reject_fn.call((exc.into_value(),))?;
+        }
+    }
+
+    Ok(promise.into_value())
 }
 
 /// Trampoline invoked by rquickjs when JS calls a registered host

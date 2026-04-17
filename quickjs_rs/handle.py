@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
+    ConcurrentEvalError,
     InvalidHandleError,
     JSError,
     MarshalError,
@@ -176,26 +177,51 @@ class Handle:
         """Call as a function. Args may be Python values or other
         Handles on the same context.
         """
-        unwrapped = self._unwrap_args(args)
-        try:
-            inner = self._require_live().call(*unwrapped)
-        except _engine.JSError as e:
-            name, message, stack = e.args
-            classified = self._context._classify_jserror(
-                name, message, stack, None
-            )
-            raise classified from classified.__cause__
-        except _engine.InvalidHandleError as e:
-            raise InvalidHandleError(str(e)) from None
-        except _engine.MarshalError as e:
-            raise MarshalError(str(e)) from None
-        return Handle(self._context, inner)
+        return self._invoke_sync("call", args)
 
     def call_method(self, name: str, *args: Any) -> Handle:
+        return self._invoke_sync("call_method", args, method_name=name)
+
+    def new(self, *args: Any) -> Handle:
+        """Invoke as a JS constructor (`new fn(...)`). §7.2."""
+        return self._invoke_sync("new_instance", args)
+
+    def _invoke_sync(
+        self,
+        kind: str,
+        args: tuple[Any, ...],
+        *,
+        method_name: str | None = None,
+    ) -> Handle:
+        """Shared body for call / call_method / new.
+
+        §7.4: sync-eval-hit-async-call detection extends to the
+        Handle surface — invoking a registered async host function
+        via Handle.call must raise ConcurrentEvalError just like
+        sync ctx.eval does. Sets in_sync_eval before the engine
+        call and consumes the sync-hit flag on return.
+        """
         unwrapped = self._unwrap_args(args)
+        live = self._require_live()
+        engine_ctx = self._context._engine_ctx
+        engine_ctx.take_sync_eval_hit_async_call()
+        engine_ctx.set_in_sync_eval(True)
+        inner: _engine.QjsHandle
         try:
-            inner = self._require_live().call_method(name, *unwrapped)
+            if kind == "call":
+                inner = live.call(*unwrapped)
+            elif kind == "call_method":
+                assert method_name is not None
+                inner = live.call_method(method_name, *unwrapped)
+            else:
+                inner = live.new_instance(*unwrapped)
         except _engine.JSError as e:
+            if engine_ctx.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    f"Handle.{kind} dispatched a registered async host "
+                    "function; use ctx.eval_async / await_promise "
+                    "instead"
+                ) from None
             ename, message, stack = e.args
             classified = self._context._classify_jserror(
                 ename, message, stack, None
@@ -204,24 +230,21 @@ class Handle:
         except _engine.InvalidHandleError as e:
             raise InvalidHandleError(str(e)) from None
         except _engine.MarshalError as e:
+            if engine_ctx.take_sync_eval_hit_async_call():
+                raise ConcurrentEvalError(
+                    f"Handle.{kind} dispatched a registered async host "
+                    "function; use ctx.eval_async / await_promise "
+                    "instead"
+                ) from None
             raise MarshalError(str(e)) from None
-        return Handle(self._context, inner)
-
-    def new(self, *args: Any) -> Handle:
-        """Invoke as a JS constructor (`new fn(...)`). §7.2."""
-        unwrapped = self._unwrap_args(args)
-        try:
-            inner = self._require_live().new_instance(*unwrapped)
-        except _engine.JSError as e:
-            name, message, stack = e.args
-            classified = self._context._classify_jserror(
-                name, message, stack, None
+        finally:
+            engine_ctx.set_in_sync_eval(False)
+        if engine_ctx.take_sync_eval_hit_async_call():
+            raise ConcurrentEvalError(
+                f"Handle.{kind} dispatched a registered async host "
+                "function; use ctx.eval_async / await_promise "
+                "instead"
             )
-            raise classified from classified.__cause__
-        except _engine.InvalidHandleError as e:
-            raise InvalidHandleError(str(e)) from None
-        except _engine.MarshalError as e:
-            raise MarshalError(str(e)) from None
         return Handle(self._context, inner)
 
     def _unwrap_args(self, args: tuple[Any, ...]) -> list[Any]:
@@ -265,6 +288,63 @@ class Handle:
         """Create a second handle to the same JS value. §7.2."""
         inner = self._require_live().dup()
         return Handle(self._context, inner)
+
+    async def await_promise(self, *, timeout: float | None = None) -> Handle:
+        """Drive pending jobs until this Promise settles; return a
+        new Handle to the resolved value, or raise on rejection.
+
+        If this Handle isn't a Promise, returns ``self`` unchanged —
+        idiomatic for chained handle ops where the caller may or
+        may not know whether they're holding a Promise. §7.2.
+
+        Respects the enclosing cancel scope (cancellation in the
+        driving task cascades here). Uses the owning Context's
+        cumulative eval_async budget unless ``timeout=`` is passed,
+        in which case that value applies for this call only.
+
+        Honours the §7.4 concurrent-eval rule: if an ``eval_async``
+        or another ``await_promise`` is in flight on the same
+        Context, raises ``ConcurrentEvalError``.
+        """
+        import time as _time
+
+        from quickjs_rs.errors import ConcurrentEvalError
+
+        live = self._require_live()
+        ctx = self._context
+        if ctx._closed:
+            raise InvalidHandleError("owning context has been closed")
+
+        # §7.4 fast path: not a Promise → return self.
+        if not live.is_promise():
+            return self
+
+        if ctx._eval_async_in_flight:
+            raise ConcurrentEvalError(
+                "another eval_async or await_promise is already in "
+                "flight on this context; use a separate context for "
+                "concurrent JS workloads"
+            )
+
+        if timeout is not None:
+            deadline = _time.monotonic() + timeout
+        else:
+            deadline = ctx._cumulative_deadline
+
+        ctx._eval_async_in_flight = True
+        ctx._runtime._deadline = deadline
+        try:
+            # Dup into a child Handle so the driving loop's dispose
+            # at the end doesn't invalidate self — await_promise
+            # shouldn't consume self.
+            def dup_fn() -> Handle:
+                return self.dup()
+
+            settled = await ctx._run_inside_task_group(dup_fn, deadline)
+        finally:
+            ctx._runtime._deadline = None
+            ctx._eval_async_in_flight = False
+        return settled
 
 
 def _wrap_opaque(context: Context, value: Any) -> Any:
