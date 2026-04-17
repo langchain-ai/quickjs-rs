@@ -285,25 +285,39 @@ benchmark:
 
 ## 8. What the numbers should look like (order-of-magnitude targets)
 
-These are rough expectations for v0.2 on a modern laptop (M-series Mac or recent x86), not hard SLAs. They exist so a developer reading benchmark output for the first time can tell "that looks right" vs "something is broken."
+Rough expectations for v0.3 on a modern laptop (M-series Mac or recent
+x86), not hard SLAs. Wall-time measurement varies ~5–10% run-to-run;
+these ranges give a developer reading benchmark output a sanity check.
+The ranges were rewritten when the PyO3 + rquickjs rewrite landed — the
+v0.2 wasm-era ranges (runtime_create 5–20 ms, eval_noop 10–50 µs, etc.)
+were blown out by 1–2 orders of magnitude by the architecture change.
 
-| Category | Benchmark | Expected range |
-|---|---|---|
-| Startup | `bench_runtime_create` | 5–20 ms |
-| Startup | `bench_context_create` | 0.1–1 ms |
-| Startup | `bench_runtime_and_context` | 5–25 ms |
-| Eval | `bench_eval_noop` | 10–50 µs |
-| Eval | `bench_eval_arithmetic` | 10–50 µs |
-| Eval | `bench_eval_fibonacci_30` | 5–20 ms |
-| Eval | `bench_eval_loop_1m` | 20–80 ms |
-| Marshal | `bench_marshal_dict_flat_100` | 100–500 µs |
-| Marshal | `bench_marshal_bytes_1mb` | 1–5 ms |
-| Host call | `bench_host_call_noop` | 20–100 µs |
-| Host call | `bench_host_call_100x_loop` | 2–10 ms |
-| Async | `bench_eval_async_noop` | 50–200 µs |
-| Async | `bench_eval_async_fan_out_10` | 200–1000 µs |
+| Category | Benchmark | Expected range | v0.2 wasm (for comparison) |
+|---|---|---|---|
+| Startup | `bench_runtime_create` | 3–20 µs | ~1 s |
+| Startup | `bench_context_create` | 50–200 µs | ~74 µs |
+| Startup | `bench_runtime_and_context` | 50–200 µs | (new) |
+| Eval | `bench_eval_noop` | 0.5–5 µs | ~111 µs |
+| Eval | `bench_eval_arithmetic` | 0.5–5 µs | ~111 µs |
+| Eval | `bench_eval_fibonacci_30` | 20–80 ms | ~180 ms |
+| Eval | `bench_eval_loop_1m` | 5–25 ms | ~39 ms |
+| Marshal | `bench_marshal_dict_flat_100` | 10–50 µs | ~492 µs |
+| Marshal | `bench_marshal_bytes_1mb` | 20–100 µs | ~1.1 ms |
+| Host call | `bench_host_call_noop` | 0.5–5 µs | ~134 µs |
+| Host call | `bench_host_call_100x_loop` | 10–50 µs | ~7.5 ms |
+| Async | `bench_eval_async_noop` | 20–100 µs | ~1.0 ms |
+| Async | `bench_eval_async_fan_out_10` | 50–300 µs | (new) |
 
-If a benchmark lands outside its range, that's worth investigating — either the range is wrong (update it) or the implementation has an unexpected cost center.
+The step-change from v0.2 to v0.3 is the architecture difference: four
+boundary crossings (Python → wasmtime-py → wasmtime → wasm → QuickJS) +
+msgpack marshal in each direction, collapsed to one FFI crossing + native
+PyO3↔rquickjs value conversion. `bench_runtime_create` dropped 100,000×
+because wasm JIT compilation is gone; `bench_eval_noop` and
+`bench_host_call_noop` dropped 90× because the per-call overhead is now
+dominated by PyO3 boilerplate rather than serialization.
+
+If a benchmark lands outside its range, investigate — either the range
+is wrong (update it) or the implementation has an unexpected cost center.
 
 ## 9. Rules for benchmark code
 
