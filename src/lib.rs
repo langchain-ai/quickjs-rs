@@ -8,21 +8,88 @@ use rquickjs::{
     convert::{Coerced, FromJs},
     object::Filter,
     runtime::InterruptHandler,
+    function::Constructor,
     Array, BigInt, CatchResultExt, CaughtError, Context, Ctx, Error, Function, Object, Persistent,
     Runtime, String as JsString, Type, TypedArray, Value,
 };
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 // §10 exception hierarchy. PyO3 needs native classes to raise; the
 // Python side re-exports these names from `quickjs_rs.errors`.
 create_exception!(_engine, QuickJSError, PyException);
 create_exception!(_engine, JSError, QuickJSError);
 create_exception!(_engine, MarshalError, QuickJSError);
+create_exception!(_engine, InvalidHandleError, QuickJSError);
 
 // §8 invariant: depth cap for recursive marshaling. Matches v0.2's
 // bridge (cycle detection via depth limit, no ref tracking). Cycles
 // go around the guard only by being genuinely deeper than 128 — at
 // which point the MarshalError is the right signal regardless.
 const MAX_MARSHAL_DEPTH: u32 = 128;
+
+// §6.7: reentrance-safe Ctx access. rquickjs's non-parallel runtime
+// guard is a non-reentrant RefCell (per-runtime, not per-context),
+// so nested `Context::with` from within a host-fn callback panics
+// with "RefCell already borrowed". We stash the currently-active
+// `Ctx<'static>` (lifetime laundered, same pattern as Persistent)
+// keyed by raw JSRuntime pointer in a thread-local: any QjsHandle
+// on any QjsContext sharing that runtime picks up the stashed Ctx
+// during reentrance and skips the nested `with` entirely.
+//
+// The 'static lifetime is a lie maintained by bracketing in
+// `with_active_ctx` — the slot is set on entry and cleared on exit
+// via an RAII guard, so no `Ctx` handed out from it ever outlives
+// its real `'js` scope.
+thread_local! {
+    static ACTIVE_CTX_BY_RT: RefCell<HashMap<usize, Ctx<'static>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Run `f` with a live `Ctx<'js>` from `context`. If there's already
+/// an active Ctx for this runtime (reentrant call from a host fn),
+/// use that directly instead of re-locking via `Context::with`.
+fn with_active_ctx<F, R>(context: &Context, f: F) -> PyResult<R>
+where
+    F: FnOnce(&Ctx<'_>) -> PyResult<R>,
+{
+    let rt_key = context.get_runtime_ptr() as usize;
+
+    // Fast path: reentrant call — use the stashed Ctx. We clone it
+    // out of the map so the closure can borrow the clone; the
+    // stashed entry stays in place for any deeper nesting.
+    let stashed: Option<Ctx<'static>> = ACTIVE_CTX_BY_RT
+        .with(|cell| cell.borrow().get(&rt_key).cloned());
+    if let Some(stashed) = stashed {
+        // Shrink 'static back down to the local borrow. Sound because
+        // we're inside the outer with's closure body right now.
+        let as_short: &Ctx<'_> = unsafe {
+            core::mem::transmute::<&Ctx<'static>, &Ctx<'_>>(&stashed)
+        };
+        return f(as_short);
+    }
+
+    // Slow path: enter Context::with, publish the Ctx into the
+    // thread-local, clear on exit (incl. panic unwind via RAII).
+    context.with(|ctx| {
+        let static_ctx: Ctx<'static> = unsafe {
+            core::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone())
+        };
+        ACTIVE_CTX_BY_RT.with(|cell| {
+            cell.borrow_mut().insert(rt_key, static_ctx);
+        });
+        struct Guard(usize);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                ACTIVE_CTX_BY_RT.with(|cell| {
+                    cell.borrow_mut().remove(&self.0);
+                });
+            }
+        }
+        let _guard = Guard(rt_key);
+        f(&ctx)
+    })
+}
 
 /// Sentinel for JS `undefined` when it appears nested inside a
 /// structure. §6.6: distinct from `None` so a future
@@ -428,19 +495,6 @@ struct QjsContext {
     /// result. Set via set_host_call_dispatcher from the Python
     /// Context layer before any host function is registered.
     host_dispatcher: Option<Py<PyAny>>,
-    /// Currently-active Ctx during a `Context::with(|ctx| ...)` scope.
-    /// Used to handle reentrant eval from inside host functions: the
-    /// outer `with` holds the runtime lock (a non-reentrant RefCell
-    /// in rquickjs without the `parallel` feature), so an inner
-    /// `Context::with` panics. Instead, reentrant evals run against
-    /// this already-live Ctx directly.
-    ///
-    /// The 'static lifetime is a lie maintained by the bracketing in
-    /// `with_active_ctx` — the slot is set on entry to a with-scope
-    /// and cleared before leaving, so no `Ctx` handed out from it
-    /// ever outlives its real `'js` scope. Same pattern as
-    /// rquickjs::Persistent.
-    active_ctx: std::cell::Cell<Option<Ctx<'static>>>,
 }
 
 #[pymethods]
@@ -452,7 +506,6 @@ impl QjsContext {
         Ok(Self {
             inner: Some(ctx),
             host_dispatcher: None,
-            active_ctx: std::cell::Cell::new(None),
         })
     }
 
@@ -475,7 +528,8 @@ impl QjsContext {
         strict: bool,
         filename: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.with_active_ctx(|ctx| {
+        let context = self.context()?;
+        with_active_ctx(context, |ctx| {
             let mut options = EvalOptions::default();
             options.global = !module;
             options.strict = strict;
@@ -486,6 +540,39 @@ impl QjsContext {
                 Ok(val) => js_value_to_py(py, &val, 0),
                 Err(caught) => Err(js_error_from_caught(ctx, caught)),
             }
+        })
+    }
+
+    /// Eval that returns a QjsHandle instead of marshaling the
+    /// result to Python. The handle is bound to this context —
+    /// cross-context use raises InvalidHandleError at the Python
+    /// layer. §6.3 eval_handle.
+    #[pyo3(signature = (code, *, module=false, strict=false, filename="<eval>"))]
+    fn eval_handle(
+        &self,
+        code: &str,
+        module: bool,
+        strict: bool,
+        filename: &str,
+    ) -> PyResult<QjsHandle> {
+        let context = self.context()?.clone();
+        let context_ptr = context.as_raw().as_ptr() as usize;
+        let persistent = with_active_ctx(&context, |ctx| {
+            let mut options = EvalOptions::default();
+            options.global = !module;
+            options.strict = strict;
+            options.filename = Some(filename.to_string());
+            let result: Result<Value<'_>, CaughtError<'_>> =
+                ctx.eval_with_options::<Value<'_>, _>(code, options).catch(ctx);
+            match result {
+                Ok(val) => Ok(Persistent::save(ctx, val)),
+                Err(caught) => Err(js_error_from_caught(ctx, caught)),
+            }
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(persistent),
         })
     }
 
@@ -528,7 +615,8 @@ impl QjsContext {
             .clone_ref(py);
 
         let name_owned = name.to_string();
-        self.with_active_ctx(|ctx| {
+        let context = self.context()?;
+        with_active_ctx(context, |ctx| {
             let js_fn = build_host_trampoline(ctx, dispatcher, fn_id, &name_owned)?;
             ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
                 QuickJSError::new_err(format!(
@@ -543,12 +631,14 @@ impl QjsContext {
     /// Return a handle to the global object. §6.3 global_object.
     fn global_object(&self) -> PyResult<QjsHandle> {
         let ctx_owner = self.context()?.clone();
-        let persistent = self.with_active_ctx(|ctx| {
+        let context_ptr = ctx_owner.as_raw().as_ptr() as usize;
+        let persistent = with_active_ctx(&ctx_owner, |ctx| {
             let globals = ctx.globals();
             Ok(Persistent::save(ctx, globals.into_value()))
         })?;
         Ok(QjsHandle {
             context: Some(ctx_owner),
+            context_ptr,
             persistent: Some(persistent),
         })
     }
@@ -560,87 +650,53 @@ impl QjsContext {
             .as_ref()
             .ok_or_else(|| QuickJSError::new_err("context is closed"))
     }
-
-    /// Run `f` with a live `Ctx<'js>`. If there's already an active
-    /// Ctx (reentrant call from a host function), use it directly
-    /// and skip re-entering `Context::with` — which would try to
-    /// re-lock the runtime's non-reentrant RefCell and panic.
-    /// Otherwise enter `Context::with` as usual and publish the Ctx
-    /// into the slot for any nested call to find.
-    fn with_active_ctx<F, R>(&self, f: F) -> PyResult<R>
-    where
-        F: FnOnce(&Ctx<'_>) -> PyResult<R>,
-    {
-        // Fast path: reentrant call. The stored Ctx<'static> was
-        // placed by an outer with_active_ctx and is guaranteed live
-        // until that call returns — we're executing inside its body
-        // right now, so the lifetime shortening from 'static to a
-        // shorter borrow here is sound.
-        if let Some(stashed) = self.active_ctx.take() {
-            let result = {
-                let as_short: &Ctx<'_> = unsafe {
-                    // Shrink 'static down to the local borrow. Both
-                    // layouts are identical — Ctx has a NonNull +
-                    // PhantomData marker, no actual lifetime data.
-                    core::mem::transmute::<&Ctx<'static>, &Ctx<'_>>(&stashed)
-                };
-                f(as_short)
-            };
-            // Put the Ctx back so the outer scope's cleanup continues
-            // working. We used .take() rather than .get() because
-            // Ctx isn't Copy.
-            self.active_ctx.set(Some(stashed));
-            return result;
-        }
-
-        // Slow path: fresh Context::with, publish the Ctx into the
-        // slot for the duration of the closure, clear on exit
-        // (including panic unwind via the guard).
-        let ctx_owner = self.context()?;
-        let slot = &self.active_ctx;
-        ctx_owner.with(|ctx| {
-            let static_ctx: Ctx<'static> = unsafe {
-                // Launder the 'js lifetime to 'static. Sound because
-                // we clear the slot on every exit path below before
-                // the real 'js scope ends. Same design as
-                // rquickjs::Persistent, just scoped to a single call.
-                core::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone())
-            };
-            slot.set(Some(static_ctx));
-            struct Guard<'a>(&'a std::cell::Cell<Option<Ctx<'static>>>);
-            impl Drop for Guard<'_> {
-                fn drop(&mut self) {
-                    self.0.set(None);
-                }
-            }
-            let _guard = Guard(slot);
-            f(&ctx)
-        })
-    }
 }
 
-/// Minimal step-4 QjsHandle — owns a `Persistent<Value>` plus the
-/// context reference needed to restore it. Step 7 adds the full
-/// lifecycle (dispose, is_disposed, ResourceWarning, cross-context
-/// guard, call/new_instance/to_python/type_of, etc). For now the
-/// handle just needs to support globals-proxy prop access.
+/// Holds a `Persistent<Value>` and the pieces needed to restore it:
+/// a Context clone, plus the raw context pointer for cross-context
+/// identity checks. §6.4 / §6.7.
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 struct QjsHandle {
     context: Option<Context>,
+    /// Raw JSContext pointer for cross-context identity checks.
+    /// Populated at construction and never rewritten — stable for the
+    /// handle's lifetime.
+    context_ptr: usize,
     persistent: Option<Persistent<Value<'static>>>,
 }
 
 #[pymethods]
 impl QjsHandle {
-    /// Read a property from the object this handle wraps.
-    /// Missing properties marshal as `undefined` → Python `None` at
-    /// the root. Returns `MarshalError` only if the value itself
-    /// isn't marshalable (function, symbol, etc).
-    fn get_prop(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let (context, persistent) = self.parts()?;
-        let persistent = persistent.clone();
-        context.with(|ctx| {
-            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+    /// Raw pointer of the context that created this handle. The
+    /// Python Handle uses this to enforce the cross-context guard
+    /// (§6.7: "Handles are bound to their creating context").
+    #[getter]
+    fn context_id(&self) -> usize {
+        self.context_ptr
+    }
+
+    /// Structural type tag — "object", "array", "function", "null",
+    /// "undefined", "boolean", "number", "bigint", "string",
+    /// "symbol". Maps rquickjs's internal Type enum to the strings
+    /// the Python API (§7.2 Handle.type_of) exposes.
+    #[getter]
+    fn type_of(&self) -> PyResult<String> {
+        self.with_value(|_ctx, val| Ok(type_name_of(val.type_of())))
+    }
+
+    fn is_promise(&self) -> PyResult<bool> {
+        self.with_value(|_ctx, val| Ok(val.is_promise()))
+    }
+
+    /// Read a property by string key, returning a QjsHandle for the
+    /// resulting value. Missing properties yield a handle to
+    /// `undefined` (queryable via type_of), not an error.
+    fn get(&self, key: &str) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
             let obj: Object<'_> = val.try_into_object().map_err(|v| {
                 MarshalError::new_err(format!(
                     "handle target is not an object ({}), cannot get property",
@@ -650,23 +706,57 @@ impl QjsHandle {
             let result: Value<'_> = obj.get(key).map_err(|e| {
                 QuickJSError::new_err(format!("get property {:?} failed: {}", key, e))
             })?;
-            js_value_to_py(py, &result, 0)
+            Ok(Persistent::save(ctx, result))
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
         })
     }
 
-    /// Set a property on the object this handle wraps.
-    fn set_prop(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (context, persistent) = self.parts()?;
-        let persistent = persistent.clone();
-        context.with(|ctx| {
-            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+    /// Read a property by numeric index (array-like access). §6.4
+    /// get_prop_index.
+    fn get_index(&self, index: u32) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = val.try_into_object().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not an object ({}), cannot get index",
+                    v.type_of()
+                ))
+            })?;
+            let result: Value<'_> = obj.get(index).map_err(|e| {
+                QuickJSError::new_err(format!("get index {} failed: {}", index, e))
+            })?;
+            Ok(Persistent::save(ctx, result))
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
+    /// Set a property. `value` may be a Python value (marshaled via
+    /// py_to_js_value) or another QjsHandle — in which case we
+    /// enforce the cross-context invariant first.
+    fn set(&self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let context = self.context_ref()?;
+        let persistent = self.persistent_clone()?;
+        let our_ctx_ptr = self.context_ptr;
+        with_active_ctx(context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
             let obj: Object<'_> = val.try_into_object().map_err(|v| {
                 MarshalError::new_err(format!(
                     "handle target is not an object ({}), cannot set property",
                     v.type_of()
                 ))
             })?;
-            let js_value = py_to_js_value(&ctx, value, 0)?;
+            let js_value = handle_or_py_to_js(ctx, value, our_ctx_ptr, 0)?;
             obj.set(key, js_value).map_err(|e| {
                 QuickJSError::new_err(format!("set property {:?} failed: {}", key, e))
             })?;
@@ -674,16 +764,14 @@ impl QjsHandle {
         })
     }
 
-    /// True iff the object has own-or-inherited property `key` whose
-    /// value is not `undefined`. §7.3-adjacent: `in` collapses the
-    /// "own but set to undefined" / "not defined" distinction that
-    /// JS makes — both are "not present" Python-side. Matches the
-    /// v0.2 tripwire test_contains_false_when_value_is_undefined.
-    fn has_prop(&self, key: &str) -> PyResult<bool> {
-        let (context, persistent) = self.parts()?;
-        let persistent = persistent.clone();
-        context.with(|ctx| {
-            let val = persistent.restore(&ctx).map_err(map_handle_error)?;
+    /// True iff the object has property `key` whose value is not
+    /// `undefined`. Collapses JS's "own property = undefined" /
+    /// "not defined" distinction to "not present" (§7.3).
+    fn has(&self, key: &str) -> PyResult<bool> {
+        let context = self.context_ref()?;
+        let persistent = self.persistent_clone()?;
+        with_active_ctx(context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
             let obj: Object<'_> = val.try_into_object().map_err(|v| {
                 MarshalError::new_err(format!(
                     "handle target is not an object ({}), cannot check property",
@@ -695,7 +783,6 @@ impl QjsHandle {
             })? {
                 return Ok(false);
             }
-            // Present: collapse `undefined` to "not present".
             let v: Value<'_> = obj.get(key).map_err(|e| {
                 QuickJSError::new_err(format!("get property {:?} failed: {}", key, e))
             })?;
@@ -706,53 +793,350 @@ impl QjsHandle {
         })
     }
 
+    /// Call this handle as a function. Each arg may be a Python
+    /// value or a QjsHandle (cross-context-guarded).
+    #[pyo3(signature = (*args))]
+    fn call(&self, args: &Bound<'_, PyTuple>) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let func: Function<'_> = val.try_into_function().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not callable ({})",
+                    v.type_of()
+                ))
+            })?;
+            let js_args = collect_js_args(ctx, args, context_ptr)?;
+            let result: Result<Value<'_>, CaughtError<'_>> =
+                func.call_arg(js_args).catch(ctx);
+            match result {
+                Ok(v) => Ok(Persistent::save(ctx, v)),
+                Err(caught) => Err(js_error_from_caught(ctx, caught)),
+            }
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
+    /// Look up `name` on this object and call it with `args`.
+    /// Convenience for `obj.get(name).call(...)` without the middle
+    /// handle materializing.
+    #[pyo3(signature = (name, *args))]
+    fn call_method(
+        &self,
+        name: &str,
+        args: &Bound<'_, PyTuple>,
+    ) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = val.try_into_object().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not an object ({})",
+                    v.type_of()
+                ))
+            })?;
+            let func: Function<'_> = obj.get(name).map_err(|e| {
+                QuickJSError::new_err(format!("method lookup {:?} failed: {}", name, e))
+            })?;
+            let mut js_args = rquickjs::function::Args::new(ctx.clone(), args.len());
+            js_args
+                .this(obj.into_value())
+                .map_err(|e| QuickJSError::new_err(format!("set this failed: {}", e)))?;
+            for (i, arg) in args.iter().enumerate() {
+                let v = handle_or_py_to_js(ctx, &arg, context_ptr, 0)?;
+                js_args.push_arg(v).map_err(|e| {
+                    QuickJSError::new_err(format!("arg {} push failed: {}", i, e))
+                })?;
+            }
+            let result: Result<Value<'_>, CaughtError<'_>> =
+                func.call_arg(js_args).catch(ctx);
+            match result {
+                Ok(v) => Ok(Persistent::save(ctx, v)),
+                Err(caught) => Err(js_error_from_caught(ctx, caught)),
+            }
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
+    /// Call as a JS constructor (`new fn(args...)`). §6.4
+    /// new_instance.
+    #[pyo3(signature = (*args))]
+    fn new_instance(&self, args: &Bound<'_, PyTuple>) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let ctor: Constructor<'_> = val.try_into_constructor().map_err(|v| {
+                MarshalError::new_err(format!(
+                    "handle target is not a constructor ({})",
+                    v.type_of()
+                ))
+            })?;
+            let js_args = collect_js_args(ctx, args, context_ptr)?;
+            let result: Result<Value<'_>, CaughtError<'_>> =
+                ctor.construct_args(js_args).catch(ctx);
+            match result {
+                Ok(v) => Ok(Persistent::save(ctx, v)),
+                Err(caught) => Err(js_error_from_caught(ctx, caught)),
+            }
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
+    /// Marshal to a Python value. With `allow_opaque=True`, values
+    /// that would otherwise fail marshaling (functions, symbols,
+    /// promises, proxies) are returned as child QjsHandle objects
+    /// embedded in the result. §7.2.
+    #[pyo3(signature = (*, allow_opaque=false))]
+    fn to_python(&self, py: Python<'_>, allow_opaque: bool) -> PyResult<Py<PyAny>> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            if allow_opaque {
+                js_to_py_with_opaque(py, &val, &context, context_ptr, 0)
+            } else {
+                js_value_to_py(py, &val, 0)
+            }
+        })
+    }
+
+    /// Create a second handle to the same JS value. Both handles
+    /// must be disposed independently. §6.4 dup.
+    fn dup(&self) -> PyResult<QjsHandle> {
+        let context = self.context_ref()?.clone();
+        let context_ptr = self.context_ptr;
+        let persistent = self.persistent_clone()?;
+        // Re-save inside a with — each Persistent::save bumps the
+        // underlying JSValue refcount via the cloned Value, so
+        // independent dispose of both handles is correct.
+        let new_pers = with_active_ctx(&context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            Ok(Persistent::save(ctx, val))
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(new_pers),
+        })
+    }
+
     /// Restore-and-drop the persistent ref inside a Ctx so QuickJS
     /// can decrement the JSValue refcount, then release the context
-    /// clone. Step 7 adds ResourceWarning / is_disposed / __del__.
-    ///
-    /// §6.7: rquickjs's Persistent has no Drop — it holds a Value
-    /// with a 'static-lifetime lie, and Value::Drop needs a live
-    /// Ctx to call JS_FreeValue. Forgetting to restore-drop leaks
-    /// the JS ref and, on runtime teardown, triggers QuickJS's
-    /// `list_empty(&rt->gc_obj_list)` assertion.
+    /// clone. §6.7: rquickjs's Persistent has no Drop — Value::Drop
+    /// needs a live Ctx to call JS_FreeValue. Forgetting this leaks
+    /// the JS ref and trips list_empty(&rt->gc_obj_list) at runtime
+    /// teardown. Idempotent.
     fn dispose(&mut self) -> PyResult<()> {
         if let (Some(context), Some(persistent)) = (self.context.take(), self.persistent.take()) {
-            context.with(|ctx| {
-                // restore() produces a live Value whose Drop frees
-                // the JS ref via the Ctx. The `let _ =` pattern
-                // ensures the returned Value drops at the end of
-                // this closure while ctx is still valid.
-                let _ = persistent.restore(&ctx);
+            let _ = with_active_ctx(&context, |ctx| {
+                let _ = persistent.restore(ctx);
+                Ok(())
             });
         }
         Ok(())
     }
+
+    fn is_disposed(&self) -> bool {
+        self.persistent.is_none()
+    }
 }
 
-// Fallback Drop: if Python's GC disposes the handle without calling
-// .dispose(), release the JS ref here. Step 7 adds the
-// ResourceWarning that the v0.2 contract requires on leaked handles.
+// Fallback Drop: if Python's GC collects the handle without an
+// explicit dispose(), release the JS ref here. The Python-side
+// Handle.__del__ emits ResourceWarning (§7.3), but only if the owning
+// Context is still alive; the drop here is defensive against both
+// ordinary GC and the context-already-closed edge case.
 impl Drop for QjsHandle {
     fn drop(&mut self) {
         if let (Some(context), Some(persistent)) = (self.context.take(), self.persistent.take()) {
-            context.with(|ctx| {
-                let _ = persistent.restore(&ctx);
+            let _ = with_active_ctx(&context, |ctx| {
+                let _ = persistent.restore(ctx);
+                Ok(())
             });
         }
     }
 }
 
 impl QjsHandle {
-    fn parts(&self) -> PyResult<(&Context, &Persistent<Value<'static>>)> {
-        let context = self
-            .context
+    fn context_ref(&self) -> PyResult<&Context> {
+        self.context
             .as_ref()
-            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))?;
-        let persistent = self
-            .persistent
+            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))
+    }
+
+    fn persistent_clone(&self) -> PyResult<Persistent<Value<'static>>> {
+        self.persistent
             .as_ref()
-            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))?;
-        Ok((context, persistent))
+            .cloned()
+            .ok_or_else(|| QuickJSError::new_err("handle is disposed"))
+    }
+
+    /// Run `f` against the live Value this handle wraps. Clones the
+    /// persistent so the caller can keep using the handle.
+    fn with_value<F, R>(&self, f: F) -> PyResult<R>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>, &Value<'js>) -> PyResult<R>,
+    {
+        let context = self.context_ref()?;
+        let persistent = self.persistent_clone()?;
+        with_active_ctx(context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            f(ctx, &val)
+        })
+    }
+}
+
+/// Map an rquickjs Type to the string the Python API exposes via
+/// Handle.type_of. Matches the v0.2 test cases exactly — "boolean"
+/// not "bool", "number" for both Int/Float, "bigint" for big_int,
+/// "object" for plain (Array/Function/Promise etc get their own
+/// strings where meaningful).
+fn type_name_of(t: Type) -> String {
+    match t {
+        Type::Null => "null",
+        Type::Undefined | Type::Uninitialized => "undefined",
+        Type::Bool => "boolean",
+        Type::Int | Type::Float => "number",
+        Type::BigInt => "bigint",
+        Type::String => "string",
+        Type::Symbol => "symbol",
+        Type::Array => "array",
+        Type::Function | Type::Constructor => "function",
+        // Plain object, or JS types that `typeof` reports as "object"
+        // (Promise, Exception, Proxy, Module). Tests key off these
+        // strings so matching JS's own `typeof` keeps surprise low.
+        Type::Object | Type::Promise | Type::Exception | Type::Proxy | Type::Module => "object",
+        Type::Unknown => "unknown",
+    }
+    .to_string()
+}
+
+/// Marshal a Python value or QjsHandle into a JS value for the
+/// current context. Cross-context handles raise InvalidHandleError.
+fn handle_or_py_to_js<'js>(
+    ctx: &Ctx<'js>,
+    py_val: &Bound<'_, PyAny>,
+    expected_ctx_ptr: usize,
+    depth: u32,
+) -> PyResult<Value<'js>> {
+    if let Ok(handle) = py_val.cast::<QjsHandle>() {
+        let borrow = handle.borrow();
+        if borrow.context_ptr != expected_ctx_ptr {
+            return Err(InvalidHandleError::new_err(
+                "handle belongs to a different context",
+            ));
+        }
+        let persistent = borrow.persistent_clone()?;
+        return persistent.restore(ctx).map_err(map_handle_error);
+    }
+    py_to_js_value(ctx, py_val, depth)
+}
+
+/// Collect a Python tuple of args into an rquickjs `Args`, doing the
+/// cross-context check for any embedded QjsHandle along the way.
+fn collect_js_args<'js>(
+    ctx: &Ctx<'js>,
+    args: &Bound<'_, PyTuple>,
+    expected_ctx_ptr: usize,
+) -> PyResult<rquickjs::function::Args<'js>> {
+    let mut js_args = rquickjs::function::Args::new(ctx.clone(), args.len());
+    for (i, arg) in args.iter().enumerate() {
+        let v = handle_or_py_to_js(ctx, &arg, expected_ctx_ptr, 0)?;
+        js_args.push_arg(v).map_err(|e| {
+            QuickJSError::new_err(format!("arg {} push failed: {}", i, e))
+        })?;
+    }
+    Ok(js_args)
+}
+
+/// Like `js_value_to_py` but substitutes fresh QjsHandles at
+/// positions that would otherwise raise MarshalError (functions,
+/// symbols, promises). Recursively walks objects/arrays — mixed
+/// marshalable / opaque contents work. §7.2 allow_opaque.
+fn js_to_py_with_opaque<'js>(
+    py: Python<'_>,
+    val: &Value<'js>,
+    context: &Context,
+    context_ptr: usize,
+    depth: u32,
+) -> PyResult<Py<PyAny>> {
+    if depth >= MAX_MARSHAL_DEPTH {
+        return Err(depth_error());
+    }
+    match val.type_of() {
+        // Opaque types get wrapped as child handles.
+        Type::Function | Type::Constructor | Type::Symbol | Type::Promise | Type::Proxy => {
+            let persistent = Persistent::save(val.ctx(), val.clone());
+            let handle = QjsHandle {
+                context: Some(context.clone()),
+                context_ptr,
+                persistent: Some(persistent),
+            };
+            Ok(handle.into_pyobject(py)?.into_any().unbind())
+        }
+        // Containers walk with the opaque-aware recursor.
+        Type::Array => {
+            let arr = val.as_array().expect("Type::Array has as_array");
+            let list = PyList::empty(py);
+            for item in arr.iter::<Value<'js>>() {
+                let item = item.map_err(|e| {
+                    MarshalError::new_err(format!("array element read failed: {}", e))
+                })?;
+                list.append(js_to_py_with_opaque(
+                    py,
+                    &item,
+                    context,
+                    context_ptr,
+                    depth + 1,
+                )?)?;
+            }
+            Ok(list.unbind().into_any())
+        }
+        Type::Object => {
+            let obj = val.as_object().expect("Type::Object has as_object");
+            // Uint8Array still short-circuits to bytes.
+            if obj.is_typed_array::<u8>() {
+                let typed = TypedArray::<u8>::from_object(obj.clone()).map_err(|e| {
+                    MarshalError::new_err(format!("Uint8Array extraction failed: {}", e))
+                })?;
+                let bytes = typed.as_bytes().ok_or_else(|| {
+                    MarshalError::new_err("Uint8Array is detached; cannot marshal")
+                })?;
+                return Ok(PyBytes::new(py, bytes).unbind().into_any());
+            }
+            let dict = PyDict::new(py);
+            for entry in obj.own_props::<String, Value<'js>>(Filter::default()) {
+                let (key, value) = entry.map_err(|e| {
+                    MarshalError::new_err(format!("object entry read failed: {}", e))
+                })?;
+                dict.set_item(
+                    key,
+                    js_to_py_with_opaque(py, &value, context, context_ptr, depth + 1)?,
+                )?;
+            }
+            Ok(dict.unbind().into_any())
+        }
+        // Everything else delegates to the plain marshaler.
+        _ => js_value_to_py(py, val, depth),
     }
 }
 
@@ -880,5 +1264,6 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("QuickJSError", m.py().get_type::<QuickJSError>())?;
     m.add("JSError", m.py().get_type::<JSError>())?;
     m.add("MarshalError", m.py().get_type::<MarshalError>())?;
+    m.add("InvalidHandleError", m.py().get_type::<InvalidHandleError>())?;
     Ok(())
 }

@@ -20,6 +20,7 @@ from quickjs_rs.errors import (
     TimeoutError,
 )
 from quickjs_rs.globals import Globals
+from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 
 
@@ -64,7 +65,8 @@ class Context:
         if self._closed:
             raise QuickJSError("context is closed")
         if self._globals is None:
-            self._globals = Globals(self, self._engine_ctx.global_object())
+            engine_handle = self._engine_ctx.global_object()
+            self._globals = Globals(self, Handle(self, engine_handle))
         return self._globals
 
     def __enter__(self) -> Context:
@@ -91,6 +93,40 @@ class Context:
         self._engine_ctx.close()
         self._runtime._unregister_context(self)
         self._closed = True
+
+    def eval_handle(
+        self,
+        code: str,
+        *,
+        module: bool = False,
+        strict: bool = False,
+        filename: str = "<eval>",
+    ) -> Handle:
+        """Evaluate JS code and return the result as an opaque Handle.
+
+        Unlike :meth:`eval`, the result is never marshaled — functions,
+        symbols, promises, and other opaque values all come back as
+        Handles. §7.2.
+        """
+        if self._closed:
+            raise QuickJSError("context is closed")
+
+        self._last_host_exception = None
+        deadline = time.monotonic() + self._timeout
+        self._runtime._deadline = deadline
+        try:
+            inner = self._engine_ctx.eval_handle(
+                code, module=module, strict=strict, filename=filename
+            )
+        except _engine.JSError as e:
+            name, message, stack = e.args
+            classified = self._classify_jserror(name, message, stack, deadline)
+            raise classified from classified.__cause__
+        except _engine.MarshalError as e:
+            raise MarshalError(str(e)) from None
+        finally:
+            self._runtime._deadline = None
+        return Handle(self, inner)
 
     def eval(
         self,

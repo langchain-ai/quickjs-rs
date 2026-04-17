@@ -18,6 +18,7 @@ from quickjs_rs.errors import (
     QuickJSError,
     TimeoutError,
 )
+from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 
 __version__ = "0.3.0.dev0"
@@ -31,6 +32,7 @@ __version__ = "0.3.0.dev0"
 __all__ = [
     "Runtime",
     "Context",
+    "Handle",
     "Undefined",
     "UNDEFINED",
     "QuickJSError",

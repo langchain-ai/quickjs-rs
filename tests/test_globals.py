@@ -97,25 +97,24 @@ def test_del_unsupported_raises_typeerror(ctx: Context) -> None:
         del ctx.globals["throwaway"]
 
 
-def test_get_handle_not_yet_implemented(ctx: Context) -> None:
-    """§7.2 declares Globals.get_handle for handle-valued reads; the
-    implementation is wired to NotImplementedError until the handle
-    integration with Globals lands. This test documents the status
-    explicitly — if get_handle is ever wired, this test flips to
-    assert real behavior rather than silently lying."""
+def test_get_handle_returns_handle_for_any_global(ctx: Context) -> None:
+    """§7.2 Globals.get_handle returns a Handle wrapping the value,
+    even when the value would be trivially marshalable. Useful when
+    the caller wants to hold a reference or call methods without
+    going through __getitem__."""
     ctx.globals["x"] = 1
-    with pytest.raises(NotImplementedError):
-        ctx.globals.get_handle("x")
+    with ctx.globals.get_handle("x") as h:
+        assert h.type_of == "number"
+        assert h.to_python() == 1
 
 
-def test_handle_valued_assignment_not_yet_implemented(ctx: Context) -> None:
-    """§7.2 Globals.__setitem__ accepts Handle | Any; the Handle
-    branch lands with broader handle-integration work. Until then
-    it raises NotImplementedError (not MarshalError — the Handle is
-    well-formed; the wiring just hasn't landed)."""
+def test_handle_valued_assignment_stores_value(ctx: Context) -> None:
+    """§7.2 Globals.__setitem__ accepts Handle | Any. Assigning a
+    Handle stores the JS value it refers to on globalThis; the Handle
+    itself remains valid and disposable by the caller."""
     with ctx.eval_handle("({value: 42})") as h:
-        with pytest.raises(NotImplementedError):
-            ctx.globals["stored"] = h
+        ctx.globals["stored"] = h
+        assert ctx.eval("stored.value") == 42
 
 
 def test_unsupported_python_type_raises_marshalerror(ctx: Context) -> None:
