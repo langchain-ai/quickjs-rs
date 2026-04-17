@@ -10,7 +10,15 @@ from types import TracebackType
 from typing import Any
 
 import quickjs_rs._engine as _engine
-from quickjs_rs.errors import HostError, JSError, MarshalError, QuickJSError
+from quickjs_rs.errors import (
+    HostError,
+    InterruptError,
+    JSError,
+    MarshalError,
+    MemoryLimitError,
+    QuickJSError,
+    TimeoutError,
+)
 from quickjs_rs.globals import Globals
 from quickjs_rs.runtime import Runtime
 
@@ -115,20 +123,68 @@ class Context:
             )
         except _engine.JSError as e:
             name, message, stack = e.args
-            if name == "HostError":
-                # §10.2: promote to HostError and thread __cause__
-                # from the side channel so the original Python
-                # traceback is preserved.
-                cause = self._last_host_exception
-                host_err = HostError(name, message, stack)
-                if cause is not None:
-                    raise host_err from cause
-                raise host_err from None
-            raise JSError(name, message, stack) from None
+            classified = self._classify_jserror(name, message, stack, deadline)
+            # Preserve HostError.__cause__ that _classify_jserror
+            # just threaded from the side channel. `raise ... from
+            # None` would clobber it; `raise ... from e` would make
+            # the _engine.JSError the cause. Instead, re-raise with
+            # an explicit `from classified.__cause__` — that's None
+            # for non-host errors (no cause attached) and the original
+            # Python exception for HostError.
+            raise classified from classified.__cause__
         except _engine.MarshalError as e:
             raise MarshalError(str(e)) from None
         finally:
             self._runtime._deadline = None
+
+    def _classify_jserror(
+        self,
+        name: str,
+        message: str,
+        stack: str | None,
+        deadline: float | None,
+    ) -> QuickJSError:
+        """§10.4: promote a raw (name, message, stack) triple into the
+        right public exception class.
+
+        - name == "HostError": threaded with __cause__ from
+          self._last_host_exception so the original Python traceback
+          shows up for the user.
+        - name == "InternalError" with message "interrupted":
+          TimeoutError. The runtime's only source of interrupts is
+          the wall-clock deadline we install from eval entry; any
+          "interrupted" signal therefore means the deadline elapsed.
+          A defensive guard against misclassification: if somehow the
+          deadline hasn't actually passed, surface as the more
+          general InterruptError instead of lying about a timeout.
+        - name == "InternalError" with message "out of memory":
+          MemoryLimitError. QuickJS raises this from
+          JS_ThrowOutOfMemory when an allocation fails past the
+          memory limit set by JS_SetMemoryLimit (§9).
+        - Everything else, including stack overflow (rquickjs-0.11
+          surfaces it as RangeError "Maximum call stack size
+          exceeded"), falls through to plain JSError. The
+          test_stack_overflow_is_jserror_not_memory tripwire (§11.1)
+          asserts this routing.
+        """
+        if name == "HostError":
+            cause = self._last_host_exception
+            host_err = HostError(name, message, stack)
+            if cause is not None:
+                host_err.__cause__ = cause
+            return host_err
+        if name == "InternalError":
+            if "interrupted" in message:
+                # Our only interrupt source is the deadline. Prefer
+                # TimeoutError if it actually elapsed; fall back to
+                # InterruptError otherwise so misclassification is
+                # loud rather than a false timeout claim.
+                if deadline is not None and time.monotonic() >= deadline:
+                    return TimeoutError(message)
+                return InterruptError(message)
+            if "out of memory" in message:
+                return MemoryLimitError(message)
+        return JSError(name, message, stack)
 
     # ---- Host function registration ---------------------------------
 
