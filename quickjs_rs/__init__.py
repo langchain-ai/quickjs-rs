@@ -3,6 +3,7 @@
 See spec/implementation.md §7 for the public API.
 """
 
+from quickjs_rs._engine import UNDEFINED, Undefined
 from quickjs_rs.context import Context
 from quickjs_rs.errors import (
     ConcurrentEvalError,
@@ -30,6 +31,8 @@ __version__ = "0.3.0.dev0"
 __all__ = [
     "Runtime",
     "Context",
+    "Undefined",
+    "UNDEFINED",
     "QuickJSError",
     "JSError",
     "HostError",
