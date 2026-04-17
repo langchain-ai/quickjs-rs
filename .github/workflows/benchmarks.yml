@@ -3,9 +3,11 @@ name: benchmarks
 # Runs the performance benchmarks under pytest-codspeed and uploads to
 # CodSpeed for regression detection. See spec/benchmarks.md §6.
 #
-# Mode is walltime (not simulation): simulation profiles Python + wasmtime
-# dispatch but can't see QuickJS bytecode execution inside the wasm module.
-# Walltime captures the full stack — what users actually experience.
+# Mode is walltime: simulation (Valgrind) can't see QuickJS bytecode
+# execution inside the native extension any better than it saw it
+# inside the wasm module — walltime captures the full stack, which is
+# what users actually experience. Single platform (Linux x86_64) is
+# intentional: cross-platform benchmark comparison isn't meaningful.
 
 on:
   push:
@@ -18,31 +20,28 @@ permissions:
   id-token: write
 
 jobs:
-  wasm:
-    uses: ./.github/workflows/build-wasm.yml
-
   benchmarks:
     name: Run benchmarks
-    needs: wasm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - uses: actions/download-artifact@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
         with:
-          name: quickjs-wasm
-          path: quickjs_rs/_resources
+          key: benchmarks
 
-      - name: Install package (dev + bench extras)
+      - name: Install maturin and bench extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,bench]"
+          pip install maturin
+          maturin develop --release -E bench
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4

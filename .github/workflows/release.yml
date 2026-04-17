@@ -1,38 +1,141 @@
 name: release
 
-# On tag push, build the wasm, then build and publish a pure-Python wheel
-# (py3-none-any). See spec/implementation.md §4, §11.3, §12.
+# On tag push (v*), build platform-specific wheels + sdist via
+# maturin-action, then publish to PyPI via trusted publishing.
+# Platform matrix matches what pydantic / polars / ruff ship:
+# Linux manylinux x86_64 + aarch64, macOS x86_64 + arm64, Windows
+# x86_64. Each job builds with the Python versions in its
+# `python-version` matrix; maturin produces cp3X-abi3 wheels or
+# cp3X-cp3X wheels depending on the extension's ABI stability
+# (we don't set abi3 so each Python minor gets its own wheel).
+# See spec/implementation.md §5.2, §10 "CI matrix".
 
 on:
   push:
     tags: ["v*"]
+  # Allow a dry run from the UI that builds wheels but skips the
+  # publish step (controlled by the startsWith(refs/tags/) guard on
+  # the publish job).
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  wasm:
-    uses: ./.github/workflows/build-wasm.yml
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
 
-  wheel:
-    needs: wasm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheels (manylinux)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # -i targets a single Python version so each matrix cell
+          # produces exactly one wheel; maturin otherwise picks up
+          # every Python on PATH inside the build container.
+          args: --release --out dist -i python${{ matrix.python-version }}
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}-py${{ matrix.python-version }}
+          path: dist
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheels (macOS)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # -i targets a single Python version so each matrix cell
+          # produces exactly one wheel; maturin otherwise picks up
+          # every Python on PATH inside the build container.
+          args: --release --out dist -i python${{ matrix.python-version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}-py${{ matrix.python-version }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheels (Windows)
+        uses: PyO3/maturin-action@v1
+        with:
+          # -i targets a single Python version so each matrix cell
+          # produces exactly one wheel; maturin otherwise picks up
+          # every Python on PATH inside the build container.
+          args: --release --out dist -i python${{ matrix.python-version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-py${{ matrix.python-version }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish:
+    needs: [linux, macos, windows, sdist]
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # PyPI trusted publishing.
+      id-token: write  # PyPI trusted publishing
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - uses: actions/download-artifact@v4
         with:
-          name: quickjs-wasm
-          path: quickjs_rs/_resources
-
-      - name: Build wheel + sdist
-        run: |
-          python -m pip install --upgrade pip build
-          python -m build
+          # All upload-artifact names above start with `wheels-`;
+          # merge into a single dist/ directory.
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

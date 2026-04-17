@@ -1,8 +1,9 @@
 name: test
 
-# Runs pytest, ruff, and mypy on the full OS × Python matrix. The wasm
-# artifact is built once by build-wasm.yml and downloaded into each job.
-# See spec/implementation.md §11.3.
+# Runs pytest, ruff, and mypy on the full OS × Python matrix. maturin
+# compiles the PyO3 extension from src/lib.rs before pytest runs;
+# there's no separate wasm artifact to download any more.
+# See spec/implementation.md §5, §10.
 
 on:
   push:
@@ -10,11 +11,7 @@ on:
   pull_request:
 
 jobs:
-  wasm:
-    uses: ./.github/workflows/build-wasm.yml
-
   test:
-    needs: wasm
     strategy:
       fail-fast: false
       matrix:
@@ -22,21 +19,29 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: quickjs-wasm
-          path: quickjs_rs/_resources
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install package (dev extras)
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Keyed off the lockfile so a dep bump invalidates the cache.
+          # Per-OS caches because compiled artifacts aren't portable.
+          key: test-${{ matrix.os }}
+
+      - name: Install maturin and dev extras
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install maturin
+          # maturin develop builds the extension AND installs the
+          # project editable; -E dev adds pytest, mypy, ruff.
+          maturin develop --release -E dev
 
       - name: ruff
         run: ruff check .
