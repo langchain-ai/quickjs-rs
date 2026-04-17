@@ -1,13 +1,18 @@
 name: benchmarks
 
-# Runs the performance benchmarks under pytest-codspeed and uploads to
-# CodSpeed for regression detection. See spec/benchmarks.md §6.
+# Runs the performance benchmarks under pytest-codspeed and uploads
+# to CodSpeed for regression detection. See spec/benchmarks.md §6.
 #
 # Mode is walltime: simulation (Valgrind) can't see QuickJS bytecode
 # execution inside the native extension any better than it saw it
-# inside the wasm module — walltime captures the full stack, which is
-# what users actually experience. Single platform (Linux x86_64) is
-# intentional: cross-platform benchmark comparison isn't meaningful.
+# inside the wasm module — walltime captures the full stack, which
+# is what users actually experience. Single platform (Linux x86_64)
+# is intentional: cross-platform benchmark comparison isn't
+# meaningful.
+#
+# Same venv dance as test.yml — `maturin develop` refuses to
+# install outside a virtualenv, so we create .venv and export
+# VIRTUAL_ENV + PATH for subsequent steps.
 
 on:
   push:
@@ -36,6 +41,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: benchmarks
+
+      - name: Create venv and export to subsequent steps
+        shell: bash
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install maturin and bench extras
         run: |

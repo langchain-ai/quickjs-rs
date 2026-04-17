@@ -1,9 +1,18 @@
 name: test
 
-# Runs pytest, ruff, and mypy on the full OS × Python matrix. maturin
-# compiles the PyO3 extension from src/lib.rs before pytest runs;
-# there's no separate wasm artifact to download any more.
-# See spec/implementation.md §5, §10.
+# Runs pytest, ruff, and mypy on the full OS × Python matrix.
+# maturin compiles the PyO3 extension from src/lib.rs into a venv
+# created per-job; subsequent steps (ruff, mypy, pytest) run from
+# that venv so the project's dev extras (ruff, mypy, pytest) are
+# on PATH. See spec/implementation.md §5, §10.
+#
+# Why the venv dance: `maturin develop` refuses to install into a
+# bare Python (no VIRTUAL_ENV / CONDA_PREFIX / .venv), which is
+# exactly what setup-python gives you. Activating a venv and
+# exporting VIRTUAL_ENV + PATH via $GITHUB_ENV makes every later
+# step pick it up automatically. Alternative: `maturin build` +
+# `pip install dist/*.whl` — less pleasant, needs shell-specific
+# glob handling on Windows.
 
 on:
   push:
@@ -30,9 +39,22 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
         with:
-          # Keyed off the lockfile so a dep bump invalidates the cache.
-          # Per-OS caches because compiled artifacts aren't portable.
+          # Per-OS key so compiled artifacts don't leak across
+          # Linux / macOS / Windows caches.
           key: test-${{ matrix.os }}
+
+      - name: Create venv and export to subsequent steps
+        shell: bash
+        run: |
+          python -m venv .venv
+          # Windows uses Scripts/, everything else bin/.
+          if [ -d ".venv/Scripts" ]; then
+            VENV_BIN="$PWD/.venv/Scripts"
+          else
+            VENV_BIN="$PWD/.venv/bin"
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
 
       - name: Install maturin and dev extras
         shell: bash
@@ -40,7 +62,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin
           # maturin develop builds the extension AND installs the
-          # project editable; -E dev adds pytest, mypy, ruff.
+          # project editable; -E dev adds pytest, mypy, ruff. The
+          # venv exported in the prior step is what maturin picks
+          # up via VIRTUAL_ENV.
           maturin develop --release -E dev
 
       - name: ruff
