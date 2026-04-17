@@ -50,11 +50,16 @@ jobs:
         # host-native paths so this works the same on every runner.
         run: python .github/scripts/activate_venv.py
 
-      - name: Install maturin and bench extras
+      - name: Install maturin, bench + dev extras
+        # Needs both: `bench` for pytest-codspeed, `dev` for
+        # pytest-asyncio — the async benchmarks use an async_ctx
+        # fixture that only resolves when pytest-asyncio is
+        # installed. Without it the 5 async-fixture benchmarks
+        # error with PytestRemovedIn9Warning.
         run: |
           python -m pip install --upgrade pip
           pip install maturin
-          maturin develop --release -E bench
+          maturin develop --release -E dev,bench
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@v4

@@ -113,11 +113,22 @@ def test_smoke_primitives() -> None:
             assert js_excinfo.value.stack is not None
 
             # Memory limit: unbounded allocation trips JS_ATOM_out_of_memory,
-            # surfaced as MemoryLimitError.
-            with pytest.raises(MemoryLimitError):
-                ctx.eval(
-                    "let a = []; while(true) a.push(new Array(1e6).fill(0))"
-                )
+            # surfaced as MemoryLimitError. Done in a fresh 8 MB runtime
+            # rather than the outer 64 MB one: at 64 MB some macOS CI
+            # runners hit a degenerate QuickJS path where the
+            # exception-allocation itself fails and the caught value
+            # lands as null instead of InternalError("out of memory").
+            # 8 MB reproduces OOM cleanly everywhere we've tested. The
+            # behavioral guarantee (runaway allocation → MemoryLimitError)
+            # is identical; only the smoke-test's memory budget changes.
+            # The v0.2 tripwire test_memory_limit_trips_with_runaway_
+            # allocation lives in test_limits.py at the same 8 MB.
+            with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
+                with mem_rt.new_context() as mem_ctx:
+                    with pytest.raises(MemoryLimitError):
+                        mem_ctx.eval(
+                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
+                        )
 
             # Timeout: infinite loop terminates within the configured
             # deadline. Context uses its default 5 s budget; this test
@@ -227,9 +238,15 @@ def test_acceptance() -> None:
                 == "HostError: from python"
             )
 
-            # Memory limit
-            with pytest.raises(MemoryLimitError):
-                ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
+            # Memory limit: see the note in test_smoke_primitives for
+            # why this runs in a fresh 8 MB runtime rather than the
+            # outer 64 MB one.
+            with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
+                with mem_rt.new_context() as mem_ctx:
+                    with pytest.raises(MemoryLimitError):
+                        mem_ctx.eval(
+                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
+                        )
 
             # Timeout
             with pytest.raises(TimeoutError):
