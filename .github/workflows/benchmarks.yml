@@ -42,12 +42,13 @@ jobs:
         with:
           key: benchmarks
 
-      - name: Create venv and export to subsequent steps
-        shell: bash
-        run: |
-          python -m venv .venv
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Create venv
+        run: python -m venv .venv
+
+      - name: Export venv to subsequent steps
+        # Shared helper with test.yml — uses pathlib for
+        # host-native paths so this works the same on every runner.
+        run: python .github/scripts/activate_venv.py
 
       - name: Install maturin and bench extras
         run: |
