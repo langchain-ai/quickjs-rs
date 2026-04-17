@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm._msgpack import Undefined
-from quickjs_wasm.errors import JSError, MarshalError, QuickJSError
+from quickjs_rs import _msgpack
+from quickjs_rs._msgpack import Undefined
+from quickjs_rs.errors import JSError, MarshalError, QuickJSError
 
 if TYPE_CHECKING:
-    from quickjs_wasm._bridge import Bridge
-    from quickjs_wasm.handle import Handle
+    from quickjs_rs._bridge import Bridge
+    from quickjs_rs.handle import Handle
 
 
 class Globals:
@@ -69,7 +69,7 @@ class Globals:
             self._bridge.slot_drop(self._ctx_id, global_slot)
 
     def __setitem__(self, key: str, value: Handle | Any) -> None:
-        from quickjs_wasm.handle import Handle as _Handle  # avoid cycle
+        from quickjs_rs.handle import Handle as _Handle  # avoid cycle
 
         global_slot = self._global_slot()
         try:

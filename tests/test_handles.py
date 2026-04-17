@@ -7,7 +7,7 @@ import warnings
 
 import pytest
 
-from quickjs_wasm import (
+from quickjs_rs import (
     InvalidHandleError,
     JSError,
     Runtime,
@@ -163,7 +163,7 @@ def test_handle_holds_function_that_would_fail_marshaling() -> None:
 def test_to_python_allow_opaque_substitutes_child_handles() -> None:
     """§7.2: allow_opaque=True produces marshalable leaves and child
     Handles at positions where msgpack would fail."""
-    from quickjs_wasm import MarshalError
+    from quickjs_rs import MarshalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -214,7 +214,7 @@ def test_to_python_allow_opaque_cycle_raises_marshalerror() -> None:
     behavior. Detection is indirect (via depth cap) rather than via a
     same-value check, which is fine for v0.1 since the depth cap of 128
     fails fast long before the walk does anything harmful."""
-    from quickjs_wasm import MarshalError
+    from quickjs_rs import MarshalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:

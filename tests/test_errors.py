@@ -1,7 +1,7 @@
 """Exception-class conformance. See spec/implementation.md §7.2, §10.
 
 These are tripwires, not behavioral tests — they check the public
-surface matches what §7.2 declares and what ``from quickjs_wasm import
+surface matches what §7.2 declares and what ``from quickjs_rs import
 *`` promises. Behavioral tests for the v0.1 errors live in
 ``test_exceptions.py``; behavioral tests for the v0.2 errors land with
 their wiring commits (§17.2 steps 5, 7, 9).
@@ -19,12 +19,12 @@ Fail modes these tests catch:
 
 from __future__ import annotations
 
-import quickjs_wasm
+import quickjs_rs
 
 
 def test_v01_errors_exist_and_subclass_quickjserror() -> None:
     """Locks in the v0.1 hierarchy. §7.2 v0.1 surface."""
-    from quickjs_wasm import (
+    from quickjs_rs import (
         HostError,
         InterruptError,
         InvalidHandleError,
@@ -51,7 +51,7 @@ def test_v02_host_cancellation_error_is_quickjserror_subclass() -> None:
     with ``name == "HostCancellationError"`` is a string-literal
     injection by the shim, not a reflection of the Python hierarchy
     (see §10.3 clarification commit)."""
-    from quickjs_wasm import HostCancellationError, JSError, QuickJSError
+    from quickjs_rs import HostCancellationError, JSError, QuickJSError
 
     assert issubclass(HostCancellationError, QuickJSError)
     # Explicitly not a JSError subclass: HostCancellationError is a
@@ -64,7 +64,7 @@ def test_v02_concurrent_eval_error_is_quickjserror_subclass() -> None:
     """§7.2: ConcurrentEvalError extends QuickJSError. Covers both the
     "second eval_async while one is in flight" case (§7.4) and the
     "sync eval hit an async host call" case (§7.4 / §10.3)."""
-    from quickjs_wasm import ConcurrentEvalError, QuickJSError
+    from quickjs_rs import ConcurrentEvalError, QuickJSError
 
     assert issubclass(ConcurrentEvalError, QuickJSError)
 
@@ -73,17 +73,17 @@ def test_v02_deadlock_error_is_quickjserror_subclass() -> None:
     """§7.2 / §10.3: DeadlockError extends QuickJSError. Raised by
     eval_async when a top-level Promise is pending and no async work
     is in flight to settle it."""
-    from quickjs_wasm import DeadlockError, QuickJSError
+    from quickjs_rs import DeadlockError, QuickJSError
 
     assert issubclass(DeadlockError, QuickJSError)
 
 
 def test_all_declared_exports_importable_from_top_level() -> None:
-    """``from quickjs_wasm import *`` should surface every class listed
+    """``from quickjs_rs import *`` should surface every class listed
     in ``__all__``. Guards against the "added to errors.py but forgot
     to re-export" footgun."""
-    for name in quickjs_wasm.__all__:
-        assert hasattr(quickjs_wasm, name), (
+    for name in quickjs_rs.__all__:
+        assert hasattr(quickjs_rs, name), (
             f"__all__ claims {name!r} but it's not on the top-level package"
         )
 
@@ -94,7 +94,7 @@ def test_v02_error_classes_in_all() -> None:
     the case where ``__all__`` was updated before the class was imported
     into __init__.py (or vice versa)."""
     for name in ("HostCancellationError", "ConcurrentEvalError", "DeadlockError"):
-        assert name in quickjs_wasm.__all__, f"{name} missing from __all__"
+        assert name in quickjs_rs.__all__, f"{name} missing from __all__"
 
 
 def test_error_classes_have_docstrings() -> None:
@@ -102,7 +102,7 @@ def test_error_classes_have_docstrings() -> None:
     docstring is a silent spec regression. §7.2's in-spec class
     definitions are the authoritative wording; the classes in
     errors.py should mirror them."""
-    from quickjs_wasm import (
+    from quickjs_rs import (
         ConcurrentEvalError,
         DeadlockError,
         HostCancellationError,
@@ -118,7 +118,7 @@ def test_error_classes_have_docstrings() -> None:
 def test_v02_error_classes_are_raisable_and_catchable() -> None:
     """Final tripwire: the classes actually behave like exceptions.
     Catches a "class defined but something broke __init__" regression."""
-    from quickjs_wasm import (
+    from quickjs_rs import (
         ConcurrentEvalError,
         DeadlockError,
         HostCancellationError,

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from quickjs_wasm import Context
+from quickjs_rs import Context
 
 
 @pytest.mark.benchmark

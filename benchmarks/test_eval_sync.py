@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pytest_codspeed import BenchmarkFixture
 
-from quickjs_wasm import Context
+from quickjs_rs import Context
 
 
 def bench_eval_noop(benchmark: BenchmarkFixture, ctx: Context) -> None:

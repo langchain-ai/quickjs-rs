@@ -8,8 +8,8 @@ dist/
 *.egg-info/
 
 # Built wasm artifact (rebuilt locally or fetched from CI)
-quickjs_wasm/_resources/quickjs.wasm
-quickjs_wasm/_resources/quickjs.wasm.sha256
+quickjs_rs/_resources/quickjs.wasm
+quickjs_rs/_resources/quickjs.wasm.sha256
 
 # Python
 __pycache__/

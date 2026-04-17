@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from quickjs_wasm import HostError, JSError, Runtime
+from quickjs_rs import HostError, JSError, Runtime
 
 
 def test_js_thrown_error_surfaces_name_message_stack() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from quickjs_wasm import JSError, MemoryLimitError, Runtime, TimeoutError
+from quickjs_rs import JSError, MemoryLimitError, Runtime, TimeoutError
 
 
 def test_memory_limit_trips_with_runaway_allocation() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quickjs_wasm import HostError, Runtime
+from quickjs_rs import HostError, Runtime
 
 
 def test_reentrant_eval_from_host_function() -> None:

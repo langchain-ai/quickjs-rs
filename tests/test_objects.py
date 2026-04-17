@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quickjs_wasm import Context, Runtime
+from quickjs_rs import Context, Runtime
 
 
 def test_empty_object_roundtrips(ctx: Context) -> None:
@@ -113,7 +113,7 @@ def test_array_of_mixed_types(ctx: Context) -> None:
       ``Undefined`` sentinel so a caller who needs to distinguish
       holes from nulls inside a structure can still see it.
     """
-    from quickjs_wasm import UNDEFINED
+    from quickjs_rs import UNDEFINED
 
     result = ctx.eval(
         "[1, 'two', true, null, undefined, 10n**20n,"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from quickjs_wasm import Context, MarshalError, Runtime
+from quickjs_rs import Context, MarshalError, Runtime
 
 
 def test_set_and_read_primitive(ctx: Context) -> None:

@@ -31,7 +31,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: quickjs-wasm
-          path: quickjs_wasm/_resources
+          path: quickjs_rs/_resources
 
       - name: Install package (dev extras)
         run: |
@@ -42,7 +42,7 @@ jobs:
         run: ruff check .
 
       - name: mypy
-        run: mypy quickjs_wasm
+        run: mypy quickjs_rs
 
       - name: pytest
         run: pytest -v

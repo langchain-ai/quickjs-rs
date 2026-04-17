@@ -7,7 +7,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from quickjs_wasm import Context, Runtime
+from quickjs_rs import Context, Runtime
 
 
 @pytest.fixture

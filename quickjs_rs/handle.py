@@ -7,9 +7,9 @@ import weakref
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm._msgpack import Undefined
-from quickjs_wasm.errors import (
+from quickjs_rs import _msgpack
+from quickjs_rs._msgpack import Undefined
+from quickjs_rs.errors import (
     ConcurrentEvalError,
     InvalidHandleError,
     JSError,
@@ -18,8 +18,8 @@ from quickjs_wasm.errors import (
 )
 
 if TYPE_CHECKING:
-    from quickjs_wasm._bridge import Bridge
-    from quickjs_wasm.context import Context
+    from quickjs_rs._bridge import Bridge
+    from quickjs_rs.context import Context
 
 ValueKind = Literal[
     "null",
@@ -435,7 +435,7 @@ class Handle:
         """
         import time as _time  # local to avoid a second module-level import
 
-        from quickjs_wasm.errors import ConcurrentEvalError
+        from quickjs_rs.errors import ConcurrentEvalError
 
         self._check_live()
         ctx = self._context_ref()

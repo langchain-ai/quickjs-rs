@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class QuickJSError(Exception):
-    """Base class for all errors raised by quickjs-wasm."""
+    """Base class for all errors raised by quickjs-rs."""
 
 
 class JSError(QuickJSError):

@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import asyncio
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm._bridge import Bridge
+from quickjs_rs import _msgpack
+from quickjs_rs._bridge import Bridge
 
 
 async def test_async_dispatch_fulfilled() -> None:

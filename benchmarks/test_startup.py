@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pytest_codspeed import BenchmarkFixture
 
-from quickjs_wasm import Runtime
+from quickjs_rs import Runtime
 
 
 def bench_runtime_create(benchmark: BenchmarkFixture) -> None:

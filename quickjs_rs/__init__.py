@@ -1,11 +1,11 @@
-"""quickjs-wasm: sandboxed JavaScript execution for Python.
+"""quickjs-rs: sandboxed JavaScript execution for Python.
 
 See spec/implementation.md §7 for the public API.
 """
 
-from quickjs_wasm._msgpack import UNDEFINED, Undefined
-from quickjs_wasm.context import Context
-from quickjs_wasm.errors import (
+from quickjs_rs._msgpack import UNDEFINED, Undefined
+from quickjs_rs.context import Context
+from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
     HostCancellationError,
@@ -18,8 +18,8 @@ from quickjs_wasm.errors import (
     QuickJSError,
     TimeoutError,
 )
-from quickjs_wasm.handle import Handle
-from quickjs_wasm.runtime import Runtime
+from quickjs_rs.handle import Handle
+from quickjs_rs.runtime import Runtime
 
 __version__ = "0.2.0"
 

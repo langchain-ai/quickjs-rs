@@ -7,7 +7,7 @@ import functools
 
 import pytest
 
-from quickjs_wasm import Runtime
+from quickjs_rs import Runtime
 
 
 async def test_async_def_auto_detected_via_decorator() -> None:
@@ -284,7 +284,7 @@ async def test_sync_eval_with_async_hostfn_raises_concurrent_eval_error() -> Non
     whether an asyncio loop is ambient, so this test runs as a plain
     async test rather than needing to escape pytest-asyncio's
     auto-mode loop via a thread."""
-    from quickjs_wasm import ConcurrentEvalError
+    from quickjs_rs import ConcurrentEvalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -339,7 +339,7 @@ def test_sync_eval_pure_js_promise_is_not_error() -> None:
             # async host calls, just a pure-JS Promise. Should be
             # a MarshalError (Promises aren't marshalable to Python)
             # — NOT a ConcurrentEvalError.
-            from quickjs_wasm import MarshalError
+            from quickjs_rs import MarshalError
 
             with pytest.raises(MarshalError):
                 ctx.eval("Promise.resolve(42)")
@@ -361,7 +361,7 @@ async def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> No
     eval_async. The flag-based detection does this naturally
     because the flag is set at dispatcher time, before JS's catch
     handler runs."""
-    from quickjs_wasm import ConcurrentEvalError
+    from quickjs_rs import ConcurrentEvalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -386,7 +386,7 @@ async def test_async_host_function_raises_surfaces_hosterror() -> None:
     Distinct from the cancellation path (step 7) — this is the
     ordinary raise, not a CancelledError. Exercises the dispatcher's
     encode-as-HostError-record branch in _run_async_host_call."""
-    from quickjs_wasm import HostError
+    from quickjs_rs import HostError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -413,7 +413,7 @@ async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
     extends to Handle.call as a spec-compliance property — the
     user-visible behavior should be consistent regardless of which
     sync entry point invoked the async host function."""
-    from quickjs_wasm import ConcurrentEvalError
+    from quickjs_rs import ConcurrentEvalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -438,7 +438,7 @@ async def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -
     function. Via the existing call_method → call delegation, the
     ConcurrentEvalError surfaces without call_method needing its own
     flag-check wiring."""
-    from quickjs_wasm import ConcurrentEvalError
+    from quickjs_rs import ConcurrentEvalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:

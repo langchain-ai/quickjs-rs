@@ -21,8 +21,8 @@ from typing import Any
 
 import wasmtime
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm.errors import (
+from quickjs_rs import _msgpack
+from quickjs_rs.errors import (
     HostError,
     JSError,
     MemoryLimitError,
@@ -41,11 +41,11 @@ _WASM_FILE = "quickjs.wasm"
 
 
 def _load_module(engine: wasmtime.Engine) -> wasmtime.Module:
-    resource = resources.files("quickjs_wasm._resources").joinpath(_WASM_FILE)
+    resource = resources.files("quickjs_rs._resources").joinpath(_WASM_FILE)
     with resources.as_file(resource) as path:
         if not path.exists():
             raise RuntimeError(
-                f"{_WASM_FILE} is missing from quickjs_wasm/_resources/. "
+                f"{_WASM_FILE} is missing from quickjs_rs/_resources/. "
                 "Run ./wasm/build.sh or install a released wheel."
             )
         return wasmtime.Module.from_file(engine, str(path))

@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any, overload
 
 import wasmtime
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm._msgpack import Undefined
-from quickjs_wasm.errors import (
+from quickjs_rs import _msgpack
+from quickjs_rs._msgpack import Undefined
+from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
     JSError,
@@ -22,13 +22,13 @@ from quickjs_wasm.errors import (
     QuickJSError,
     TimeoutError,
 )
-from quickjs_wasm.globals import Globals
+from quickjs_rs.globals import Globals
 
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from quickjs_wasm.handle import Handle
-    from quickjs_wasm.runtime import Runtime
+    from quickjs_rs.handle import Handle
+    from quickjs_rs.runtime import Runtime
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
@@ -280,7 +280,7 @@ class Context:
                     self._raise_from_exception_slot(slot)
                 finally:
                     self._bridge.slot_drop(self._ctx_id, slot)
-            from quickjs_wasm.handle import Handle as _Handle
+            from quickjs_rs.handle import Handle as _Handle
             return _Handle(self, self._bridge, self._ctx_id, slot)
         finally:
             # Same check as Context.eval's finally — see comment there.
@@ -349,7 +349,7 @@ class Context:
         settled_slot = await self._eval_and_drive(
             code, module=module, strict=strict, filename=filename, timeout=timeout
         )
-        from quickjs_wasm.handle import Handle as _Handle
+        from quickjs_rs.handle import Handle as _Handle
         return _Handle(self, self._bridge, self._ctx_id, settled_slot)
 
     async def _eval_and_drive(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quickjs_wasm import Runtime
+from quickjs_rs import Runtime
 
 
 def test_large_payload_overflow() -> None:

@@ -20,8 +20,8 @@ the shim injects on the sync-rejection path.
 
 from __future__ import annotations
 
-from quickjs_wasm import _msgpack
-from quickjs_wasm._bridge import Bridge
+from quickjs_rs import _msgpack
+from quickjs_rs._bridge import Bridge
 
 
 def test_async_registration_produces_function_returning_promise() -> None:

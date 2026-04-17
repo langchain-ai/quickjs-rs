@@ -5,11 +5,11 @@ from __future__ import annotations
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from quickjs_wasm._bridge import Bridge
-from quickjs_wasm.errors import QuickJSError
+from quickjs_rs._bridge import Bridge
+from quickjs_rs.errors import QuickJSError
 
 if TYPE_CHECKING:
-    from quickjs_wasm.context import Context
+    from quickjs_rs.context import Context
 
 
 class Runtime:
@@ -74,7 +74,7 @@ class Runtime:
     def new_context(self, *, timeout: float = 5.0) -> Context:
         if self._closed:
             raise QuickJSError("runtime is closed")
-        from quickjs_wasm.context import Context
+        from quickjs_rs.context import Context
 
         ctx = Context(self, timeout=timeout)
         self._contexts.append(ctx)

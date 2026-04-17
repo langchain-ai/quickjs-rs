@@ -3,16 +3,16 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "quickjs-wasm"
-version = "0.2.0"
-description = "Sandboxed JavaScript execution for Python, hosted via a WASI build of QuickJS."
+name = "quickjs-rs"
+version = "0.3.0.dev0"
+description = "Sandboxed JavaScript execution for Python, via PyO3 + rquickjs."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "LangChain" },
 ]
-keywords = ["quickjs", "javascript", "wasm", "wasi", "sandbox"]
+keywords = ["quickjs", "javascript", "sandbox", "pyo3", "rust"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -41,14 +41,14 @@ bench = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/langchain-ai/quickjs-wasm"
-Issues = "https://github.com/langchain-ai/quickjs-wasm/issues"
+Homepage = "https://github.com/langchain-ai/quickjs-rs"
+Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 
 [tool.setuptools.packages.find]
-include = ["quickjs_wasm*"]
+include = ["quickjs_rs*"]
 
 [tool.setuptools.package-data]
-quickjs_wasm = ["py.typed", "_resources/quickjs.wasm"]
+quickjs_rs = ["py.typed", "_resources/quickjs.wasm"]
 
 [tool.ruff]
 line-length = 100
@@ -60,7 +60,7 @@ select = ["E", "F", "I", "B", "UP", "W"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["quickjs_wasm"]
+files = ["quickjs_rs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

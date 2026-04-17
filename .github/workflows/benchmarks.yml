@@ -37,7 +37,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: quickjs-wasm
-          path: quickjs_wasm/_resources
+          path: quickjs_rs/_resources
 
       - name: Install package (dev + bench extras)
         run: |

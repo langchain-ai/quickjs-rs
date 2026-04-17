@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from quickjs_wasm import (
+from quickjs_rs import (
     ConcurrentEvalError,
     DeadlockError,
     Runtime,
@@ -148,7 +148,7 @@ async def test_eval_handle_async_returns_handle() -> None:
 async def test_eval_async_propagates_js_rejection() -> None:
     """An async host fn that raises → rejected Promise →
     HostError surfaces from eval_async via §10.2 routing."""
-    from quickjs_wasm import HostError
+    from quickjs_rs import HostError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -186,7 +186,7 @@ async def test_handle_await_promise_rejection_raises_jserror() -> None:
     """A Promise that rejects with a JS Error surfaces as JSError
     on await_promise. §10.1 routing applies exactly as it does for
     eval_async on the same promise."""
-    from quickjs_wasm import JSError
+    from quickjs_rs import JSError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -267,7 +267,7 @@ async def test_handle_await_promise_concurrent_eval_raises() -> None:
     raises ConcurrentEvalError. Same rule applies in reverse
     (eval_async while await_promise is running) — same guard, same
     boolean flag."""
-    from quickjs_wasm import ConcurrentEvalError
+    from quickjs_rs import ConcurrentEvalError
 
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -298,7 +298,7 @@ async def test_eval_async_per_call_timeout_override() -> None:
     """§7.4: timeout= kwarg on eval_async overrides the cumulative
     budget for that call. With the override set short, a slow async
     host call should abort with TimeoutError."""
-    from quickjs_wasm import TimeoutError as _TimeoutError
+    from quickjs_rs import TimeoutError as _TimeoutError
 
     with Runtime() as rt:
         with rt.new_context(timeout=60.0) as ctx:
@@ -360,7 +360,7 @@ async def test_cumulative_timeout_exceeded_on_later_call() -> None:
     total time budget" work cleanly: turn 1-5 consume their time,
     turn 6 bounces with TimeoutError so the caller knows the
     budget is done."""
-    from quickjs_wasm import TimeoutError as _TimeoutError
+    from quickjs_rs import TimeoutError as _TimeoutError
 
     # Short budget so the test wall-clock is short.
     with Runtime() as rt:
@@ -393,7 +393,7 @@ async def test_per_call_timeout_override_lifts_above_cumulative() -> None:
             await asyncio.sleep(0.05)
 
             # Without override: cumulative exhausted, should fail.
-            from quickjs_wasm import TimeoutError as _TimeoutError
+            from quickjs_rs import TimeoutError as _TimeoutError
 
             with pytest.raises(_TimeoutError):
                 await ctx.eval_async("1 + 1", module=False)

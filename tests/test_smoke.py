@@ -17,7 +17,7 @@ import asyncio
 
 import pytest
 
-from quickjs_wasm import (
+from quickjs_rs import (
     ConcurrentEvalError,
     DeadlockError,
     HostError,
