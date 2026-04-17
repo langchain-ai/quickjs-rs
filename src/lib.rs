@@ -423,6 +423,24 @@ impl QjsRuntime {
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 struct QjsContext {
     inner: Option<Context>,
+    /// §6.5 host function dispatch: a single Python-side callable
+    /// that receives (fn_id, args_tuple) and returns the host fn's
+    /// result. Set via set_host_call_dispatcher from the Python
+    /// Context layer before any host function is registered.
+    host_dispatcher: Option<Py<PyAny>>,
+    /// Currently-active Ctx during a `Context::with(|ctx| ...)` scope.
+    /// Used to handle reentrant eval from inside host functions: the
+    /// outer `with` holds the runtime lock (a non-reentrant RefCell
+    /// in rquickjs without the `parallel` feature), so an inner
+    /// `Context::with` panics. Instead, reentrant evals run against
+    /// this already-live Ctx directly.
+    ///
+    /// The 'static lifetime is a lie maintained by the bracketing in
+    /// `with_active_ctx` — the slot is set on entry to a with-scope
+    /// and cleared before leaving, so no `Ctx` handed out from it
+    /// ever outlives its real `'js` scope. Same pattern as
+    /// rquickjs::Persistent.
+    active_ctx: std::cell::Cell<Option<Ctx<'static>>>,
 }
 
 #[pymethods]
@@ -431,7 +449,21 @@ impl QjsContext {
     fn new(runtime: &QjsRuntime) -> PyResult<Self> {
         let rt = runtime.runtime()?;
         let ctx = Context::full(rt).map_err(map_runtime_new_error)?;
-        Ok(Self { inner: Some(ctx) })
+        Ok(Self {
+            inner: Some(ctx),
+            host_dispatcher: None,
+            active_ctx: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Install the Python-side dispatcher. The Context layer calls
+    /// this once at construction time. The dispatcher signature is
+    /// `dispatcher(fn_id: int, args: tuple) -> Any` — on host-fn
+    /// exception it re-raises `_engine.JSError(name, message, stack)`
+    /// which the Rust trampoline catches and converts to a JS throw.
+    fn set_host_call_dispatcher(&mut self, dispatcher: Py<PyAny>) -> PyResult<()> {
+        self.host_dispatcher = Some(dispatcher);
+        Ok(())
     }
 
     #[pyo3(signature = (code, *, module=false, strict=false, filename="<eval>"))]
@@ -443,17 +475,16 @@ impl QjsContext {
         strict: bool,
         filename: &str,
     ) -> PyResult<Py<PyAny>> {
-        let ctx = self.context()?;
-        ctx.with(|ctx| {
+        self.with_active_ctx(|ctx| {
             let mut options = EvalOptions::default();
             options.global = !module;
             options.strict = strict;
             options.filename = Some(filename.to_string());
             let result: Result<Value<'_>, CaughtError<'_>> =
-                ctx.eval_with_options::<Value<'_>, _>(code, options).catch(&ctx);
+                ctx.eval_with_options::<Value<'_>, _>(code, options).catch(ctx);
             match result {
                 Ok(val) => js_value_to_py(py, &val, 0),
-                Err(caught) => Err(js_error_from_caught(&ctx, caught)),
+                Err(caught) => Err(js_error_from_caught(ctx, caught)),
             }
         })
     }
@@ -467,18 +498,57 @@ impl QjsContext {
         self.inner.is_none()
     }
 
+    /// §6.5 host function registration. Installs a JS function on
+    /// `globalThis` under `name` that, when called from JS, marshals
+    /// args to Python via js_value_to_py, calls the host_dispatcher
+    /// with (fn_id, args_tuple), and marshals the return value back
+    /// to JS. On host-fn Python exception, throws a JS Error whose
+    /// name/message come from the _engine.JSError re-raised by the
+    /// Python dispatcher.
+    ///
+    /// `is_async` is ignored in step 5 (sync path only). Step 9 adds
+    /// the async branch that produces a pending promise.
+    #[pyo3(signature = (name, fn_id, is_async=false))]
+    fn register_host_function(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        fn_id: u32,
+        is_async: bool,
+    ) -> PyResult<()> {
+        if is_async {
+            return Err(QuickJSError::new_err(
+                "async host functions land in step 9 (§15)",
+            ));
+        }
+        let dispatcher = self
+            .host_dispatcher
+            .as_ref()
+            .ok_or_else(|| QuickJSError::new_err("host_dispatcher not set"))?
+            .clone_ref(py);
+
+        let name_owned = name.to_string();
+        self.with_active_ctx(|ctx| {
+            let js_fn = build_host_trampoline(ctx, dispatcher, fn_id, &name_owned)?;
+            ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
+                QuickJSError::new_err(format!(
+                    "failed to install host function {:?} on globalThis: {}",
+                    name_owned, e
+                ))
+            })?;
+            Ok(())
+        })
+    }
+
     /// Return a handle to the global object. §6.3 global_object.
     fn global_object(&self) -> PyResult<QjsHandle> {
-        let ctx = self.context()?;
-        let persistent = ctx.with(|ctx| {
+        let ctx_owner = self.context()?.clone();
+        let persistent = self.with_active_ctx(|ctx| {
             let globals = ctx.globals();
-            // Persistent::save needs a Value, not an Object. Convert
-            // via into_value — the 'static-lifetimed Persistent can
-            // live outside the closure.
-            Persistent::save(&ctx, globals.into_value())
-        });
+            Ok(Persistent::save(ctx, globals.into_value()))
+        })?;
         Ok(QjsHandle {
-            context: Some(ctx.clone()),
+            context: Some(ctx_owner),
             persistent: Some(persistent),
         })
     }
@@ -489,6 +559,63 @@ impl QjsContext {
         self.inner
             .as_ref()
             .ok_or_else(|| QuickJSError::new_err("context is closed"))
+    }
+
+    /// Run `f` with a live `Ctx<'js>`. If there's already an active
+    /// Ctx (reentrant call from a host function), use it directly
+    /// and skip re-entering `Context::with` — which would try to
+    /// re-lock the runtime's non-reentrant RefCell and panic.
+    /// Otherwise enter `Context::with` as usual and publish the Ctx
+    /// into the slot for any nested call to find.
+    fn with_active_ctx<F, R>(&self, f: F) -> PyResult<R>
+    where
+        F: FnOnce(&Ctx<'_>) -> PyResult<R>,
+    {
+        // Fast path: reentrant call. The stored Ctx<'static> was
+        // placed by an outer with_active_ctx and is guaranteed live
+        // until that call returns — we're executing inside its body
+        // right now, so the lifetime shortening from 'static to a
+        // shorter borrow here is sound.
+        if let Some(stashed) = self.active_ctx.take() {
+            let result = {
+                let as_short: &Ctx<'_> = unsafe {
+                    // Shrink 'static down to the local borrow. Both
+                    // layouts are identical — Ctx has a NonNull +
+                    // PhantomData marker, no actual lifetime data.
+                    core::mem::transmute::<&Ctx<'static>, &Ctx<'_>>(&stashed)
+                };
+                f(as_short)
+            };
+            // Put the Ctx back so the outer scope's cleanup continues
+            // working. We used .take() rather than .get() because
+            // Ctx isn't Copy.
+            self.active_ctx.set(Some(stashed));
+            return result;
+        }
+
+        // Slow path: fresh Context::with, publish the Ctx into the
+        // slot for the duration of the closure, clear on exit
+        // (including panic unwind via the guard).
+        let ctx_owner = self.context()?;
+        let slot = &self.active_ctx;
+        ctx_owner.with(|ctx| {
+            let static_ctx: Ctx<'static> = unsafe {
+                // Launder the 'js lifetime to 'static. Sound because
+                // we clear the slot on every exit path below before
+                // the real 'js scope ends. Same design as
+                // rquickjs::Persistent, just scoped to a single call.
+                core::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone())
+            };
+            slot.set(Some(static_ctx));
+            struct Guard<'a>(&'a std::cell::Cell<Option<Ctx<'static>>>);
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    self.0.set(None);
+                }
+            }
+            let _guard = Guard(slot);
+            f(&ctx)
+        })
     }
 }
 
@@ -627,6 +754,112 @@ impl QjsHandle {
             .ok_or_else(|| QuickJSError::new_err("handle is disposed"))?;
         Ok((context, persistent))
     }
+}
+
+/// Build and install a host function trampoline. Lives as a free
+/// function so Rust can infer the closure lifetime as a single `'js`
+/// threading through the Ctx arg, Rest<Value> args, and Value
+/// return — a bare closure in the register_host_function body
+/// splits those into three independent inferred lifetimes that
+/// don't unify against the `Fn(Ctx<'js>, Rest<Value<'js>>) -> Value<'js>`
+/// bound rquickjs needs.
+fn build_host_trampoline<'js>(
+    ctx: &Ctx<'js>,
+    dispatcher: Py<PyAny>,
+    fn_id: u32,
+    name: &str,
+) -> PyResult<Function<'js>> {
+    let trampoline = move |cx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+        call_host_fn(&cx, &dispatcher, fn_id, args.0)
+    };
+    Function::new(ctx.clone(), trampoline)
+        .map_err(|e| QuickJSError::new_err(format!("Function::new failed: {}", e)))?
+        .with_name(name)
+        .map_err(|e| QuickJSError::new_err(format!("Function::with_name failed: {}", e)))
+}
+
+/// Trampoline invoked by rquickjs when JS calls a registered host
+/// function. Marshals args to Python, calls the dispatcher, marshals
+/// the return value back to JS. On Python exception from the
+/// dispatcher, constructs a JS Error whose name/message come from
+/// the PyErr's type and args tuple (the dispatcher re-raises host-fn
+/// exceptions as _engine.JSError(name="HostError", message, stack)),
+/// throws it, and returns Error::Exception to unwind into JS.
+fn call_host_fn<'js>(
+    ctx: &Ctx<'js>,
+    dispatcher: &Py<PyAny>,
+    fn_id: u32,
+    args: Vec<Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
+    // GIL is already held — we're inside ctx.eval which was called
+    // from Python. Step 5 never releases the GIL during eval; step 9
+    // may reconsider for async. `attach` is cheap when already held.
+    Python::attach(|py| {
+        // Marshal args JS → Python.
+        let py_args: Vec<Py<PyAny>> = match args
+            .iter()
+            .map(|v| js_value_to_py(py, v, 0))
+            .collect::<PyResult<Vec<_>>>()
+        {
+            Ok(v) => v,
+            Err(e) => return Err(throw_host_error(ctx, &e, py)),
+        };
+        let args_tuple = pyo3::types::PyTuple::new(py, &py_args)
+            .map_err(|e| throw_host_error(ctx, &e, py))?;
+
+        // Call the Python dispatcher.
+        let dispatcher = dispatcher.bind(py);
+        let result = match dispatcher.call1((fn_id, args_tuple)) {
+            Ok(r) => r,
+            Err(e) => return Err(throw_host_error(ctx, &e, py)),
+        };
+
+        // Marshal return Python → JS.
+        match py_to_js_value(ctx, &result, 0) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(throw_host_error(ctx, &e, py)),
+        }
+    })
+}
+
+/// Convert a PyErr into a JS exception throw + `Error::Exception`.
+/// If the PyErr is a `_engine.JSError` (which the dispatcher raises
+/// on host-fn exceptions, with HostError's name/message/stack in
+/// args), we thread those values into the JS Error. Otherwise it's
+/// an infra-level Python exception — construct a generic Error with
+/// the PyErr's string representation.
+fn throw_host_error(ctx: &Ctx<'_>, err: &PyErr, py: Python<'_>) -> rquickjs::Error {
+    // Extract (name, message, stack) if this is a JSError. On any
+    // extraction failure, fall back to generic Error(str(err)).
+    let (name, message) = extract_jserror_fields(err, py)
+        .unwrap_or_else(|| ("Error".to_string(), err.to_string()));
+
+    // Build the JS Error object: use Exception::from_message to get
+    // a proper Error with a stack, then set .name to what the
+    // dispatcher asked for.
+    let exc = match rquickjs::Exception::from_message(ctx.clone(), &message) {
+        Ok(e) => e,
+        Err(_) => return rquickjs::Error::Exception,
+    };
+    let _ = exc.as_object().set(PredefinedAtom::Name, name);
+    ctx.throw(exc.into_value())
+}
+
+fn extract_jserror_fields(err: &PyErr, py: Python<'_>) -> Option<(String, String)> {
+    let value = err.value(py);
+    // The JSError class was constructed with (name, message, stack).
+    // Python's JSError.__init__ stores them as attributes, but the
+    // Rust side's _engine.JSError is create_exception! — args live on
+    // .args. The Python-side dispatcher re-raises _engine.JSError
+    // with the (name, message, stack) tuple.
+    let args = value.getattr("args").ok()?;
+    let tup: &Bound<'_, pyo3::types::PyTuple> = args.cast().ok()?;
+    if tup.len() < 2 {
+        return None;
+    }
+    let name: String = tup.get_item(0).ok()?.extract().ok()?;
+    let message: String = tup.get_item(1).ok()?.extract().ok()?;
+    Some((name, message))
 }
 
 fn map_handle_error(err: Error) -> PyErr {

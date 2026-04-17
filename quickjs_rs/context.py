@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import time
+import traceback
+from collections.abc import Callable
 from types import TracebackType
 from typing import Any
 
 import quickjs_rs._engine as _engine
-from quickjs_rs.errors import JSError, MarshalError, QuickJSError
+from quickjs_rs.errors import HostError, JSError, MarshalError, QuickJSError
 from quickjs_rs.globals import Globals
 from quickjs_rs.runtime import Runtime
 
@@ -33,6 +36,19 @@ class Context:
         # lazily so a context created solely for eval() with no
         # globals access doesn't pay for the handle allocation.
         self._globals: Globals | None = None
+
+        # §6.5 host function registry. fn_id -> Python callable.
+        # Monotonically-increasing ints, never reused (cheap and
+        # matches v0.2). The dispatcher looks up fn_id here.
+        self._host_registry: dict[int, Callable[..., Any]] = {}
+        self._next_fn_id: int = 1
+        # §10.2 host-exception side channel: when a host fn raises,
+        # the dispatcher stashes the Python exception here so eval's
+        # HostError catch can thread it via __cause__.
+        self._last_host_exception: BaseException | None = None
+
+        # Wire the Rust-side dispatcher to our Python method.
+        self._engine_ctx.set_host_call_dispatcher(self._dispatch_host_call)
 
     @property
     def globals(self) -> Globals:
@@ -85,6 +101,12 @@ class Context:
         if self._closed:
             raise QuickJSError("context is closed")
 
+        # §10.2: clear the side channel at each sync-eval entry so a
+        # swallowed raise from an earlier eval can't attach itself as
+        # __cause__ on an unrelated later HostError. Preserves the
+        # v0.2 tripwire test_swallowed_host_raise_does_not_leak_cause.
+        self._last_host_exception = None
+
         deadline = time.monotonic() + self._timeout
         self._runtime._deadline = deadline
         try:
@@ -92,14 +114,120 @@ class Context:
                 code, module=module, strict=strict, filename=filename
             )
         except _engine.JSError as e:
-            # Rust-side JSError is a create_exception! class; translate
-            # to the pure-Python quickjs_rs.errors.JSError that users
-            # actually import and catch. Step 6 will route subclass
-            # selection (MemoryLimitError/TimeoutError/InterruptError)
-            # here too.
             name, message, stack = e.args
+            if name == "HostError":
+                # §10.2: promote to HostError and thread __cause__
+                # from the side channel so the original Python
+                # traceback is preserved.
+                cause = self._last_host_exception
+                host_err = HostError(name, message, stack)
+                if cause is not None:
+                    raise host_err from cause
+                raise host_err from None
             raise JSError(name, message, stack) from None
         except _engine.MarshalError as e:
             raise MarshalError(str(e)) from None
         finally:
             self._runtime._deadline = None
+
+    # ---- Host function registration ---------------------------------
+
+    def register(
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        *,
+        is_async: bool | None = None,
+    ) -> Callable[..., Any]:
+        """Register a Python callable as a JS global function under
+        ``name``. Async/sync is auto-detected via
+        ``inspect.iscoroutinefunction`` unless ``is_async`` is passed.
+
+        Returns ``fn`` unchanged so ``@ctx.function``-style use
+        preserves callable identity.
+        """
+        if self._closed:
+            raise QuickJSError("context is closed")
+
+        if is_async is None:
+            is_async = inspect.iscoroutinefunction(fn)
+
+        fn_id = self._next_fn_id
+        self._next_fn_id += 1
+        self._host_registry[fn_id] = fn
+        self._engine_ctx.register_host_function(name, fn_id, is_async)
+        return fn
+
+    def function(
+        self,
+        fn: Callable[..., Any] | None = None,
+        *,
+        name: str | None = None,
+        is_async: bool | None = None,
+    ) -> Any:
+        """Decorator form — registers the decorated function as a JS
+        global. Usable bare::
+
+            @ctx.function
+            def add(a, b): return a + b
+
+        or as a factory::
+
+            @ctx.function(name="jsName")
+            def py_name(x): ...
+
+        The JS name defaults to ``fn.__name__``; override with
+        ``name=``. Async/sync auto-detected via
+        ``inspect.iscoroutinefunction`` unless ``is_async=`` is
+        passed.
+        """
+        if fn is not None:
+            # Bare @ctx.function (no parens).
+            js_name = name if name is not None else getattr(fn, "__name__", None)
+            if not js_name:
+                raise QuickJSError(
+                    "host function has no __name__; use @ctx.function(name=...)"
+                )
+            return self.register(js_name, fn, is_async=is_async)
+
+        # Factory form.
+        def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
+            js_name = name if name is not None else getattr(f, "__name__", None)
+            if not js_name:
+                raise QuickJSError(
+                    "host function has no __name__; use @ctx.function(name=...)"
+                )
+            return self.register(js_name, f, is_async=is_async)
+
+        return decorator
+
+    def _dispatch_host_call(self, fn_id: int, args: tuple[Any, ...]) -> Any:
+        """§6.5 fn_id → callable lookup and call. Invoked from the
+        Rust trampoline with the GIL held.
+
+        On user-fn exception: stash the Python exception on the
+        side channel, re-raise as ``_engine.JSError(("HostError",
+        message, stack))`` so the Rust side throws a JS Error with
+        name="HostError". Context.eval catches the
+        ``_engine.JSError`` and promotes to the pure-Python
+        ``HostError`` with ``__cause__`` threaded from the side
+        channel.
+        """
+        fn = self._host_registry.get(fn_id)
+        if fn is None:
+            raise _engine.JSError(
+                "HostError",
+                f"no host function registered for fn_id={fn_id}",
+                None,
+            )
+        try:
+            return fn(*args)
+        except BaseException as exc:
+            self._last_host_exception = exc
+            # Match v0.2: message is str(exc), not the ExcType: str(exc)
+            # prefix. The Python type is preserved through __cause__ on
+            # the HostError the user actually catches.
+            stack = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+            raise _engine.JSError("HostError", str(exc), stack) from None
