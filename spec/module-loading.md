@@ -68,78 +68,91 @@ from quickjs_rs import ModuleScope
 
 @dataclass(frozen=True)
 class ModuleScope:
-    """A composable, recursive module registry.
+    """A recursive, self-contained module registry.
 
-    A ModuleScope is a dict keyed on name, valued by either a JS
-    source string (a file belonging to this scope) or another
-    ModuleScope (a named dependency of this scope). Dependencies can
-    themselves carry further dependencies; nesting is unbounded.
+    A ModuleScope holds two kinds of entries, keyed by value type:
+
+      * `str` values — the scope's own files. Keys are POSIX-style
+        paths; `/` in a key creates a subdirectory structure within
+        the scope (``"lib/util.js"``, ``"tests/deep/nested.js"``).
+      * `ModuleScope` values — the scope's named dependencies. Keys
+        are bare import specifiers (``"@agent/fs"``, ``"lodash"``)
+        that JS code will use to import the dep.
+
+    The two namespaces don't mix. Relative specifiers (``./X``,
+    ``../X``) match only `str` entries via POSIX path
+    normalization. Bare specifiers match only `ModuleScope` entries.
+    This means a ModuleScope can have an ``"index.js"`` str AND an
+    ``"index.js"`` ModuleScope side-by-side (unusual but legal) —
+    ``./index.js`` finds the str, bare ``"index.js"`` finds the
+    ModuleScope.
 
     Each scope is a closed resolver namespace. Code inside the scope
-    can import only what the scope's dict contains — its own files
-    via ./filename, its named dependencies via bare specifier. A
-    scope cannot see its siblings, its parent, or its transitive
-    dependencies unless they're directly listed in its dict.
+    can reach only what the scope's dict declares. A dependency is
+    not inherited; share it by spreading into each scope that needs
+    it. See §4 for the full resolver semantics.
 
-    To share dependencies, spread them explicitly:
+    Examples:
+        # Multi-file scope with a subdirectory
+        ModuleScope({"my-lib": ModuleScope({
+            "index.js": "export { foo } from './lib/util.js';",
+            "lib/util.js": "export function foo() { return 1; }",
+        })})
 
+        # Scope with a named dependency (bare import)
+        ModuleScope({"my-lib": ModuleScope({
+            "@peer": ModuleScope({"index.js": "export const P = 1;"}),
+            "index.js": 'import { P } from "@peer"; export const x = P;',
+        })})
+
+        # Recursive: @app carries @agent/utils
         stdlib = ModuleScope({
             "@agent/utils": ModuleScope({
                 "index.js": "export function slugify(s) {...}",
             }),
         })
-
         main = ModuleScope({
             **stdlib.modules,
             "@agent/fs": ModuleScope({
-                **stdlib.modules,   # @agent/fs carries its own deps
-                "index.js": '''
-                    import { slugify } from "@agent/utils";
-                    // resolves within @agent/fs's own dict
-                '''
+                **stdlib.modules,   # fs carries its own copy of utils
+                "index.js": 'import { slugify } from "@agent/utils"; ...',
             }),
         })
 
-    Examples:
-        # Single-file module at top level
-        ModuleScope({"my-lib": "export const x = 1;"})
-
-        # Multi-file scope
-        ModuleScope({"my-lib": ModuleScope({
-            "index.js": "export { foo } from './util.js';",
-            "util.js": "export function foo() { return 1; }",
-        })})
-
-        # Scope with a dependency
-        ModuleScope({"my-lib": ModuleScope({
-            "@peer": "export const P = 1;",
-            "index.js": 'import { P } from "@peer"; export const x = P;',
-        })})
+        # Pure-dependency root (only ModuleScope entries, no str).
+        # This is the common shape of what you hand to ctx.install.
+        ModuleScope({
+            "@agent/utils": ModuleScope({"index.js": "..."}),
+            "@agent/fs": ModuleScope({"index.js": "..."}),
+        })
     """
     modules: dict[str, str | ModuleScope]
 ```
 
 **Validation at construction:**
 
-- A ModuleScope that contains at least one `str` value must include an `"index.js"` entry — that's what a bare `import ... from '<scope-name>'` resolves to from the parent scope.
-- Scopes that contain only other `ModuleScope` values (i.e. pure dependency containers, like the top-level `main` above) do not need `index.js`. They aren't themselves importable targets; they're just the outer registry scope.
-- Filename keys for `str` entries must not contain `/` (flat namespace within a scope). Subdirectories aren't representable — introduce a nested scope instead.
-- Top-level keys (and any key at any depth) must not start with `./` or `../` (those are relative import specifiers, not valid as scope names).
-- Nested values of type `ModuleScope` may themselves contain `str` values, further `ModuleScope` values, or a mix. Nesting is recursive without a depth limit.
+- A ModuleScope that contains at least one `str` value must include an `"index.js"` entry — that's what a bare `import "<scope-name>"` resolves to from the parent scope. A scope without an `index.js` can't be imported by name.
+- Scopes that contain only `ModuleScope` values (pure dependency containers) don't need `index.js`. They aren't themselves importable targets — they're registry wrappers. This is how a root scope handed to `ctx.install` typically looks.
+- `str` keys may contain `/` (POSIX-style path within the scope's file tree): `"lib/util.js"`, `"tests/deep/nested.js"`. Path normalization is purely a resolver concern; the dict key stays as-given.
+- Any key, at any depth, must not start with `./` or `../`. Those are relative specifiers used in JS import statements, never valid as dict keys.
+- Nested `ModuleScope` values may themselves contain `str` and/or `ModuleScope` children. Nesting is recursive and unbounded — whatever the dependency graph requires.
 
 ```python
 # Valid — scope with a single file
 ModuleScope({"@agent/fs": ModuleScope({"index.js": "export default 1;"})})
 
-# Valid — single-file module at top level
-ModuleScope({"lodash": "export function get(o, k) { return o[k]; }"})
+# Valid — scope with subdirectory-style paths as str keys
+ModuleScope({"my-lib": ModuleScope({
+    "index.js": "export { foo } from './lib/util.js';",
+    "lib/util.js": "export function foo() { return 1; }",
+    "lib/helpers/str.js": "export function lower(s) { return s.toLowerCase(); }",
+})})
 
-# Valid — recursive nesting: main scope containing a dep scope
-#         which carries its own dep scope
+# Valid — recursive nesting with a dep that itself carries a dep
 ModuleScope({
-    "@agent/utils": "export const U = 1;",
+    "@agent/utils": ModuleScope({"index.js": "export const U = 1;"}),
     "@agent/fs": ModuleScope({
-        "@agent/utils": "export const U = 1;",
+        "@agent/utils": ModuleScope({"index.js": "export const U = 1;"}),
         "@agent/log": ModuleScope({
             "index.js": "export function log(x) { console.log(x); }",
         }),
@@ -151,9 +164,9 @@ ModuleScope({
     }),
 })
 
-# Valid — pure-dependency container (no str values → no index.js
-#         required). This is the typical shape of the "outer"
-#         scope you hand to ctx.install.
+# Valid — pure-dependency container (only ModuleScope values → no
+#         index.js required). Common shape for the root scope
+#         passed to ctx.install.
 ModuleScope({
     "@agent/utils": ModuleScope({"index.js": "export const U = 1;"}),
     "@agent/fs": ModuleScope({"index.js": "export const F = 2;"}),
@@ -162,14 +175,14 @@ ModuleScope({
 # Invalid — scope has str entries but no index.js
 ModuleScope({"@agent/fs": ModuleScope({"helpers.js": "..."})})  # ValueError
 
-# Invalid — subdirectory in a str-keyed entry
-ModuleScope({"a": ModuleScope({"index.js": "...", "lib/x.js": "..."})})  # ValueError
-
-# Invalid — relative specifier as a key
+# Invalid — key starts with ./
 ModuleScope({"./local": "..."})  # ValueError
+
+# Invalid — value is neither str nor ModuleScope
+ModuleScope({"@agent/fs": 42})  # TypeError
 ```
 
-The old "two levels max" rule from earlier drafts is gone. A scope can nest as deeply as the dependency graph requires. The only structural cap is recursion depth in the Python interpreter (ModuleScope validation is naturally bounded by whatever `sys.getrecursionlimit()` permits, which is thousands).
+A single-file module (`ModuleScope({"lodash": "export const x = 1;"})`) from earlier drafts no longer parses. `lodash` as a str at root would be a file — but the root scope has no `index.js` sibling, so validation fails. Wrap the source in a ModuleScope (`ModuleScope({"lodash": ModuleScope({"index.js": "export const x = 1;"})})`) to declare a single-file dep. The tradeoff keeps the two-namespaces rule clean — str is always a file, ModuleScope is always a dep.
 
 ### 3.2 Context.install
 
@@ -265,22 +278,64 @@ No special methods for composition. It's a frozen dict — use dict operations.
 
 ## 4. Resolver semantics
 
-One rule. No path normalization, no filesystem simulation, no parent traversal, no sibling visibility, no top-level fallback. Each scope resolves only within its own dict.
+Each scope is a closed resolver namespace with two distinct sub-namespaces:
+
+1. **Files** — `str` entries. Addressed by relative specifiers (`./`, `../`). Keys are POSIX-style paths; resolution uses `posixpath.normpath` against the referrer's directory within the scope. Paths that normalize past the scope root are errors.
+2. **Dependencies** — `ModuleScope` entries. Addressed by bare specifiers. No path traversal — match the key exactly.
+
+Relative specifiers never match a dependency. Bare specifiers never match a file. The value type of the dict entry is the namespace gate.
 
 ### The rule
 
-Every module has a containing scope. For a scope file `"scope/subscope/.../filename.js"`, the containing scope is `"scope/subscope/..."`. For the top-level eval (`"<eval>"`), the containing scope is the root scope installed via `ctx.install`.
+Given `import "X" from referrer "Y"`:
 
-When code in a referrer imports a specifier:
+1. Identify the scope `S` that contains `Y`. For a file `"path/to/foo.js"` within scope `Sname`, the containing scope is `Sname` and the referrer's position within it is `path/to/foo.js`. For `"<eval>"`, the containing scope is the root scope installed via `ctx.install` and the position is the root (empty path).
+2. If `X` starts with `./` or `../`:
+   - Compute `normalized = posixpath.normpath(posixpath.dirname(position_in_S) + "/" + X)`.
+   - If `normalized` starts with `"../"` or equals `".."` → **error**: the specifier escapes scope `S`.
+   - Otherwise look up `normalized` as a `str` key in `S`'s dict.
+     - Found → canonical name is `"{canonical_scope_path}/{normalized}"`.
+     - Not found, or found as `ModuleScope` → **error**: module not found.
+3. If `X` is bare (no leading `./` or `../`):
+   - Look up `X` as a `ModuleScope` key in `S`'s dict.
+     - Found → canonical name is `"{canonical_scope_path}/{X}/index.js"` (X's entry point).
+     - Not found, or found as `str` → **error**: module not found.
 
-1. Identify the referrer's containing scope.
-2. If specifier starts with `./`, strip it and look up the remainder as a `str` key in that scope's dict. Found → canonical name is `"{containing_scope}/{filename}"`. Not found → resolution error.
-3. If specifier is bare (no `./`), look up the whole specifier as a `ModuleScope` key in that scope's dict. Found → canonical name is `"{containing_scope}/{specifier}/index.js"` (the scope's entry point). Not found → resolution error.
-4. If specifier starts with `../`, that's always an error. Scopes are closed; there is no parent.
+`canonical_scope_path` is the joined scope names from root down to `S` (the root's canonical path is empty). So a file at `lib/util.js` inside `@app/service` inside the root has canonical name `"@app/service/lib/util.js"`.
 
-No fallback to the root scope from inside a nested scope. If code in `@agent/fs/index.js` imports `"@agent/utils"`, the resolver looks up `"@agent/utils"` in `@agent/fs`'s own dict. If `@agent/fs` doesn't carry `@agent/utils` as a dependency, the import fails — even if the outer scope does carry it. This is the self-containment property: a scope's dependency surface is exactly what its dict declares.
+### Example: POSIX traversal within a scope
 
-To share a dependency across multiple scopes, spread it into each scope's dict:
+```python
+app = ModuleScope({
+    "@agent/utils": ModuleScope({"index.js": "export const U = 1;"}),
+    "index.js": "export const foo = 'bar';",
+    "lib/helpers.js": "export function help() { return 'helping'; }",
+    "lib/utils/strings.js": "export function lower(s) { return s.toLowerCase(); }",
+    "lib/index.js": """
+        import { lower } from "./utils/strings.js";   // → "lib/utils/strings.js"
+        import { help } from "./helpers.js";           // → "lib/helpers.js"
+        import { foo } from "../index.js";             // → "index.js"
+        export { lower, help, foo };
+    """,
+    "tests/test_lib.js": """
+        import { lower } from "../lib/utils/strings.js";  // → "lib/utils/strings.js"
+        import { foo } from "../index.js";                 // → "index.js"
+        import { slugify } from "@agent/utils";            // bare → ModuleScope entry
+    """,
+    "tests/deep/nested.js": """
+        import { foo } from "../../index.js";              // → "index.js"
+        import { x } from "../../../escape.js";            // ERROR — past scope root
+    """,
+})
+```
+
+All paths are resolved by `posixpath.normpath`. The scope root is the ceiling; any normalized path starting with `../` is an escape attempt and rejects.
+
+### Self-containment
+
+The resolver only consults `S`'s own dict. No fallback to outer scopes, no inheritance from parents, no sibling visibility. Code in `@agent/fs/index.js` that imports `"@agent/utils"` looks up `"@agent/utils"` in `@agent/fs`'s dict — not in the root, not in any ancestor. If `@agent/fs` doesn't carry `@agent/utils`, the import fails even if the outer scope does carry it.
+
+To share a dependency across scopes, spread it into each scope that needs it:
 
 ```python
 utils = {"@agent/utils": ModuleScope({"index.js": "export const U = 1;"})}
@@ -288,42 +343,41 @@ utils = {"@agent/utils": ModuleScope({"index.js": "export const U = 1;"})}
 main = ModuleScope({
     **utils,
     "@agent/fs": ModuleScope({
-        **utils,           # @agent/fs's own import of @agent/utils
+        **utils,
         "index.js": "import { U } from '@agent/utils'; ...",
     }),
     "@agent/http": ModuleScope({
-        **utils,           # independent reference to the same source
+        **utils,
         "index.js": "import { U } from '@agent/utils'; ...",
     }),
 })
 ```
 
-The same source is registered under multiple canonical names — `"@agent/utils/index.js"` (outer) and `"@agent/fs/@agent/utils/index.js"` (inner) and `"@agent/http/@agent/utils/index.js"` (inner). QuickJS caches each canonical-named module independently; the instances don't collide because the cache key is the canonical path.
+The same source gets registered under multiple canonical paths — `"@agent/utils/index.js"`, `"@agent/fs/@agent/utils/index.js"`, `"@agent/http/@agent/utils/index.js"`. QuickJS caches each canonical path independently; the three instances don't collide because the cache key is the canonical path, not the source.
 
 ### Resolution flowchart
 
 ```
-import "X" from "Y":
+import "X" from "Y" where Y lives at position P within scope S:
 
-  Y's containing scope = S (the scope whose dict directly holds Y).
-  For Y == "<eval>", S is the root scope.
-
-  Is X relative (starts with "./")?
-  ├── Yes
-  │   ├── Strip "./", look up remainder in S's dict
-  │   │   ├── Found as str → canonical: "S/X-without-./"
-  │   │   └── Not found, or found as ModuleScope → Error: module not found
-  │   └── Starts with "../" → Error: cannot escape module scope
+  Does X start with "./" or "../"?
+  ├── Yes — relative specifier: file lookup with POSIX normalization
+  │   ├── normalized = posixpath.normpath(dirname(P) + "/" + X)
+  │   │   ├── normalized starts with "../" → Error: escape past scope root
+  │   │   └── else:
+  │   │       └── Look up normalized in S's str entries
+  │   │           ├── Found → canonical: "{S-canonical-path}/{normalized}"
+  │   │           └── Not found → Error: module not found
+  │   └── (normalized never matches a ModuleScope entry — files only)
   │
-  └── No (bare specifier)
-      └── Look up X in S's dict
-          ├── Found as ModuleScope → canonical: "S/X/index.js"
-          ├── Found as str → Error: bare specifier resolved to a file,
-          │                  not a scope (use ./X to import a file)
+  └── No — bare specifier: dependency lookup, exact match
+      └── Look up X in S's ModuleScope entries
+          ├── Found → canonical: "{S-canonical-path}/{X}/index.js"
           └── Not found → Error: module not found
+      (X never matches a str entry — deps only)
 ```
 
-`"<eval>"` is the referrer for code passed to `ctx.eval_async(module=True)`. Its containing scope is the root scope installed via `ctx.install`, so top-level eval can import anything the root scope declares. If the root scope is a pure-dependency container (`ModuleScope({...scopes only...})`), relative (`./`) imports from the eval body fail — the root has no `str` entries.
+`"<eval>"` is the referrer for code passed to `ctx.eval_async(module=True)`. Its containing scope is the root scope installed via `ctx.install`; its position within that scope is the empty string (the root directory). So `./foo.js` from eval normalizes to `foo.js` and looks for a root-level str entry; `@agent/fs` from eval looks for a root-level ModuleScope entry; `../anything` fails (escape past root).
 
 ## 5. Rust extension additions
 
@@ -345,107 +399,107 @@ rquickjs = { version = "0.11", features = [
 
 The backing store holds a flattened view of the scope tree. At install time, Python walks the `ModuleScope` recursively and inserts:
 
-* Each `str` entry (source file) under a canonical path that concatenates the scope-path segments plus the filename: `"scope1/scope2/.../filename.js"`.
-* Each `ModuleScope` entry as a scope entry whose key is the scope-path: `"scope1/scope2/..."`. Scope entries also store the set of child keys (direct members of the scope's dict) so the resolver can answer "does this scope contain X?" without rescanning.
+* Each `str` entry under a canonical path that concatenates the containing scope's canonical path plus the entry's key (which may itself contain `/` if the user used a POSIX path): `"scope1/scope2/.../lib/util.js"`.
+* Each `ModuleScope` entry as a scope record whose canonical path is the joined scope-path. Scope records also store, for each direct dict key, its kind (`File` or `Scope`) and — for `File` entries — the full POSIX path (so the resolver can do `normpath` against `str` entries only).
 
-The root scope (the one passed to `ctx.install`) has the empty scope-path. A file at the root shows up as `"filename.js"` (root-scope path `""` + `"/"` elided + filename). A file inside `@agent/fs` shows up as `"@agent/fs/filename.js"`. A file inside `@agent/fs/@peer/lib` shows up as `"@agent/fs/@peer/lib/filename.js"`.
+The root scope (the one passed to `ctx.install`) has the empty canonical path `""`. A file `"lib/util.js"` inside `@agent/fs` shows up as `"@agent/fs/lib/util.js"`. A file inside `@agent/fs/@peer` shows up as `"@agent/fs/@peer/index.js"`.
 
 ```rust
 /// Tree registry populated from Python's ModuleScope at install time.
-/// The tree is flattened into two HashMaps keyed on canonical scope
-/// paths (joined with '/'); the root scope has the empty path "".
+/// Flattened into HashMaps keyed on canonical paths (joined with '/');
+/// the root scope has the empty path "".
 struct FlatModuleStore {
     /// canonical_file_path → JS source.
-    ///   Example keys:
-    ///     "lodash"                            (str at root)
+    ///   Example keys (note: str entry keys can contain '/'):
     ///     "@agent/fs/index.js"                (file in root-level scope)
-    ///     "@agent/fs/@peer/lib/index.js"      (file in nested-dep scope)
+    ///     "@agent/fs/lib/util.js"             ("lib/util.js" str entry)
+    ///     "@agent/fs/@peer/index.js"          (file in nested-dep scope)
     sources: HashMap<String, String>,
 
-    /// canonical_scope_path → set of the scope's direct dict keys
-    /// (both str-valued and ModuleScope-valued children). Used by
-    /// the resolver to check "does S have key K?" and to
-    /// disambiguate bare-X resolves (scope child → X/index.js) from
-    /// ./X resolves (str child → scope/X).
-    ///   Example entries:
-    ///     ""                     → {"lodash", "@agent/fs", ...}
-    ///     "@agent/fs"            → {"@peer", "index.js", "util.js"}
-    ///     "@agent/fs/@peer/lib"  → {"index.js"}
-    scopes: HashMap<String, HashSet<String>>,
-
-    /// canonical_scope_path → kind of each child key. Values: "str"
-    /// for file children, "scope" for ModuleScope children. The
-    /// resolver needs this to distinguish a bare-X that resolves
-    /// to scope-X/index.js from a bare-X that's a file (an error).
-    scope_child_kinds: HashMap<String, HashMap<String, ChildKind>>,
+    /// canonical_scope_path → per-scope record describing the scope's
+    /// direct dict entries. The resolver needs two views of each
+    /// scope's contents:
+    ///   * `files`: the set of str-entry keys (POSIX paths). A ./X
+    ///     or ../X import normpaths against this set.
+    ///   * `scopes`: the set of ModuleScope-entry keys. A bare X
+    ///     import matches against this set only.
+    scopes: HashMap<String, ScopeRecord>,
 }
 
-enum ChildKind { File, Scope }
+struct ScopeRecord {
+    files: HashSet<String>,   // str-entry keys (may contain '/')
+    scopes: HashSet<String>,  // ModuleScope-entry keys (bare specifiers)
+}
 
 impl Resolver for FlatModuleStore {
     /// `base` is the referrer's canonical path (a file path like
-    /// "@agent/fs/index.js" or "<eval>" for top-level eval).
+    /// "@agent/fs/lib/util.js" or "<eval>" for top-level eval).
     /// `name` is the import specifier as written in the source.
     fn resolve<'js>(&mut self, _ctx: &Ctx<'js>, base: &str, name: &str) -> Result<String> {
-        if name.starts_with("../") {
-            return Err(Error::new_resolving_message(
-                base, name, "cannot use ../ to escape module scope",
-            ));
-        }
+        // Identify the referrer's containing scope and its position
+        // (path within that scope). Position is used as the
+        // dirname-anchor for relative-specifier normalization.
+        //
+        // For "<eval>": containing scope = root (""), position = "".
+        // For a file canonical path "A/B/path/to/foo.js" where "A/B"
+        // is the containing scope's path: position = "path/to/foo.js".
+        //
+        // The install machinery stored, for each file in `sources`,
+        // both its containing-scope canonical path and its within-
+        // scope position, so we can look them up directly rather
+        // than guessing a split (scope paths AND str keys both may
+        // contain '/', so rsplit_once('/') is ambiguous).
+        let (containing_scope, position_in_scope) = self.locate_referrer(base)?;
 
-        // Identify the referrer's containing scope. For a file path
-        // "A/B/C/filename.js" the containing scope path is
-        // "A/B/C". For "<eval>" the containing scope is the root
-        // (empty path "").
-        let containing_scope: String = if base == "<eval>" {
-            String::new()
-        } else {
-            match base.rsplit_once('/') {
-                Some((parent, _file)) => parent.to_string(),
-                None => String::new(),  // file at root
-            }
-        };
-
-        let scope_children = self.scope_child_kinds
+        let scope_rec = self.scopes
             .get(&containing_scope)
             .ok_or_else(|| Error::new_resolving(base, name))?;
 
-        if let Some(relative) = name.strip_prefix("./") {
-            // Relative import — the key must be a str-valued child
-            // of the containing scope.
-            match scope_children.get(relative) {
-                Some(ChildKind::File) => {
-                    let canonical = join_path(&containing_scope, relative);
-                    Ok(canonical)
-                }
-                _ => Err(Error::new_resolving(base, name)),
+        if name.starts_with("./") || name.starts_with("../") {
+            // Relative specifier: POSIX normpath against the str
+            // entries of the containing scope. The scope root is
+            // the ceiling.
+            let dir = posix_dirname(&position_in_scope);   // "" for eval, "lib" for "lib/foo.js"
+            let normalized = posix_normpath(&format!("{}/{}", dir, name));
+            if normalized.starts_with("../") || normalized == ".." {
+                return Err(Error::new_resolving_message(
+                    base, name, "relative import escapes module scope root",
+                ));
+            }
+            if scope_rec.files.contains(&normalized) {
+                Ok(join_path(&containing_scope, &normalized))
+            } else {
+                // Not in files. If it happens to match a ModuleScope
+                // key, that's still an error — relative specifiers
+                // never reach the ModuleScope namespace.
+                Err(Error::new_resolving(base, name))
             }
         } else {
-            // Bare import — the key must be a ModuleScope child of
-            // the containing scope. Resolves to that scope's
-            // index.js.
-            match scope_children.get(name) {
-                Some(ChildKind::Scope) => {
-                    let scope_path = join_path(&containing_scope, name);
-                    Ok(format!("{}/index.js", scope_path))
-                }
-                Some(ChildKind::File) => Err(Error::new_resolving_message(
-                    base, name,
-                    "bare specifier resolved to a file; use ./X to import a file",
-                )),
-                None => Err(Error::new_resolving(base, name)),
+            // Bare specifier: exact match against ModuleScope
+            // entries only. Never matches a str entry.
+            if scope_rec.scopes.contains(name) {
+                let dep_scope = join_path(&containing_scope, name);
+                Ok(format!("{}/index.js", dep_scope))
+            } else {
+                Err(Error::new_resolving(base, name))
             }
         }
     }
 }
 
 /// `join_path("", "x") == "x"`, `join_path("a/b", "c") == "a/b/c"`.
-/// The root-scope special case keeps files at root (which have no
-/// leading slash in their canonical names) consistent with the
-/// containing-scope convention.
 fn join_path(scope: &str, child: &str) -> String {
     if scope.is_empty() { child.to_string() } else { format!("{}/{}", scope, child) }
 }
+
+/// Python-equivalent posixpath.normpath, restricted to the forms
+/// we actually encounter (forward slashes, no leading slash on
+/// within-scope paths). Collapses `./`, resolves `..`, preserves
+/// leading `..` overflows (so the resolver can detect escape).
+fn posix_normpath(p: &str) -> String { /* ... */ }
+
+/// posixpath.dirname — "lib/foo.js" → "lib", "foo.js" → "", "" → "".
+fn posix_dirname(p: &str) -> &str { /* ... */ }
 
 impl Loader for FlatModuleStore {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> Result<Module<'js>> {
@@ -457,18 +511,27 @@ impl Loader for FlatModuleStore {
 }
 ```
 
-The backing store construction (from `Context.install`) walks the `ModuleScope` recursively:
+The backing store construction (from `Context.install`) walks the `ModuleScope` recursively. At each scope, Python declares the scope's direct entries with their kinds; for each `str` entry it then calls `add_source` with the canonical path (joined scope path + the str key as-given, which may contain `/`):
 
 ```python
 def _install_scope(self, scope: ModuleScope, scope_path: str) -> None:
-    # Register scope membership.
-    self._engine_ctx.declare_scope(scope_path, list(scope.modules.keys()),
-                                   [kind(v) for v in scope.modules.values()])
-    # Recurse into children.
-    for name, value in scope.modules.items():
-        child_path = join_path(scope_path, name)
+    # Declare the scope's membership. Two lists, one per kind, so the
+    # Rust side can populate ScopeRecord.files vs ScopeRecord.scopes
+    # without re-inspecting values.
+    file_keys = [k for k, v in scope.modules.items() if isinstance(v, str)]
+    dep_keys  = [k for k, v in scope.modules.items() if isinstance(v, ModuleScope)]
+    self._runtime._engine_rt.declare_scope(scope_path, file_keys, dep_keys)
+
+    # Register each str entry's source at its canonical path. The
+    # key may contain '/', which becomes part of the canonical path
+    # (e.g. "lib/util.js" inside "@agent/fs" → "@agent/fs/lib/util.js").
+    for key, value in scope.modules.items():
+        child_path = key if scope_path == "" else f"{scope_path}/{key}"
         if isinstance(value, str):
-            self._engine_ctx.add_source(child_path, value)
+            self._runtime._engine_rt.add_source(
+                child_path, value,
+                containing_scope=scope_path, position_in_scope=key,
+            )
         else:  # ModuleScope
             self._install_scope(value, child_path)
 
@@ -476,7 +539,7 @@ def install(self, scope: ModuleScope) -> None:
     self._install_scope(scope, "")   # root scope has empty path
 ```
 
-This produces three flat maps keyed on canonical paths — the same tree information, rewritten in a form the resolver can query in O(1).
+`add_source` takes the canonical path plus the (containing_scope, position_in_scope) pair so the resolver can do `locate_referrer(base)` in O(1) — scope paths AND str keys both may contain `/`, so a plain rsplit of the canonical path is ambiguous.
 
 ### 5.3 New QjsRuntime / QjsContext methods
 
@@ -485,23 +548,32 @@ The backing `FlatModuleStore` lives on the runtime (§11 open-decision 4 — `se
 ```rust
 #[pymethods]
 impl QjsRuntime {
-    /// Register a file at `canonical_path`. For root-level files
-    /// this is just the filename; for nested-scope files this is
-    /// the joined scope-path plus filename (e.g.
-    /// "@agent/fs/@peer/lib/index.js"). Called by Python's
-    /// `Context.install` recursion for each str-valued entry.
-    fn add_source(&self, canonical_path: &str, source: &str) -> PyResult<()>;
+    /// Register a file at `canonical_path`. `canonical_path` is the
+    /// joined containing scope path + the str-entry key as-given
+    /// (which may contain '/', e.g. "@agent/fs/lib/util.js" for a
+    /// "lib/util.js" str key inside "@agent/fs"). `containing_scope`
+    /// is the canonical path of the scope that directly holds this
+    /// entry; `position_in_scope` is the str key itself. The pair
+    /// is stored so the resolver can locate a referrer by canonical
+    /// path without trying to split a path that contains '/' in
+    /// both the scope portion and the key portion.
+    fn add_source(
+        &self,
+        canonical_path: &str,
+        source: &str,
+        containing_scope: &str,
+        position_in_scope: &str,
+    ) -> PyResult<()>;
 
-    /// Declare a scope's direct dict keys + kinds. Called for each
-    /// ModuleScope (including the root) at install time. `kinds`
-    /// is a list of "file" or "scope" strings aligned with `keys`.
-    /// Used by the resolver to distinguish bare-X → scope/index.js
-    /// from bare-X → error when X is a file.
+    /// Declare a scope's direct entries, separated by kind. `files`
+    /// are the str-entry keys (may contain '/'); `scopes` are the
+    /// ModuleScope-entry keys (bare specifiers). Called for each
+    /// ModuleScope (including the root) at install time.
     fn declare_scope(
         &self,
         scope_path: &str,
-        keys: Vec<String>,
-        kinds: Vec<String>,
+        files: Vec<String>,
+        scopes: Vec<String>,
     ) -> PyResult<()>;
 }
 
@@ -514,30 +586,7 @@ impl QjsContext {
 }
 ```
 
-The Python `Context.install()` walks the scope tree recursively:
-
-```python
-def install(self, scope: ModuleScope) -> None:
-    self._install_scope(scope, "")  # "" == root scope path
-
-def _install_scope(self, scope: ModuleScope, scope_path: str) -> None:
-    # Declare the scope's membership up front so the resolver can
-    # answer "does S contain X?" before any source is loaded.
-    keys = list(scope.modules.keys())
-    kinds = [
-        "scope" if isinstance(v, ModuleScope) else "file"
-        for v in scope.modules.values()
-    ]
-    self._runtime._engine_rt.declare_scope(scope_path, keys, kinds)
-
-    # Recurse into each child.
-    for name, value in scope.modules.items():
-        child_path = name if scope_path == "" else f"{scope_path}/{name}"
-        if isinstance(value, str):
-            self._runtime._engine_rt.add_source(child_path, value)
-        else:  # ModuleScope
-            self._install_scope(value, child_path)
-```
+See §5.2 for the Python `Context.install()` recursion that drives these two methods.
 
 Additive: each call inserts into the backing `FlatModuleStore`. No guard, no flag, no error on repeated calls. Re-inserting a name that hasn't been imported yet overwrites the previous source. Re-inserting a name that has been imported is a no-op (QuickJS module cache takes precedence). A second `install` with a different root ModuleScope also merges into the same store — users who want isolated module sets should use separate runtimes.
 
@@ -586,8 +635,10 @@ async def eval_async(self, code, *, module=False, **kw):
 Python: ctx.install(scope)
   → recurse the scope tree, calling declare_scope at each scope
     and add_source at each str entry
-  → Rust: FlatModuleStore.sources + .scopes + .scope_child_kinds
-    get populated with canonical-path keys
+  → Rust: FlatModuleStore.sources and .scopes get populated with
+    canonical-path keys. Each ScopeRecord tracks two sets —
+    {files} and {scopes} — so the resolver can route relative
+    vs bare specifiers to the correct sub-namespace.
 
 Python: ctx.eval_async("import { readFile } from '@agent/fs'; ...", module=True)
   → Rust: Module::declare(ctx, "<eval>", code)
@@ -657,8 +708,9 @@ No new exception classes. Module errors surface through existing types:
 |---|---|
 | Syntax error in module source | `JSError(name="SyntaxError", ...)` |
 | Module not found | `JSError(name="Error", message="Could not load module '...'")` |
-| Attempting `../` escape | `JSError(name="Error", message="cannot use ../ to escape module scope")` |
-| Relative import from top-level eval | `JSError(name="Error", message="relative imports require a module scope context")` |
+| Relative specifier normalizes past scope root | `JSError(name="Error", message="relative import escapes module scope root")` |
+| Relative specifier points at a ModuleScope entry (wrong namespace) | `JSError(name="Error", message="Could not load module '...'")` |
+| Bare specifier points at a str entry (wrong namespace) | `JSError(name="Error", message="Could not load module '...'")` |
 | Module evaluation throws | `JSError` (or `TimeoutError`, `MemoryLimitError` — same classification as eval) |
 | Circular import | Not an error — ES modules handle cycles via live bindings |
 | Re-install after import | Not an error — silently ignored (QuickJS module cache takes precedence) |
@@ -670,19 +722,28 @@ No new exception classes. Module errors surface through existing types:
 `tests/test_modules.py`:
 
 **Registration and basic import:**
-- Single-file module: register string, import constant.
+- Single-file module wrapped in a ModuleScope: `ModuleScope({"@agent/config": ModuleScope({"index.js": "..."})})`, import a constant via bare specifier.
 - Multi-file scope: register scope, import from index.js.
 - Internal imports: index.js imports ./helpers.js within scope.
 - Transitive internal imports: a.js → ./b.js → ./c.js within scope.
 - Pure-dependency root: root ModuleScope contains only nested scopes (no str entries, no index.js at root); eval imports one of the scopes via bare specifier.
 
 **Resolver — scope-local lookup (§4):**
-- Bare specifier resolves only within the containing scope's dict — not in the outer scope, not in a sibling. A scope that imports a dependency must carry it in its own dict.
-- `./X` in scope A resolves to A's own `X.js`; not to B's, even if B has an `X.js`.
-- `./X` from top-level eval: works when the root scope has `X.js` as a `str` entry; errors when the root is a pure-dependency container (no file at root called `X.js`).
-- `../` always errors.
-- A bare specifier that resolves to a `str` (a file) errors with a message nudging toward `./X`. Bare specifiers must name a scope.
+- Bare specifier resolves only within the containing scope's ModuleScope entries — not in the outer scope, not in a sibling. A scope that imports a dependency must carry it in its own dict.
+- `./X` in scope A resolves to A's own `X.js` (a str entry); not to B's, even if B has an `X.js`.
+- `./X` from top-level eval: works when the root scope has `X.js` as a str entry; errors when the root is a pure-dependency container (no file at root called `X.js`).
+- Bare specifier matches ONLY ModuleScope entries. A bare specifier whose name happens to equal a str-entry key in the containing scope still errors (wrong namespace).
+- Relative specifier matches ONLY str entries. `./name` where `name` is a ModuleScope-entry key still errors (wrong namespace).
+- Two-namespace coexistence: a scope may legally have `"index.js"` as a str AND `"index.js"` as a ModuleScope (same key, different value types); `./index.js` finds the str, bare `index.js` finds the ModuleScope.
 - A scope that uses a bare specifier for a dep it doesn't carry: import errors at eval time, even if an outer/parent/sibling scope does carry that dep.
+
+**POSIX paths within scopes (§3.1 / §4):**
+- Subdirectory str keys: `"lib/util.js"`, `"lib/helpers/str.js"` — index.js imports `"./lib/util.js"` → resolves to the `"lib/util.js"` str entry.
+- `..` traversal within a scope: `"lib/index.js"` imports `"../index.js"` → normalizes to `"index.js"` at scope root → works.
+- Normalization collapses `./` and `..`: `"./lib/../index.js"` → `"index.js"`; `"lib/./util.js"` → `"lib/util.js"`.
+- `..` that escapes the scope root is an error: `"lib/foo.js"` imports `"../../escape.js"` → normalized starts with `"../"` → ResolveError.
+- From top-level eval (position is scope root), `"../anything"` is always escape-past-root.
+- Relative imports from a file deep in the scope normalize against the file's directory, not against the scope root.
 
 **Recursive dependencies (new, §3.1 / §4):**
 - Scope A carries scope B. A's index.js imports B via bare specifier → works.
@@ -718,10 +779,11 @@ No new exception classes. Module errors surface through existing types:
 - Import non-registered module → JSError.
 - Import carried-by-ancestor-but-not-self dep from inside a scope → JSError (self-containment).
 - Syntax error in module source → JSError.
-- `../` escape attempt → JSError.
-- Bare specifier resolving to a file → JSError with "use ./X" message.
-- Scope with str entries missing index.js → ValueError at ModuleScope construction.
-- `/` in a str-keyed filename → ValueError at construction.
+- `../` that normalizes past scope root → JSError.
+- `./X` specifier where `X` is a ModuleScope key (wrong namespace — relatives are files only) → JSError.
+- Bare specifier `X` where `X` is a str key (wrong namespace — bares are deps only) → JSError.
+- Scope with str entries missing `index.js` → ValueError at ModuleScope construction.
+- Key starts with `./` or `../` → ValueError at construction (reserved for import specifiers).
 
 **Module caching:**
 - Import module, re-register source, import again → gets cached version.

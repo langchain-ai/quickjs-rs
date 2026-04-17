@@ -76,12 +76,13 @@ From §7.4 (async — unchanged from predecessor):
 
 From `spec/module-loading.md` §3.1 + §4 (module scopes + resolver — v0.4):
 - Scopes are recursive. A ModuleScope can contain `str` values (files) and/or other ModuleScope values (dependencies) at any depth. No two-level cap; the dependency graph shape is whatever the user hands us.
+- Two namespaces within a scope, distinguished by value type: `str` entries are files (addressed by relative specifiers, `./X` / `../X`); `ModuleScope` entries are named dependencies (addressed by bare specifiers). The namespaces don't cross.
 - A scope with any `str` entries must have `index.js` — that's what a bare `import "scope-name"` resolves to. A pure-dependency container (only ModuleScope values) doesn't need an index.js.
-- `str`-keyed entries cannot contain `/` in the key (flat namespace within a scope; subdirectories are represented as nested scopes). Enforced at ModuleScope construction with `ValueError`.
-- Top-level / any-level keys cannot start with `./` or `../` — those are import specifiers, not valid as scope or file names.
-- Resolver rule is scope-local. Identify the referrer's containing scope. `./X` → look up `"X"` as a `str` child of that scope. Bare `X` → look up `"X"` as a ModuleScope child of that scope. No parent traversal, no sibling visibility, no root fallback.
+- `str`-keyed entries MAY contain `/` in the key — they're POSIX-style paths within the scope's file tree (`"lib/util.js"`, `"tests/deep/nested.js"`). No validation on path shape; `posixpath.normpath` runs against this set at resolve time.
+- Any key, any depth, must not start with `./` or `../` — those are import specifiers, not valid as dict keys.
+- Resolver rule is scope-local. Identify the referrer's containing scope and its position within that scope. `./X` or `../X` → `posixpath.normpath(dirname(position) + "/" + X)`, then look up that path in the scope's `str` entries; if the normalized path starts with `../` it's escape-past-root → error. Bare `X` → look up `X` in the scope's `ModuleScope` entries only (never reaches str). No parent traversal, no sibling visibility, no root fallback.
 - A scope that uses a dependency must declare it in its own dict. Shared deps are expressed by spreading (`**base.modules`) into each scope that needs them — each spread creates an independent canonical path, which QuickJS caches independently.
-- `../` is always an error. Bare specifier that resolves to a `str` (a file) is an error (tell the user to use `./X`).
+- Relative specifiers never match a ModuleScope entry; bare specifiers never match a str entry — wrong-namespace is always an error, even if the key name matches.
 - `Context.install()` is additive. Multiple calls insert into the same backing store; no flag, no guard, no "already installed" error. Re-inserting a name that hasn't been imported yet overwrites the source.
 - QuickJS caches modules per canonical path per context. Re-installing a name that has been imported is a silent no-op — the cached record wins. Document this as a caveat; don't try to defeat it.
 - The backing store is per-runtime, not per-context. rquickjs's `set_loader` operates at the runtime level; all contexts on the same runtime see the same module set.
