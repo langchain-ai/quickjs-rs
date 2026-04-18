@@ -12,7 +12,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from quickjs_rs import ModuleScope, Runtime
+from quickjs_rs import JSError, ModuleScope, Runtime
 
 # ---- Valid construction ---------------------------------------------
 
@@ -576,3 +576,692 @@ async def test_install_posix_subdirectory_and_parent_traversal() -> None:
             # Expected: "root!" — lib/greet.js walked up to
             # ../index.js successfully.
             assert ctx.eval("r3") == "root!"
+
+
+# ---- Scope isolation — §4 / §9.1 -----------------------------------
+
+
+async def test_same_filename_in_sibling_scopes_resolves_independently() -> None:
+    """§4: ``./helpers.js`` in scope A and ``./helpers.js`` in scope
+    B are different files. Resolution is scope-local, keyed on
+    (containing scope, relative path). If this failed, QuickJS
+    would cache one entry and both imports would see the same
+    source."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@a": ModuleScope(
+                            {
+                                "index.js": (
+                                    'import { v } from "./helpers.js";'
+                                    " export const A = v;"
+                                ),
+                                "helpers.js": "export const v = 'from-a';",
+                            }
+                        ),
+                        "@b": ModuleScope(
+                            {
+                                "index.js": (
+                                    'import { v } from "./helpers.js";'
+                                    " export const B = v;"
+                                ),
+                                "helpers.js": "export const v = 'from-b';",
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { A } from "@a";
+                import { B } from "@b";
+                globalThis.a = A;
+                globalThis.b = B;
+                """,
+                module=True,
+            )
+            assert ctx.eval("a") == "from-a"
+            assert ctx.eval("b") == "from-b"
+
+
+async def test_relative_import_from_top_level_eval_resolves_in_root_scope() -> None:
+    """§4: ``<eval>``'s containing scope is the root, position is
+    the scope root. ``./foo.js`` normalizes to ``foo.js``. If the
+    root has that str entry, it resolves; if not, JSError.
+
+    Root scope with str entries must have index.js per §3.1 —
+    so this exercises a root with index.js (unused here, just
+    satisfies validation) plus a sibling file we import."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "index.js": "export const ENTRY = true;",
+                        "local.js": "export const local = 'yes';",
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { local } from "./local.js";
+                globalThis.r = local;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "yes"
+
+
+async def test_relative_import_from_eval_for_missing_file_raises() -> None:
+    """``./missing.js`` from top-level eval where root scope has no
+    such file → ResolveError surfaces as JSError."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
+            )
+            with pytest.raises(JSError, match="missing.js"):
+                await ctx.eval_async(
+                    'import { x } from "./missing.js"; globalThis.z = x;',
+                    module=True,
+                )
+
+
+async def test_parent_traversal_past_scope_root_raises() -> None:
+    """§4: ``../`` that normalizes to a path starting with ``../``
+    is an escape attempt → JSError. Exercises the ``None`` return
+    from ``normalize_path`` in src/modules.rs."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@x": ModuleScope(
+                            {
+                                "index.js": (
+                                    'import { y } from "../../escape.js";'
+                                    " export const Y = y;"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            with pytest.raises(JSError, match="escapes module scope root"):
+                await ctx.eval_async(
+                    'import { Y } from "@x"; globalThis.r = Y;',
+                    module=True,
+                )
+
+
+async def test_top_level_eval_cannot_escape_root_with_dotdot() -> None:
+    """From top-level ``<eval>`` (position = root), any ``../``
+    import normalizes past the root and errors. No way to reach
+    "outside" the installed set."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
+            )
+            with pytest.raises(JSError, match="escapes module scope root"):
+                await ctx.eval_async(
+                    'import { y } from "../outside.js"; globalThis.r = y;',
+                    module=True,
+                )
+
+
+# ---- Recursive dependencies — §3.1 / §4 -----------------------------
+
+
+async def test_scope_can_import_its_own_declared_dep_but_not_transitive() -> None:
+    """§4 self-containment: A carries B, B carries C. A→B works;
+    B→C works; A→C fails (C is not in A's own dict). Tests that
+    the resolver does NOT walk ancestors or consult the root."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@a": ModuleScope(
+                            {
+                                # A carries B directly.
+                                "@b": ModuleScope(
+                                    {
+                                        # B carries C directly.
+                                        "@c": ModuleScope(
+                                            {"index.js": "export const C = 'c';"}
+                                        ),
+                                        "index.js": (
+                                            'import { C } from "@c";'
+                                            " export const B = C + '-via-b';"
+                                        ),
+                                    }
+                                ),
+                                # A does NOT carry @c in its own dict,
+                                # even though A's dep B carries it.
+                                "index.js": (
+                                    'import { B } from "@b";'
+                                    " export const A = 'a-then-' + B;"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            # Happy path: A→B→C all resolve.
+            await ctx.eval_async(
+                'import { A } from "@a"; globalThis.r = A;', module=True
+            )
+            assert ctx.eval("r") == "a-then-c-via-b"
+
+
+async def test_scope_cannot_reach_transitive_dep_directly() -> None:
+    """Self-containment tripwire: A carries B (which carries C),
+    but A's own index.js tries to import C directly. Even though
+    the dep graph contains C via B, A's own dict doesn't declare
+    C — so the resolver refuses it. This is the load-bearing
+    correctness of scope-local resolution."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@a": ModuleScope(
+                            {
+                                "@b": ModuleScope(
+                                    {
+                                        "@c": ModuleScope(
+                                            {"index.js": "export const C = 'c';"}
+                                        ),
+                                        "index.js": (
+                                            'import { C } from "@c";'
+                                            " export const B = C;"
+                                        ),
+                                    }
+                                ),
+                                # Reaches into B's transitive dep C
+                                # directly — illegal.
+                                "index.js": (
+                                    'import { C } from "@c";'
+                                    " export const A = C;"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            with pytest.raises(JSError, match="@c"):
+                await ctx.eval_async(
+                    'import { A } from "@a"; globalThis.r = A;',
+                    module=True,
+                )
+
+
+async def test_adding_transitive_dep_directly_makes_it_importable() -> None:
+    """Counterpart to the self-containment tripwire: once A carries
+    C in its OWN dict (sharing the same ModuleScope instance as
+    B's copy), A can import C directly. Each canonical path is a
+    separate module record per QuickJS."""
+    c_scope = ModuleScope({"index.js": "export const C = 'c';"})
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@a": ModuleScope(
+                            {
+                                "@c": c_scope,  # declared directly in A
+                                "@b": ModuleScope(
+                                    {
+                                        "@c": c_scope,  # also declared in B
+                                        "index.js": (
+                                            'import { C } from "@c";'
+                                            " export const B = 'b-uses-' + C;"
+                                        ),
+                                    }
+                                ),
+                                "index.js": (
+                                    'import { C } from "@c";'
+                                    ' import { B } from "@b";'
+                                    " export const A = C + '|' + B;"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                'import { A } from "@a"; globalThis.r = A;', module=True
+            )
+            assert ctx.eval("r") == "c|b-uses-c"
+
+
+# ---- Cross-scope via spread — §3.4 / §4 -----------------------------
+
+
+async def test_shared_dep_via_spread_resolves_in_both_scopes() -> None:
+    """§3.4: the motivating spread pattern. ``stdlib`` is a dict
+    carrying ``@agent/utils``. Main spreads it at top level AND
+    into ``@agent/fs``. Both top-level eval and @agent/fs can
+    import @agent/utils because each carries its own declaration.
+    The same source shows up under two canonical paths; QuickJS
+    caches them as independent module records."""
+    stdlib = {
+        "@agent/utils": ModuleScope(
+            {"index.js": "export function id(x) { return 'u:' + x; }"}
+        )
+    }
+    main = ModuleScope(
+        {
+            **stdlib,
+            "@agent/fs": ModuleScope(
+                {
+                    **stdlib,  # fs carries its own copy of utils
+                    "index.js": (
+                        'import { id } from "@agent/utils";'
+                        " export function stamp(x)"
+                        "  { return 'fs[' + id(x) + ']'; }"
+                    ),
+                }
+            ),
+        }
+    )
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(main)
+            await ctx.eval_async(
+                """
+                import { id } from "@agent/utils";
+                import { stamp } from "@agent/fs";
+                globalThis.a = id("top");
+                globalThis.b = stamp("inner");
+                """,
+                module=True,
+            )
+            assert ctx.eval("a") == "u:top"
+            # @agent/fs's import resolved to its OWN copy of
+            # @agent/utils, not the top-level one.
+            assert ctx.eval("b") == "fs[u:inner]"
+
+
+# ---- Module evaluation semantics — §3.3 -----------------------------
+
+
+async def test_module_eval_returns_none() -> None:
+    """§3.3: module=True returns None regardless of what the
+    module body "evaluates" to. ES modules complete with
+    undefined; the only way to surface a value is globalThis."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const V = 42;"})})
+            )
+            result = await ctx.eval_async(
+                'import { V } from "@x"; V * 2;', module=True
+            )
+            assert result is None
+
+
+async def test_module_scoped_let_is_not_visible_in_subsequent_eval() -> None:
+    """§3.3: ``let``/``const``/``var``/function declarations at
+    the top level of a module are module-scoped, not global.
+    A subsequent script-mode eval cannot see them."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
+            )
+            await ctx.eval_async(
+                'import { Y } from "@x"; let moduleLocal = 42;',
+                module=True,
+            )
+            assert ctx.eval("typeof moduleLocal") == "undefined"
+
+
+async def test_module_globalThis_assignment_visible_in_script_eval() -> None:
+    """§6.3: modules and scripts share the same global object.
+    ``globalThis.X = ...`` in a module is visible in subsequent
+    script-mode eval."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 7;"})})
+            )
+            await ctx.eval_async(
+                'import { Y } from "@x"; globalThis.fromModule = Y * 2;',
+                module=True,
+            )
+            assert ctx.eval("fromModule") == 14
+
+
+async def test_script_global_visible_in_module() -> None:
+    """§6.3 other direction: a global set via script-mode eval is
+    visible inside a module. This is how host-registered function
+    names and ``ctx.globals[...]`` values flow into modules."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const K = 1;"})})
+            )
+            ctx.eval("globalThis.fromScript = 'hello'")
+            await ctx.eval_async(
+                'import { K } from "@x"; globalThis.concat = fromScript + K;',
+                module=True,
+            )
+            assert ctx.eval("concat") == "hello1"
+
+
+# ---- Async modules — §3.3 / §6 --------------------------------------
+
+
+async def test_module_top_level_await_with_async_host_function() -> None:
+    """Top-level ``await`` inside a module body resolves through
+    the Promise chain the same as script-mode TLA. The difference
+    is the module path goes through ``Module::evaluate``; this
+    test pins down the end-to-end async integration."""
+    import asyncio
+
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            async def _lookup(key: str) -> int:
+                await asyncio.sleep(0.001)
+                return {"one": 1, "two": 2}[key]
+
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/lookup": ModuleScope(
+                            {
+                                "index.js": (
+                                    "export async function lookup(k)"
+                                    " { return await _lookup(k); }"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { lookup } from "@agent/lookup";
+                const v = await lookup("two");
+                globalThis.r = v;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 2
+
+
+async def test_module_importing_module_that_uses_await() -> None:
+    """Chain: module A imports module B. B's body uses top-level
+    await (via an async host call). A sees the resolved export.
+    This exercises module-mode's async module completion — A
+    can't finish evaluating until B's TLA resolves."""
+    import asyncio
+
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            async def _compute() -> int:
+                await asyncio.sleep(0.001)
+                return 99
+
+            provider = ModuleScope(
+                {
+                    # Top-level await in the module body.
+                    "index.js": "export const VALUE = await _compute();",
+                }
+            )
+            # Self-containment: consumer must carry its own copy of
+            # provider in its dict. The top-level scope doesn't
+            # leak into consumer.
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/provider": provider,
+                        "@agent/consumer": ModuleScope(
+                            {
+                                "@agent/provider": provider,
+                                "index.js": (
+                                    'import { VALUE } from "@agent/provider";'
+                                    " export const DOUBLED = VALUE * 2;"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { DOUBLED } from "@agent/consumer";
+                globalThis.r = DOUBLED;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 198
+
+
+# ---- Error cases — §8 -----------------------------------------------
+
+
+async def test_import_non_registered_module_raises() -> None:
+    """§8: missing module → JSError at eval time."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
+            )
+            with pytest.raises(JSError, match="@nope"):
+                await ctx.eval_async(
+                    'import { x } from "@nope"; globalThis.z = x;',
+                    module=True,
+                )
+
+
+async def test_syntax_error_in_module_surfaces_at_eval_time() -> None:
+    """§11: pre-parse on install was considered and deferred.
+    Syntax errors surface at eval time (when QuickJS actually
+    parses the module), not at ``install()``."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            # install() must NOT raise even though the source is
+            # clearly malformed.
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@broken": ModuleScope(
+                            {
+                                # Definitely not valid JS.
+                                "index.js": "this is not valid javascript at all",
+                            }
+                        ),
+                    }
+                )
+            )
+            with pytest.raises(JSError):
+                await ctx.eval_async(
+                    'import { x } from "@broken"; globalThis.z = x;',
+                    module=True,
+                )
+
+
+# ---- Module caching — §6.2 ------------------------------------------
+
+
+async def test_reinstall_before_import_takes_new_source() -> None:
+    """§6.2: a name that hasn't been imported yet can be
+    overwritten. The second install replaces the first's source;
+    the import sees the new value."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
+            )
+            # Re-install under the same canonical path BEFORE any import.
+            ctx.install(
+                ModuleScope(
+                    {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
+                )
+            )
+            await ctx.eval_async(
+                'import { V } from "@cfg"; globalThis.r = V;', module=True
+            )
+            assert ctx.eval("r") == 999
+
+
+async def test_reinstall_after_import_is_no_op_cache_wins() -> None:
+    """§6.2: once a module name has been imported, QuickJS caches
+    the module record per canonical path. A subsequent install
+    with different source under the same name is a silent no-op —
+    the cached record wins. Documented as a caveat; the user is
+    expected to know not to rely on hot-reloading module sources."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
+            )
+            await ctx.eval_async(
+                'import { V } from "@cfg"; globalThis.first = V;',
+                module=True,
+            )
+            assert ctx.eval("first") == 1
+            # Attempted swap — ignored by QuickJS's module cache.
+            ctx.install(
+                ModuleScope(
+                    {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
+                )
+            )
+            await ctx.eval_async(
+                'import { V } from "@cfg"; globalThis.second = V;',
+                module=True,
+            )
+            # Still 1, not 999. This is the cache, not the install.
+            assert ctx.eval("second") == 1
+
+
+# ---- Additive install — §5.3 ----------------------------------------
+
+
+async def test_two_installs_both_importable() -> None:
+    """§5.3 additive: modules registered across multiple install()
+    calls are all available. The second call doesn't replace the
+    first's modules, just merges into the same backing store."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
+            )
+            ctx.install(
+                ModuleScope({"@b": ModuleScope({"index.js": "export const B = 2;"})})
+            )
+            await ctx.eval_async(
+                """
+                import { A } from "@a";
+                import { B } from "@b";
+                globalThis.sum = A + B;
+                """,
+                module=True,
+            )
+            assert ctx.eval("sum") == 3
+
+
+async def test_install_after_eval_is_visible_to_next_eval() -> None:
+    """§5.3: install() in between evals — the newly installed
+    module is visible in the subsequent eval as long as its name
+    wasn't imported earlier (which would hit the cache)."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
+            )
+            await ctx.eval_async(
+                'import { A } from "@a"; globalThis.first = A;',
+                module=True,
+            )
+            assert ctx.eval("first") == 1
+            # Install a NEW name after an eval has happened.
+            ctx.install(
+                ModuleScope({"@b": ModuleScope({"index.js": "export const B = 10;"})})
+            )
+            await ctx.eval_async(
+                'import { B } from "@b"; globalThis.second = B;',
+                module=True,
+            )
+            assert ctx.eval("second") == 10
+
+
+# ---- Composition patterns end-to-end — §3.4 -------------------------
+
+
+async def test_spread_override_replaces_module_end_to_end() -> None:
+    """§3.4: dict spread override — the later key wins. The
+    overridden scope installs as the new source. This is the
+    pattern for test fixtures and capability reduction."""
+    base = ModuleScope(
+        {
+            "@agent/config": ModuleScope(
+                {"index.js": "export const ENV = 'prod';"}
+            ),
+            "@agent/lib": ModuleScope({"index.js": "export const L = 1;"}),
+        }
+    )
+    test_scope = ModuleScope(
+        {
+            **base.modules,
+            # Override @agent/config with test values.
+            "@agent/config": ModuleScope(
+                {"index.js": "export const ENV = 'test';"}
+            ),
+        }
+    )
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(test_scope)
+            await ctx.eval_async(
+                """
+                import { ENV } from "@agent/config";
+                import { L } from "@agent/lib";
+                globalThis.env = ENV;
+                globalThis.l = L;
+                """,
+                module=True,
+            )
+            assert ctx.eval("env") == "test"  # override
+            assert ctx.eval("l") == 1  # unchanged from base
+
+
+async def test_comprehension_removal_makes_module_unreachable() -> None:
+    """§3.4: dict comprehension removal is the canonical way to
+    drop a capability. The removed module isn't registered, so
+    importing it errors at eval time."""
+    full = ModuleScope(
+        {
+            "@agent/fs": ModuleScope(
+                {"index.js": "export const unsafe = true;"}
+            ),
+            "@agent/safe": ModuleScope({"index.js": "export const safe = 1;"}),
+        }
+    )
+    restricted = ModuleScope(
+        {k: v for k, v in full.modules.items() if k != "@agent/fs"}
+    )
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(restricted)
+            # Safe module still works.
+            await ctx.eval_async(
+                'import { safe } from "@agent/safe"; globalThis.r = safe;',
+                module=True,
+            )
+            assert ctx.eval("r") == 1
+            # Removed module is not reachable.
+            with pytest.raises(JSError, match="@agent/fs"):
+                await ctx.eval_async(
+                    'import { unsafe } from "@agent/fs"; globalThis.x = unsafe;',
+                    module=True,
+                )
