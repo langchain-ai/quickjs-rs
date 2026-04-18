@@ -60,10 +60,20 @@ jobs:
           # moment rust-cross updates its image.
           #
           # cc-rs (invoked by rquickjs-sys's build.rs) respects
-          # CFLAGS; maturin-action passes container-options to
+          # CFLAGS; maturin-action forwards docker-options to
           # `docker run`, so `-e CFLAGS=-std=gnu11` lands inside
           # the build container.
-          container-options: -e CFLAGS=-std=gnu11
+          #
+          # Note: the input is `docker-options`, NOT
+          # `container-options`. GitHub Actions silently ignores
+          # unknown inputs — the earlier b4a05e1 attempt used
+          # `container-options` and cc-rs reported `CFLAGS = None`
+          # (the var never reached the container) while the step
+          # log showed the input as configured. Lesson: after any
+          # change to workflow inputs, inspect the `docker run`
+          # command line in the job log to confirm the flag is
+          # actually present, not just that the step didn't error.
+          docker-options: -e CFLAGS=-std=gnu11
 
       - uses: actions/upload-artifact@v4
         with:
