@@ -1559,3 +1559,361 @@ async def test_ts_to_js_relative_import_works() -> None:
                 module=True,
             )
             assert ctx.eval("r") == 14
+
+
+# ---- §4 dynamic import() -------------------------------------------
+#
+# Static `import` is heavily covered above. Dynamic `import()` goes
+# through the same rquickjs loader hook as static imports
+# (`JS_SetModuleLoaderFunc` fires for both), but has no existing
+# test coverage. These tests pin the behaviour so downstream users
+# — notably `deepagents-repl`'s skill-module loader, which relies on
+# the model writing `await import("@/skills/...")` — can depend on
+# it without a lurking-risk caveat.
+
+
+async def test_dynamic_import_resolves_bare_specifier() -> None:
+    """Dynamic import of a bare-specifier subscope resolves through
+    the same store and returns a namespace object with the subscope's
+    exports."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/config": ModuleScope(
+                            {"index.js": "export const MAX_RETRIES = 3;"}
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const m = await import("@agent/config");
+                globalThis.r = m.MAX_RETRIES;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 3
+
+
+async def test_dynamic_import_of_relative_specifier_from_root_eval() -> None:
+    """Dynamic import with a relative specifier from a top-level
+    module eval — exercises the `<eval>` basename codepath
+    (`src/modules.rs:124-130`) through the dynamic-import route.
+    Root scope needs an `index.js` sibling because any scope with
+    str entries must declare one (§3.1)."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "index.js": "export const marker = true;",
+                        "helpers.js": "export const value = 7;",
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const m = await import("./helpers.js");
+                globalThis.r = m.value;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 7
+
+
+async def test_dynamic_import_unknown_specifier_rejects() -> None:
+    """Dynamic import of an unregistered specifier rejects the
+    returned promise with the resolver's error. We want this to
+    surface as a JSError at the eval boundary so the middleware can
+    map it to a `SkillNotAvailable` when we know the specifier was a
+    `@/skills/<name>` lookup."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(ModuleScope({"index.js": "export const x = 1;"}))
+            with pytest.raises(JSError):
+                await ctx.eval_async(
+                    """
+                    await import("@agent/does-not-exist");
+                    """,
+                    module=True,
+                )
+
+
+async def test_dynamic_import_of_ts_entrypoint_strips_types() -> None:
+    """Dynamic import of a subscope whose entrypoint is a `.ts` file.
+    quickjs-rs picks the `index.ts` via its index-file preference
+    list and strips TS syntax at install time; dynamic import should
+    see the same stripped source as static import."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/ts": ModuleScope(
+                            {
+                                "index.ts": (
+                                    "export const n: number = 42;\n"
+                                    "export function greet(who: string): string {"
+                                    ' return `hi ${who}`; }\n'
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const m = await import("@agent/ts");
+                globalThis.n = m.n;
+                globalThis.g = m.greet("world");
+                """,
+                module=True,
+            )
+            assert ctx.eval("n") == 42
+            assert ctx.eval("g") == "hi world"
+
+
+async def test_dynamic_import_is_cached() -> None:
+    """ES dynamic import returns the same module instance on repeated
+    calls within the same context — a property module-level mutable
+    state relies on. A top-level counter incremented once in the
+    importee should read as 1 twice, not 2."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/stateful": ModuleScope(
+                            {
+                                "index.js": (
+                                    "let n = 0;\n"
+                                    "export function bump() { return ++n; }\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const a = await import("@agent/stateful");
+                const b = await import("@agent/stateful");
+                globalThis.same = a === b;
+                globalThis.r1 = a.bump();
+                globalThis.r2 = b.bump();
+                """,
+                module=True,
+            )
+            assert ctx.eval("same") is True
+            assert ctx.eval("r1") == 1
+            assert ctx.eval("r2") == 2
+
+
+# ---- Dynamic import() — diagnostic coverage -------------------------
+#
+# Dynamic `import()` is a different QuickJS code path than static
+# `import`. QuickJS re-enters the module loader to resolve the
+# runtime-supplied specifier, and the referrer it passes to the
+# resolver may differ from the static case — in particular, it's
+# the filename of the *caller*, which might be "<eval>" or a real
+# canonical module path depending on where the import() appears.
+#
+# These tests are DIAGNOSTIC, not normative. Failures here are
+# findings to understand, not bugs to fix in this commit. If a
+# test fails, leave the assertion in place — it documents the
+# current behavior and will flip on the day the gap is closed.
+
+
+async def test_dynamic_import_basic() -> None:
+    """``await import("@agent/utils")`` from top-level module eval
+    returns the module namespace object whose properties are the
+    module's exports. If the resolver is wired for dynamic-import,
+    this is just static-import-but-runtime.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/utils": ModuleScope(
+                            {"index.js": "export const V = 7;"}
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const mod = await import("@agent/utils");
+                globalThis.r = mod.V;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 7
+
+
+async def test_dynamic_import_from_script_mode() -> None:
+    """Dynamic import from ``module=False`` eval. Script-mode eval
+    doesn't declare a "current module" — referrer is ``<eval>`` or
+    similar. v0.4's resolver treats ``<eval>``'s containing scope
+    as the root, so bare-specifier dynamic imports from script
+    mode should resolve the same as from module mode.
+
+    The body uses top-level ``await`` directly (not wrapped in an
+    async IIFE) because v0.4's script-mode eval with
+    JS_EVAL_FLAG_ASYNC drives the SCRIPT's top-level promise to
+    completion — an async IIFE at the top level returns a Promise
+    value that the script-mode envelope considers "done," leaving
+    the IIFE's inner promise unresolved. That's a script-mode /
+    IIFE interaction, not a dynamic-import concern.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/utils": ModuleScope(
+                            {"index.js": "export const V = 11;"}
+                        ),
+                    }
+                )
+            )
+            # Top-level await in script mode; the envelope waits
+            # for the whole expression to settle.
+            result = await ctx.eval_async(
+                """
+                const mod = await import("@agent/utils");
+                mod.V;
+                """,
+                module=False,
+            )
+            assert result == 11
+
+
+async def test_dynamic_import_variable_specifier() -> None:
+    """The specifier is a runtime string. If this passes, it means
+    the resolver sees the dynamic import's argument at the
+    resolver-callback boundary, same as a static specifier. If it
+    fails (e.g. QuickJS inlines the specifier differently), this
+    is worth knowing."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/utils": ModuleScope(
+                            {"index.js": "export const V = 'dyn';"}
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                const name = "@agent/utils";
+                const mod = await import(name);
+                globalThis.r = mod.V;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "dyn"
+
+
+async def test_dynamic_import_not_found() -> None:
+    """``await import("@nonexistent")`` should REJECT the returned
+    promise, not hang or crash. The rejection surfaces through
+    the normal async driving loop as a JSError."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@real": ModuleScope(
+                            {"index.js": "export const V = 1;"}
+                        ),
+                    }
+                )
+            )
+            with pytest.raises(JSError):
+                await ctx.eval_async(
+                    """
+                    const mod = await import("@nonexistent");
+                    globalThis.r = mod;
+                    """,
+                    module=True,
+                )
+
+
+async def test_dynamic_import_within_scope() -> None:
+    """A scope file does ``await import("./helpers.js")``. The
+    referrer handed to the resolver should be the canonical path
+    of the file doing the dynamic import (``"@m/index.js"``), so
+    ``./helpers.js`` normalizes to ``helpers.js`` within the
+    scope. Same path a static relative import would take."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.js": """
+                                    export async function load() {
+                                        const mod = await import("./helpers.js");
+                                        return mod.value;
+                                    }
+                                """,
+                                "helpers.js": "export const value = 'scoped-dyn';",
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { load } from "@m";
+                globalThis.r = await load();
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "scoped-dyn"
+
+
+async def test_dynamic_import_typescript() -> None:
+    """Dynamic import of a .ts file. At install() time oxidase
+    stripped ``utils.ts`` and registered the canonical path
+    ``@m/utils.ts`` against the stripped JS. The dynamic import's
+    specifier ``"./utils.ts"`` should hit the same resolver path
+    as a static import — i.e. look up ``"utils.ts"`` as a str
+    entry in the scope."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.js": """
+                                    export async function go() {
+                                        const mod = await import("./utils.ts");
+                                        return mod.stamp("x");
+                                    }
+                                """,
+                                "utils.ts": (
+                                    "export function stamp(s: string): string {\n"
+                                    "  return 'ts[' + s + ']';\n"
+                                    "}\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { go } from "@m";
+                globalThis.r = await go();
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "ts[x]"
