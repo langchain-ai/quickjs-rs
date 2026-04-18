@@ -10,8 +10,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use rquickjs::{
-    atom::PredefinedAtom, context::EvalOptions, CatchResultExt, CaughtError, Context, Persistent,
-    Value,
+    atom::PredefinedAtom, context::EvalOptions, CatchResultExt, CaughtError, Context, Module,
+    Persistent, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -192,6 +192,40 @@ impl QjsContext {
                 Ok(val) => Ok(Persistent::save(ctx, val)),
                 Err(caught) => Err(js_error_from_caught(ctx, caught)),
             }
+        })?;
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(persistent),
+        })
+    }
+
+    /// §5.4 ES-module eval. Parses `code` as an ES module (name =
+    /// `filename`), registers it with QuickJS, and starts its
+    /// evaluation. Returns a QjsHandle wrapping the Promise that
+    /// resolves to `undefined` once the module (and its full
+    /// import graph) has finished evaluating.
+    ///
+    /// Unlike script-mode eval with JS_EVAL_FLAG_ASYNC (the v0.3
+    /// TLA path), this uses `Module::evaluate`, which is QuickJS's
+    /// actual ES-module entry point — `import` / `export` work,
+    /// module-scoped bindings don't leak to global, and the
+    /// module cache is consulted for each imported specifier.
+    ///
+    /// The Python driving loop (Context._run_inside_task_group)
+    /// treats the returned handle the same as any other pending
+    /// Promise — `run_pending_jobs` advances module loads and host
+    /// callbacks, `promise_state` polls for settlement, rejections
+    /// surface through `promise_result` + _classify_jserror.
+    #[pyo3(signature = (code, *, filename="<eval>"))]
+    fn eval_module_async(&self, code: &str, filename: &str) -> PyResult<QjsHandle> {
+        let context = self.context()?.clone();
+        let context_ptr = context.as_raw().as_ptr() as usize;
+        let persistent = with_active_ctx(&context, |ctx| {
+            let promise = Module::evaluate(ctx.clone(), filename, code)
+                .catch(ctx)
+                .map_err(|caught| js_error_from_caught(ctx, caught))?;
+            Ok(Persistent::save(ctx, promise.into_value()))
         })?;
         Ok(QjsHandle {
             context: Some(context),

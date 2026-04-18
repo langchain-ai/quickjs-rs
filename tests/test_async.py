@@ -86,12 +86,22 @@ async def test_concurrent_eval_async_raises() -> None:
 
 
 async def test_deadlock_error_when_no_resolver() -> None:
-    """§10.3: pending top-level promise with nothing in flight → DeadlockError."""
+    """§10.3: pending top-level promise with nothing in flight →
+    DeadlockError.
+
+    v0.4 change: ``module=False`` always enables JS_EVAL_FLAG_ASYNC
+    (§7), so the body needs to actually ``await`` the pending
+    promise to keep the top-level promise pending. Returning a
+    pending promise as the last expression would be wrapped as
+    ``{value: <pending>, done: false}`` — the wrapper itself is
+    fulfilled, so the driving loop returns immediately without
+    hitting the deadlock path.
+    """
     with Runtime() as rt:
         with rt.new_context() as ctx:
             with pytest.raises(DeadlockError):
                 await ctx.eval_async(
-                    "new Promise((resolve) => {})", module=False
+                    "await new Promise((resolve) => {})", module=False
                 )
 
 

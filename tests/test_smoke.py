@@ -394,9 +394,15 @@ async def test_async_acceptance() -> None:
                     pass
 
             # DeadlockError: pending promise with no async work
+            # §7 v0.4: module=False enables JS_EVAL_FLAG_ASYNC, so
+            # returning a pending promise as the body's last
+            # expression gets wrapped as {value: <pending>, done:
+            # false} — wrapper is fulfilled, driving loop returns.
+            # Awaiting the pending promise keeps the wrapper
+            # pending, which is what exercises the deadlock path.
             with pytest.raises(DeadlockError):
                 await ctx.eval_async(
-                    "new Promise((resolve) => {})",
+                    "await new Promise((resolve) => {})",
                     module=False,
                 )
 

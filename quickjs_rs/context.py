@@ -24,6 +24,7 @@ from quickjs_rs.errors import (
 )
 from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
+from quickjs_rs.modules import ModuleScope
 from quickjs_rs.runtime import Runtime
 
 
@@ -400,24 +401,82 @@ class Context:
 
         return decorator
 
+    # ---- Module installation -----------------------------------------
+
+    def install(self, scope: ModuleScope) -> None:
+        """Register modules in the runtime's module store so that
+        ``module=True`` eval can ``import`` from them. See
+        spec/module-loading.md §5.3.
+
+        Walks ``scope`` recursively. str-valued entries become JS
+        source files; ModuleScope-valued entries become nested
+        scopes with bare-specifier names. The backing store is
+        per-runtime (rquickjs's ``set_loader`` is a runtime-level
+        API), so all contexts on the same runtime see the same
+        module set.
+
+        Additive: multiple calls insert into the same store. A name
+        that hasn't been imported yet can be overwritten; a name
+        that has already been imported is a silent no-op (QuickJS
+        caches module records per canonical path).
+
+        No-op on an empty scope — valid as a base for composition.
+        """
+        if self._closed:
+            raise QuickJSError("context is closed")
+        self._install_recursive(scope, scope_path="")
+
+    def _install_recursive(self, scope: ModuleScope, scope_path: str) -> None:
+        engine_rt = self._runtime._engine_rt
+        for key, value in scope.modules.items():
+            if isinstance(value, str):
+                canonical = key if scope_path == "" else f"{scope_path}/{key}"
+                engine_rt.add_module_source(scope_path, key, canonical, value)
+            elif isinstance(value, ModuleScope):
+                engine_rt.register_subscope(scope_path, key)
+                child_path = key if scope_path == "" else f"{scope_path}/{key}"
+                self._install_recursive(value, scope_path=child_path)
+            else:
+                # ModuleScope.__post_init__ already forbids other
+                # types — this branch is unreachable for a validated
+                # scope. Defensive guard for anyone constructing a
+                # ModuleScope via object.__setattr__ shenanigans.
+                raise TypeError(
+                    f"ModuleScope entry {key!r}: expected str | ModuleScope, "
+                    f"got {type(value).__name__}"
+                )
+
     # ---- Async eval --------------------------------------------------
 
     async def eval_async(
         self,
         code: str,
         *,
-        module: bool = True,
+        module: bool = False,
         strict: bool = False,
         filename: str = "<eval>",
         timeout: float | None = None,
     ) -> Any:
         """Evaluate code with top-level await + async host-call support.
 
-        See §7.4. Defaults to ``module=True`` so top-level ``await``
-        works. Under the hood that's script mode plus the
-        JS_EVAL_FLAG_ASYNC flag (``promise=true`` in rquickjs terms),
-        which wraps the result as ``{value, done}`` — we unwrap
-        below.
+        See §7.4. Two modes:
+
+        * ``module=False`` (default): script-mode eval with
+          JS_EVAL_FLAG_ASYNC. Top-level ``await`` works; the return
+          value is the last expression of the script (wrapped as
+          ``{value, done}`` under the hood and unwrapped here).
+        * ``module=True`` (v0.4): real ES-module eval. ``import`` /
+          ``export`` work. Module-scoped bindings (``let``,
+          ``const``, ``var``, functions) do NOT leak to global.
+          Returns ``None`` — ES modules complete with ``undefined``.
+          To surface a value, set ``globalThis.result = ...`` in the
+          module and read it with a sync ``ctx.eval("result")``.
+
+        Breaking change from v0.3: the default used to be
+        ``module=True``. Under v0.4, ``module=True`` means real ES
+        modules with different scoping — silently flipping the
+        behavior of existing code would be worse than requiring the
+        explicit opt-in. See spec/module-loading.md §7.
 
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
@@ -433,17 +492,23 @@ class Context:
             filename=filename,
             timeout=timeout,
         )
-        # Settled is a Handle; marshal to Python. For module-mode
-        # eval, quickjs-ng wraps the result as {value, done}; unwrap
-        # before returning.
+        # Settled is a Handle; marshal to Python. Two unwrap paths:
+        #
+        #  * module=True: ES-module eval. The settled value is the
+        #    Promise from Module::evaluate, which resolves to
+        #    undefined. Returning None short-circuits that —
+        #    reading `.value` off `undefined` would raise.
+        #  * module=False: script-mode TLA. quickjs-ng wraps the
+        #    result as {value, done} when JS_EVAL_FLAG_ASYNC is set
+        #    — we unwrap `.value` below.
         try:
             if module:
-                value_handle = settled_handle.get("value")
-                try:
-                    return value_handle.to_python()
-                finally:
-                    value_handle.dispose()
-            return settled_handle.to_python()
+                return None
+            value_handle = settled_handle.get("value")
+            try:
+                return value_handle.to_python()
+            finally:
+                value_handle.dispose()
         finally:
             settled_handle.dispose()
 
@@ -451,13 +516,21 @@ class Context:
         self,
         code: str,
         *,
-        module: bool = True,
+        module: bool = False,
         strict: bool = False,
         filename: str = "<eval>",
         timeout: float | None = None,
     ) -> Handle:
         """Same driving flow as :meth:`eval_async`, but return the
         settled value as a :class:`Handle` rather than marshaling.
+
+        ``module=True``: returns a Handle to ``undefined`` (ES
+        modules complete with undefined). The module's exports are
+        not directly exposed — to access them, use bare imports
+        from another module or read globals the module set.
+
+        Breaking change from v0.3: the default used to be
+        ``module=True``. See ``eval_async`` for the rationale.
         """
         settled_handle = await self._eval_and_drive(
             code,
@@ -467,11 +540,14 @@ class Context:
             timeout=timeout,
         )
         if module:
-            try:
-                return settled_handle.get("value")
-            finally:
-                settled_handle.dispose()
-        return settled_handle
+            # The settled promise resolves to undefined; just return
+            # the handle as-is so the caller gets something uniform.
+            return settled_handle
+        # Script-mode TLA: unwrap the {value, done} envelope.
+        try:
+            return settled_handle.get("value")
+        finally:
+            settled_handle.dispose()
 
     async def _eval_and_drive(
         self,
@@ -539,15 +615,30 @@ class Context:
         """Synchronous eval inside an already-open TaskGroup scope.
         Any async host calls dispatched during this eval become
         children of the group (§7.4).
+
+        Two eval paths:
+        * ``module=True`` (v0.4): ``eval_module_async`` uses
+          ``Module::evaluate`` — imports + exports work, module
+          scoping applies, result is a Promise that resolves to
+          undefined.
+        * ``module=False``: script-mode eval with
+          JS_EVAL_FLAG_ASYNC (``promise=True``) — the v0.3 TLA
+          path. Result is a Promise that resolves to the
+          ``{value, done}`` envelope.
         """
         try:
-            inner = self._engine_ctx.eval_handle(
-                code,
-                module=False,  # always global; module-mode TLA uses promise=True
-                strict=strict,
-                promise=module,
-                filename=filename,
-            )
+            if module:
+                inner = self._engine_ctx.eval_module_async(
+                    code, filename=filename
+                )
+            else:
+                inner = self._engine_ctx.eval_handle(
+                    code,
+                    module=False,
+                    strict=strict,
+                    promise=True,
+                    filename=filename,
+                )
         except _engine.JSError as e:
             name, message, stack = e.args
             classified = self._classify_jserror(name, message, stack, deadline)

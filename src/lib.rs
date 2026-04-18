@@ -10,6 +10,7 @@
 //!   * `runtime`    — §6.2 QjsRuntime pyclass
 //!   * `context`    — §6.3 QjsContext pyclass (the biggest)
 //!   * `handle`     — §6.4 QjsHandle pyclass
+//!   * `modules`    — §5.2 ES-module store, resolver, loader
 //!
 //! This file just wires everything into the `_engine` Python module.
 
@@ -20,6 +21,7 @@ mod errors;
 mod handle;
 mod host_fn;
 mod marshal;
+mod modules;
 mod reentrance;
 mod runtime;
 

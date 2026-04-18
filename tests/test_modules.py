@@ -1,8 +1,9 @@
-"""ModuleScope validation + composition. See spec/module-loading.md §3.
+"""ModuleScope validation + composition + install. See
+spec/module-loading.md §3 and §5.
 
-Step-2 coverage is construction-only: no Runtime, no Context, no
-end-to-end eval. Step 3 adds the install + single-file-import
-tests; this file grows to match §9.1 over steps 3–7.
+Validation-only tests live at the top; the bottom of the file
+covers the end-to-end install → resolve → load → module-eval
+path added in step 3. §9.1 continues to grow across steps 4–7.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from quickjs_rs import ModuleScope
+from quickjs_rs import ModuleScope, Runtime
 
 # ---- Valid construction ---------------------------------------------
 
@@ -445,3 +446,133 @@ def test_recursive_spread_creates_self_contained_subscope() -> None:
     http = main.modules["@agent/http"]
     assert isinstance(fs, ModuleScope) and "@agent/utils" in fs.modules
     assert isinstance(http, ModuleScope) and "@agent/utils" in http.modules
+
+
+# ---- End-to-end install + import — §5.2 / §5.3 ----------------------
+#
+# Three assertions covering each resolver sub-case: bare specifier
+# into a ModuleScope dep, relative specifier to a str sibling, and
+# POSIX-path traversal (../) within a scope. If all three pass,
+# steps 4 and 5 of the implementation order are already covered —
+# the resolver handles relative + bare from the start, and the
+# boundary tests reduce to negative cases against the same code
+# path.
+
+
+async def test_install_bare_specifier_from_eval() -> None:
+    """§4 bare-specifier path. Root scope carries a ModuleScope dep
+    `@agent/config`; top-level module eval imports it via bare
+    specifier. Resolver looks up `@agent/config` in the root
+    scope's subscope set, resolves to `@agent/config/index.js`,
+    loader serves the source, QuickJS evaluates.
+
+    Note on shape: a single-file dep is wrapped in a ModuleScope
+    (per spec/module-loading.md §3.1 and bb6b2fd). A bare str at
+    scope root with no index.js sibling fails ModuleScope
+    validation — the wrap is the canonical shape.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/config": ModuleScope(
+                            {"index.js": "export const MAX_RETRIES = 3;"}
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { MAX_RETRIES } from "@agent/config";
+                globalThis.r1 = MAX_RETRIES;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r1") == 3
+
+
+async def test_install_relative_specifier_within_scope() -> None:
+    """§4 relative-specifier path. `@agent/utils/index.js` imports
+    `./helpers.js`, resolver normalizes to `helpers.js` within the
+    scope and serves it from the str entries. Exercises the
+    scope-local resolver: `./helpers.js` from inside the scope
+    reaches only the scope's own files, not any sibling.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/utils": ModuleScope(
+                            {
+                                "index.js": (
+                                    'import { lower } from "./helpers.js";'
+                                    " export { lower };"
+                                ),
+                                "helpers.js": (
+                                    "export function lower(s)"
+                                    " { return s.toLowerCase(); }"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { lower } from "@agent/utils";
+                globalThis.r2 = lower("HELLO");
+                """,
+                module=True,
+            )
+            assert ctx.eval("r2") == "hello"
+
+
+async def test_install_posix_subdirectory_and_parent_traversal() -> None:
+    """§4 POSIX traversal. `@agent/app/lib/greet.js` imports
+    `../index.js` — normalizer resolves `lib/../index.js` to
+    `index.js` within the scope, which is a valid str entry. The
+    scope root is the ceiling (a further `../` would escape); this
+    case stays within bounds.
+
+    Exercises the subdirectory-path str key (`lib/greet.js`) and
+    the POSIX normalization pipeline in one shot.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            # `@agent/app`'s index.js is what a bare
+            # `import ... from "@agent/app"` resolves to. It
+            # re-exports `greet` from `./lib/greet.js`, which in
+            # turn reaches up to `../index.js` (= `index.js` at
+            # scope root) to import `ROOT`. Exercises both
+            # directions of POSIX traversal within a scope.
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@agent/app": ModuleScope(
+                            {
+                                "index.js": (
+                                    "export const ROOT = 'root';"
+                                    ' export { greet } from "./lib/greet.js";'
+                                ),
+                                "lib/greet.js": (
+                                    'import { ROOT } from "../index.js";'
+                                    " export function greet()"
+                                    " { return ROOT + '!'; }"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { greet } from "@agent/app";
+                globalThis.r3 = greet();
+                """,
+                module=True,
+            )
+            # Expected: "root!" — lib/greet.js walked up to
+            # ../index.js successfully.
+            assert ctx.eval("r3") == "root!"
