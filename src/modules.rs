@@ -266,13 +266,45 @@ fn resolve_with(store: &ModuleStore, base: &str, name: &str) -> QjsResult<String
         }
     } else {
         // Bare specifier — match the subscope namespace only.
-        if scope_entry.subscopes.contains(name) {
-            let dep_scope = join_path(&scope_path, name);
-            Ok(format!("{}/index.js", dep_scope))
-        } else {
-            Err(Error::new_resolving(base, name))
+        if !scope_entry.subscopes.contains(name) {
+            return Err(Error::new_resolving(base, name));
         }
+        let dep_scope = join_path(&scope_path, name);
+        // Pick the dep scope's actual index file. The dep's
+        // ScopeEntry was populated as its own `install()` frames
+        // recursed down — consult it now. The extension order
+        // mirrors Python's `_INDEX_EXTENSIONS` in modules.py:
+        // JS variants first (no strip), then TS, then JSX/TSX.
+        //
+        // If the dep scope is missing from `scopes` entirely, the
+        // Python validation in ModuleScope.__post_init__ should
+        // have caught it — but be defensive and fall through to
+        // the default "index.js" canonical path so the loader's
+        // own `Error::new_loading` surfaces a clearer message.
+        let index_key = store
+            .scopes
+            .get(&dep_scope)
+            .and_then(|dep_entry| pick_index_file(&dep_entry.files))
+            .unwrap_or("index.js");
+        Ok(format!("{}/{}", dep_scope, index_key))
     }
+}
+
+/// Pick a scope's entry-point file from its `files` set. Returns
+/// the first `index.<ext>` match in preference order, or None if
+/// none is present. Mirrors `_INDEX_EXTENSIONS` in modules.py.
+fn pick_index_file(files: &HashSet<String>) -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &[
+        "index.js",
+        "index.mjs",
+        "index.cjs",
+        "index.ts",
+        "index.mts",
+        "index.cts",
+        "index.jsx",
+        "index.tsx",
+    ];
+    CANDIDATES.iter().copied().find(|c| files.contains(*c))
 }
 
 /// `join_path("", "x") == "x"`, `join_path("a/b", "c") == "a/b/c"`.
@@ -322,6 +354,63 @@ pub(crate) fn normalize_path(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+/// §5.5: transparent TypeScript stripping. If the scope-entry key
+/// ends in `.ts` or `.tsx`, run the source through oxidase to
+/// erase type annotations (plus transform enums, namespaces, and
+/// parameter properties — see the oxidase README). Any other
+/// extension (`.js`, `.mjs`, `.cjs`, or none) passes through
+/// unchanged.
+///
+/// On a parser panic, returns the aggregated error messages as a
+/// `String`. On parser success with non-fatal diagnostics, ignores
+/// them — oxidase is deliberately lenient (see its parser options:
+/// `allow_return_outside_function: true, allow_skip_ambient: true`)
+/// and the transpile output in those cases is still usable.
+///
+/// Import specifiers are NOT rewritten: `import { x } from
+/// "./y.ts"` stays `"./y.ts"` in the stripped output. That's
+/// important for our resolver — it looks up keys exactly as they
+/// appear in the ModuleScope dict, so a `.ts` key must stay a
+/// `.ts` specifier. Verified against oxidase 045ea46b by
+/// inspecting `handle_import_declaration` — it only patches
+/// type-only imports (`import type { ... }`).
+pub(crate) fn maybe_strip_ts(key: &str, source: &str) -> Result<String, String> {
+    let source_type = if key.ends_with(".ts") || key.ends_with(".mts") || key.ends_with(".cts") {
+        oxidase::SourceType::ts()
+    } else if key.ends_with(".tsx") {
+        oxidase::SourceType::tsx()
+    } else {
+        // .js, .mjs, .cjs, no extension, anything else — pass
+        // through. Users who want .ts behavior on an odd filename
+        // can rename; we don't heuristically guess.
+        return Ok(source.to_string());
+    };
+
+    let allocator = oxidase::Allocator::default();
+    let mut buf = source.to_string();
+    let ret = oxidase::transpile(&allocator, source_type, &mut buf);
+
+    if ret.parser_panicked {
+        // Parser bailed — the output is unsafe to use. Stringify
+        // whatever diagnostics came back; if there are none, give
+        // a generic message so the user at least knows which file.
+        let msg = if ret.parser_errors.is_empty() {
+            format!("oxidase failed to parse {}", key)
+        } else {
+            let joined = ret
+                .parser_errors
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("TypeScript parse error in {}: {}", key, joined)
+        };
+        return Err(msg);
+    }
+
+    Ok(buf)
 }
 
 #[cfg(test)]

@@ -22,6 +22,16 @@ rquickjs = { version = "0.11", features = [
     # implementation that lands in step 3.
     "loader",
 ] }
+# v0.4 TypeScript support — str entries ending in .ts/.tsx are
+# transparently type-stripped at install() time. See
+# spec/module-loading.md §5.5.
+#
+# Pinned to a specific commit rather than `branch = "main"` because
+# oxidase is a single-maintainer project not (yet) on crates.io; a
+# floating branch dep would let a force-push or rename break our
+# build without warning. The commit was measured to cost ~400 KiB
+# on the linked dylib (+28% over the module-loading-only baseline).
+oxidase = { git = "https://github.com/branchseer/oxidase", rev = "045ea46b604cee97c65f1eeac05dcdbc5eb0be25" }
 
 [profile.release]
 lto = true

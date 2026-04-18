@@ -5,7 +5,7 @@ use pyo3::types::PyAny;
 use rquickjs::{runtime::InterruptHandler, Runtime};
 
 use crate::errors::{map_runtime_new_error, QuickJSError};
-use crate::modules::{StoreHandle, StoreLoader, StoreResolver};
+use crate::modules::{maybe_strip_ts, StoreHandle, StoreLoader, StoreResolver};
 
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 pub(crate) struct QjsRuntime {
@@ -64,11 +64,23 @@ impl QjsRuntime {
     ///     ("" for the root, or a '/'-joined chain like
     ///     "@agent/fs" or "@agent/fs/@peer").
     ///   * `key`: the dict key (a POSIX path within the scope,
-    ///     which may itself contain '/').
+    ///     which may itself contain '/'). The file extension on
+    ///     this key controls TypeScript stripping (§5.5).
     ///   * `canonical_path`: the joined scope+key path used both
     ///     as the source-map key and as the module name QuickJS
     ///     sees when it asks the loader to materialize the module.
-    ///   * `source`: the JS source text.
+    ///   * `source`: the source text. If `key` ends in .ts / .mts /
+    ///     .cts / .tsx, the text is passed through oxidase to strip
+    ///     type annotations and transform enums / namespaces /
+    ///     parameter properties before the stripped output lands
+    ///     in the store. Other extensions pass through unchanged.
+    ///
+    /// TypeScript parse errors surface HERE (install time), not
+    /// later at eval time — oxidase parses during stripping, and
+    /// a parser panic turns into a QuickJSError raised from this
+    /// call. That's the contract §5.5 promises: users see their
+    /// TypeScript errors at `ctx.install(scope)` rather than at
+    /// `ctx.eval_async(..., module=True)`.
     fn add_module_source(
         &mut self,
         scope_path: &str,
@@ -76,9 +88,10 @@ impl QjsRuntime {
         canonical_path: &str,
         source: &str,
     ) -> PyResult<()> {
+        let stripped = maybe_strip_ts(key, source).map_err(QuickJSError::new_err)?;
         let handle = self.ensure_module_store()?;
         handle.with_mut(|store| {
-            store.add_source(scope_path, key, canonical_path, source);
+            store.add_source(scope_path, key, canonical_path, &stripped);
         });
         Ok(())
     }

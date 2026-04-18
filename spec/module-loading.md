@@ -131,7 +131,7 @@ class ModuleScope:
 
 **Validation at construction:**
 
-- A ModuleScope that contains at least one `str` value must include an `"index.js"` entry — that's what a bare `import "<scope-name>"` resolves to from the parent scope. A scope without an `index.js` can't be imported by name.
+- A ModuleScope that contains at least one `str` value must include an index module — any one of `index.js`, `index.mjs`, `index.cjs`, `index.ts`, `index.mts`, `index.cts`, `index.jsx`, `index.tsx`. That's what a bare `import "<scope-name>"` resolves to from the parent scope. A scope without any `index.<ext>` can't be imported by name. TypeScript extensions are accepted as entry points and stripped at install time (§5.5). When multiple index extensions are present in the same scope (unusual but legal), the resolver picks the first match in the order listed above, with JS variants ahead of TS.
 - Scopes that contain only `ModuleScope` values (pure dependency containers) don't need `index.js`. They aren't themselves importable targets — they're registry wrappers. This is how a root scope handed to `ctx.install` typically looks.
 - `str` keys may contain `/` (POSIX-style path within the scope's file tree): `"lib/util.js"`, `"tests/deep/nested.js"`. Path normalization is purely a resolver concern; the dict key stays as-given.
 - Any key, at any depth, must not start with `./` or `../`. Those are relative specifiers used in JS import statements, never valid as dict keys.
@@ -626,6 +626,41 @@ async def eval_async(self, code, *, module=False, **kw):
         # Existing script-mode path, unchanged
         ...
 ```
+
+### 5.5 TypeScript stripping
+
+Files whose scope-entry key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are run through [oxidase](https://github.com/branchseer/oxidase) at `Context.install()` time. Oxidase erases type annotations, transforms enums / namespaces / parameter properties, and returns a plain JS source that QuickJS can execute. Plain JS extensions (`.js`, `.mjs`, `.cjs`, `.jsx`) and any other extensions pass through unchanged.
+
+Key behaviors:
+
+* **Per-file decision.** The scope dict's key determines stripping. A scope can freely mix `.ts` and `.js` entries — each file is handled according to its own extension. The canonical path stored in `FlatModuleStore.sources` preserves the original extension (e.g. `"@util/helpers.ts"`), so QuickJS stack traces point at the source the user wrote.
+* **Specifiers are preserved.** Oxidase does not rewrite import specifiers. `import { x } from "./foo.ts"` stays `"./foo.ts"` in the stripped output, and the resolver looks up `"foo.ts"` against the scope's file set — matching the dict key literally. There is no `.ts → .js` fallback; keys and specifiers must agree character-for-character.
+* **Errors surface at install time.** Oxidase parses the source during stripping, so a TypeScript syntax error raises `QuickJSError` from `ctx.install(scope)` rather than later at `ctx.eval_async(..., module=True)`. The error message includes the scope-key filename and oxidase's diagnostic text. This is a nicer failure mode than plain-JS syntax errors, which still surface at eval time (QuickJS parses lazily).
+* **No type checking.** Oxidase only strips types — it does not validate them. `const x: number = "hi"` installs and runs successfully (produces `const x         = "hi"`). Run `tsc --noEmit` separately if you want type checking.
+* **Index-file extensions.** Because `index.ts` is a legitimate entry point, §3.1's "scope with str entries must declare an index module" rule accepts any `index.<ext>` where `<ext>` is one of `js`, `mjs`, `cjs`, `ts`, `mts`, `cts`, `jsx`, `tsx`. When a bare specifier resolves to a scope, the resolver picks the first matching `index.<ext>` in that preference order. The order means a scope with both `index.js` and `index.ts` prefers `.js` — a situation that shouldn't arise in normal authorship but is unambiguous if it does.
+
+```python
+# A .ts entry point importing a .ts helper. Both get stripped;
+# types and enums are handled.
+ModuleScope({
+    "@util": ModuleScope({
+        "index.ts": """
+            import { lower } from "./helpers.ts";
+            export enum Mode { Strict = 1, Loose = 2 }
+            export function slug(s: string, mode: Mode): string {
+                return lower(s).replace(/ /g, mode === Mode.Strict ? "_" : "-");
+            }
+        """,
+        "helpers.ts": """
+            export function lower(s: string): string {
+                return s.toLowerCase();
+            }
+        """,
+    }),
+})
+```
+
+The dependency is declared in `Cargo.toml` as a pinned git rev (not a floating branch) — oxidase is not yet on crates.io, and a floating branch would let upstream force-pushes silently break the build. Measured binary-size cost on macOS arm64: **~400 KiB over the v0.4 module-loading baseline (~1.42 MiB → ~1.82 MiB)**.
 
 ## 6. Module lifecycle
 

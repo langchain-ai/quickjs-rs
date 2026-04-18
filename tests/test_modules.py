@@ -211,21 +211,23 @@ def test_two_namespaces_coexist_same_key() -> None:
 # ---- Invalid construction -------------------------------------------
 
 
-def test_scope_with_str_entries_missing_index_js_raises() -> None:
-    """§3.1: a ModuleScope with any `str` entries must have
-    `'index.js'` — that's what a bare `import ... from 'scope-name'`
-    resolves to."""
-    with pytest.raises(ValueError, match="missing required 'index.js'"):
+def test_scope_with_str_entries_missing_index_raises() -> None:
+    """§3.1 / §5.5: a ModuleScope with any `str` entries must
+    expose one of the recognized entry-point filenames
+    (index.js / .mjs / .cjs / .ts / .mts / .cts / .jsx / .tsx).
+    That's what a bare `import ... from 'scope-name'` resolves to.
+    """
+    with pytest.raises(ValueError, match="missing required index module"):
         ModuleScope(
             {"@agent/fs": ModuleScope({"helpers.js": "export default 1;"})}
         )
 
 
-def test_nested_scope_missing_index_js_at_top_level_raises() -> None:
+def test_nested_scope_missing_index_at_top_level_raises() -> None:
     """The top-level scope itself: if it has any str entries but no
-    index.js, that's invalid too. (A pure-dependency root is
+    index.<ext>, that's invalid too. (A pure-dependency root is
     separately valid — tested above.)"""
-    with pytest.raises(ValueError, match="missing required 'index.js'"):
+    with pytest.raises(ValueError, match="missing required index module"):
         ModuleScope({"loose.js": "export default 1;"})
 
 
@@ -1265,3 +1267,295 @@ async def test_comprehension_removal_makes_module_unreachable() -> None:
                     'import { unsafe } from "@agent/fs"; globalThis.x = unsafe;',
                     module=True,
                 )
+
+
+# ---- TypeScript via oxidase — §5.5 -----------------------------------
+#
+# .ts and .tsx keys are transparently stripped at install() time.
+# The resolver treats the key literally — ".ts" stays ".ts" in
+# canonical paths — so `import { x } from "./foo.ts"` resolves
+# against the dict key "foo.ts", not "foo.js". Oxidase preserves
+# the specifier untouched (verified against 045ea46b).
+
+
+async def test_ts_file_with_type_annotations_imports_and_runs() -> None:
+    """§5.5: a .ts entry point + a .ts helper, types stripped at
+    install time. Exercises the basic wire-up: key-based extension
+    detection, oxidase round-trip, specifier preservation, and the
+    §3.1 validation-rule broadening that admits index.ts as a
+    valid entry point alongside index.js."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@util": ModuleScope(
+                            {
+                                "index.ts": (
+                                    'import { lower } from "./helpers.ts";\n'
+                                    "export function slug(s: string): string {\n"
+                                    "  return lower(s).replace(/ /g, '-');\n"
+                                    "}\n"
+                                ),
+                                "helpers.ts": (
+                                    "export function lower(s: string): string {\n"
+                                    "  return s.toLowerCase();\n"
+                                    "}\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { slug } from "@util";
+                globalThis.r = slug("Hello World");
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "hello-world"
+
+
+async def test_tsx_file_strips_types() -> None:
+    """§5.5: .tsx uses oxidase's tsx source-type. We don't
+    evaluate JSX here (QuickJS wouldn't understand it) — just
+    verify that a .tsx file with TS annotations but no JSX
+    elements installs + runs. The strip path itself is the
+    primary thing under test."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@ui": ModuleScope(
+                            {
+                                "index.tsx": (
+                                    "export function greet(name: string): string {\n"
+                                    "  const message: string = 'hi ' + name;\n"
+                                    "  return message;\n"
+                                    "}\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { greet } from "@ui";
+                globalThis.r = greet("world");
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "hi world"
+
+
+async def test_ts_enum_is_transpiled_to_runtime_value() -> None:
+    """§5.5: oxidase transforms TS enums into runtime IIFE code,
+    unlike strip-only transpilers. Verify that enum member access
+    actually works at runtime."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@e": ModuleScope(
+                            {
+                                "index.ts": (
+                                    "export enum Color { Red = 1, Green = 2, Blue = 3 }\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { Color } from "@e";
+                globalThis.r = Color.Red + "," + Color.Green + "," + Color.Blue;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "1,2,3"
+
+
+async def test_ts_interface_has_no_runtime_artifact() -> None:
+    """§5.5: interface declarations are erased entirely — they
+    leave no runtime value. Exporting an interface and trying to
+    import it as a binding should fail at eval time with
+    SyntaxError or similar (the binding doesn't exist in the
+    stripped output)."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            # Use an interface only in a type position (annotation).
+            # The interface declaration itself is erased; no
+            # binding is produced. The `User` reference in the
+            # annotation is also erased with it.
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.ts": (
+                                    "export interface User { name: string; }\n"
+                                    "export function greet(u: User): string {\n"
+                                    "  return 'hi ' + u.name;\n"
+                                    "}\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            # greet is still exported — interface doesn't block it.
+            await ctx.eval_async(
+                """
+                import { greet } from "@m";
+                globalThis.r = greet({ name: "world" });
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "hi world"
+            # Importing `User` fails: it has no runtime existence.
+            with pytest.raises(JSError):
+                await ctx.eval_async(
+                    """
+                    import { User } from "@m";
+                    globalThis.x = User;
+                    """,
+                    module=True,
+                )
+
+
+def test_ts_syntax_error_surfaces_at_install_time() -> None:
+    """§5.5: unlike plain JS (whose syntax errors land at eval
+    time — per test_syntax_error_in_module_surfaces_at_eval_time
+    above), TS parse errors fire during install() because oxidase
+    parses the source then and there. That's a better failure
+    mode: the user's TS mistakes surface immediately, not after
+    a bunch of other modules have already been imported.
+
+    Note this test is sync — install() is sync, and we don't need
+    an eval to trigger the failure."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            from quickjs_rs import QuickJSError
+
+            with pytest.raises(QuickJSError, match="TypeScript parse error"):
+                ctx.install(
+                    ModuleScope(
+                        {
+                            "@broken": ModuleScope(
+                                {
+                                    "index.ts": "this = is := not valid ??? TypeScript",
+                                }
+                            ),
+                        }
+                    )
+                )
+
+
+async def test_mixed_ts_and_js_files_in_same_scope() -> None:
+    """§5.5: a scope can have both .ts and .js str entries; each
+    is handled according to its extension. Both become distinct
+    modules under distinct canonical paths (`foo.ts`, `bar.js`);
+    the resolver treats them identically — extension is purely
+    an install-time strip decision."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.ts": (
+                                    'import { plain } from "./plain.js";\n'
+                                    'import { typed } from "./typed.ts";\n'
+                                    "export const combined: string = plain + '|' + typed;\n"
+                                ),
+                                "plain.js": (
+                                    "export const plain = 'js-side';\n"
+                                ),
+                                "typed.ts": (
+                                    "export const typed: string = 'ts-side';\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { combined } from "@m";
+                globalThis.r = combined;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == "js-side|ts-side"
+
+
+async def test_ts_to_ts_relative_import_preserves_extension() -> None:
+    """§5.5 + the resolver's specifier-literal rule: a .ts file
+    that imports "./other.ts" keeps the ".ts" specifier (oxidase
+    leaves it alone), and the resolver looks up "other.ts" in the
+    scope's file set — which matches exactly because the key was
+    registered as "other.ts"."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.ts": (
+                                    'import { x } from "./other.ts";\n'
+                                    "export const y: number = x * 2;\n"
+                                ),
+                                "other.ts": (
+                                    "export const x: number = 21;\n"
+                                ),
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { y } from "@m";
+                globalThis.r = y;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 42
+
+
+async def test_ts_to_js_relative_import_works() -> None:
+    """§5.5: a .ts file importing a .js sibling. Nothing clever —
+    verifies that the extension-based strip decision is strictly
+    per-file and doesn't corrupt cross-extension imports."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.install(
+                ModuleScope(
+                    {
+                        "@m": ModuleScope(
+                            {
+                                "index.ts": (
+                                    'import { value } from "./util.js";\n'
+                                    "export const doubled: number = value * 2;\n"
+                                ),
+                                "util.js": "export const value = 7;\n",
+                            }
+                        ),
+                    }
+                )
+            )
+            await ctx.eval_async(
+                """
+                import { doubled } from "@m";
+                globalThis.r = doubled;
+                """,
+                module=True,
+            )
+            assert ctx.eval("r") == 14

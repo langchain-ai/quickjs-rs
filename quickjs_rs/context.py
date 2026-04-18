@@ -431,7 +431,16 @@ class Context:
         for key, value in scope.modules.items():
             if isinstance(value, str):
                 canonical = key if scope_path == "" else f"{scope_path}/{key}"
-                engine_rt.add_module_source(scope_path, key, canonical, value)
+                try:
+                    engine_rt.add_module_source(
+                        scope_path, key, canonical, value
+                    )
+                except _engine.QuickJSError as e:
+                    # §5.5: TypeScript parse errors surface here
+                    # (install time), not at eval. Rebrand the raw
+                    # engine error as the public QuickJSError with
+                    # the same message + __cause__ for traceback.
+                    raise QuickJSError(str(e)) from e
             elif isinstance(value, ModuleScope):
                 engine_rt.register_subscope(scope_path, key)
                 child_path = key if scope_path == "" else f"{scope_path}/{key}"

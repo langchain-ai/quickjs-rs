@@ -18,6 +18,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
+# §5.5: recognized extensions for a scope's entry-point module.
+# Order is the resolver's preference order when a bare specifier
+# lands on a scope: whichever index.<ext> exists first in this
+# list wins. JS variants first (faster — no strip), then TS
+# variants (always stripped via oxidase), then JSX/TSX.
+_INDEX_EXTENSIONS: tuple[str, ...] = (
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "mts",
+    "cts",
+    "jsx",
+    "tsx",
+)
+
 
 @dataclass(frozen=True)
 class ModuleScope:
@@ -117,17 +133,24 @@ class ModuleScope:
 
         # A scope that owns any files must expose an entry point.
         # Bare `import "scope-name"` from the parent resolves to
-        # "scope-name/index.js". A pure-dependency container (only
-        # ModuleScope entries, no str entries) doesn't need one —
-        # it isn't itself a module target, just a registry wrapper.
-        if has_str_entry and "index.js" not in self.modules:
+        # "scope-name/index.<ext>" where <ext> is one of the
+        # recognized module extensions (§5.5). Accept .js, .mjs,
+        # .cjs for plain JS and .ts, .mts, .cts, .jsx, .tsx for
+        # files that get processed at install time. A pure-
+        # dependency container (only ModuleScope entries, no str
+        # entries) doesn't need one.
+        if has_str_entry and not any(
+            f"index.{ext}" in self.modules for ext in _INDEX_EXTENSIONS
+        ):
             raise ValueError(
                 "ModuleScope with str entries is missing required "
-                "'index.js' entry point. A scope that owns files "
-                "must declare an index.js — that's what a bare "
-                "`import ... from 'scope-name'` resolves to. "
-                "If this is a pure-dependency container, remove "
-                "the str entries or wrap them in a nested ModuleScope."
+                "index module. A scope that owns files must declare "
+                "one of: "
+                + ", ".join(f"index.{e}" for e in _INDEX_EXTENSIONS)
+                + ". That's what a bare `import ... from "
+                "'scope-name'` resolves to. If this is a pure-"
+                "dependency container, remove the str entries or "
+                "wrap them in a nested ModuleScope."
             )
 
         # Freeze. object.__setattr__ bypasses the frozen dataclass
