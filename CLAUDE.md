@@ -9,14 +9,16 @@ Instructions for Claude Code working in this repository. Read this file in full 
 1. `quickjs_rs._engine` — PyO3 Rust extension wrapping rquickjs. Single compiled `.so`.
 2. `quickjs_rs` — user-facing Python API (`Runtime`, `Context`, `Handle`, `ModuleScope`).
 
-**Scope: v0.4 active, v0.3 complete at tag v0.3.0.** v0.3 delivered the PyO3 + rquickjs rewrite (wasm layer removed, 114/114 tests green, §13.1 + §13.2 acceptance green). v0.4 adds ES module support via a composable `ModuleScope` type — see `spec/module-loading.md`. The v0.3 API is unchanged in v0.4; `ModuleScope` + `Context.install()` + `module=True` eval is additive.
+**Scope: v0.4 complete at tag v0.4.0-rc1, v0.3 at tag v0.3.0-rc1.** v0.3 delivered the PyO3 + rquickjs rewrite (wasm layer removed, native-baseline CI green). v0.4 added ES module support via the composable `ModuleScope` type — see `spec/module-loading.md`. The v0.3 public API is unchanged in v0.4; `ModuleScope` + `Context.install()` + `module=True` eval is additive. v0.4's only breaking change is `eval_async`/`eval_handle_async`'s `module` parameter default flipping from `True` to `False` (§7 of the module-loading spec). 165/165 tests green; §13.1 + §13.2 + §13.3 acceptance all green.
+
+The next iteration is v0.5. Until its spec exists, do not implement v0.5+ features (see "What not to do").
 
 This repo previously used a wasm-based architecture (wasmtime + C shim). v0.3's rewrite dropped the wasm layer entirely; the git history from the wasm era (v0.1, v0.2) is preserved and useful for understanding design decisions — the spec evolution story is traceable through commit bodies.
 
 ## Authoritative docs
 
-- `spec/implementation.md` — the v0.3 rewrite spec. Section numbers (§3, §6, etc.) are referenced throughout.
-- `spec/module-loading.md` — the v0.4 module-loading spec. Active — this is what phase 4 implements.
+- `spec/implementation.md` — the v0.3 rewrite spec (complete at v0.3.0-rc1). Section numbers (§3, §6, etc.) are referenced throughout.
+- `spec/module-loading.md` — the v0.4 module-loading spec (complete at v0.4.0-rc1).
 - `spec/benchmarks.md` — benchmark cases and targets.
 - `spec/quickjs.wit` — archival; documents the original wasm interface contract. Not authoritative for this repo, but useful for understanding the API design rationale.
 
@@ -24,9 +26,11 @@ This repo previously used a wasm-based architecture (wasmtime + C shim). v0.3's 
 
 ## Implementation order
 
-**v0.4 active — follow §10 of `spec/module-loading.md`.** Eight steps: (1) Cargo.toml loader feature, (2) ModuleScope class with validation, (3) static registry + Context.install + single-file import green, (4) nested scopes + ./ relative imports, (5) resolver-boundary enforcement, (6) real ES-module eval path, (7) full test suite + §13.3 acceptance, (8) spec + CLAUDE.md updates → tag v0.4.0-rc1. The rhythm is the same as v0.1 / v0.2 / v0.3: one assertion green per commit, acceptance as the north star.
+**v0.4 complete at v0.4.0-rc1.** Shipped via the eight-step path in `spec/module-loading.md` §10: (1) loader feature, (2) ModuleScope class, (3) registry + install + single-file import, (4) nested scopes + relative imports, (5) resolver boundaries, (6) module eval, (7) full tests + §13.3 acceptance, (8) CLAUDE.md + tag. Steps 4–6 collapsed into step 3's commit in practice — the scope-local resolver handles relative + bare + boundary enforcement from the start.
 
-For archival context on earlier phases, `spec/implementation.md` §15 documents v0.3's phase 0–3 rewrite (PyO3 + rquickjs, all 114 tests + §13.1 + §13.2 acceptance green at tag v0.3.0).
+For archival context on earlier phases: `spec/implementation.md` §15 documents v0.3's phase 0–3 rewrite (PyO3 + rquickjs, all 114 tests + §13.1 + §13.2 acceptance green). v0.4 added 51 module tests + the §13.3 acceptance on top of that (165 total).
+
+**v0.5 is not yet scoped.** Do not start v0.5 work without a spec. The v0.4 out-of-scope list (`spec/module-loading.md` §12) is a reasonable starting pool for v0.5 scoping but not a commitment.
 
 ## Build commands
 
@@ -133,7 +137,7 @@ Scope prefixes: `engine:` (Rust/PyO3), `api:` (Python layer), `tests:`, `bench:`
 - Do not store Python callables (PyObject) in rquickjs data structures. Use the fn_id dispatch pattern per §6.5.
 - Do not change the public Python API without updating the spec.
 - Do not commit code with failing tests (except during v0.3 phase 0 where tests failed by design — the bridge was being swapped; that window is closed).
-- Do not implement v0.5+ features. The v0.4 out-of-scope list lives in `spec/module-loading.md` §12 (dynamic resolvers, filesystem loading, hot-reload, `import.meta`, source maps, bytecode caching, three-level nesting, `HostModule` as a separate type). Any of those items may be the right call for v0.5 — they are not the right call for v0.4. If you find yourself reaching for one, stop and ask whether the current spec covers the use case first.
+- Do not implement v0.5+ features. v0.4 is tagged at v0.4.0-rc1 and its scope is closed. `spec/module-loading.md` §12 lists what's explicitly out of scope for v0.4 (dynamic resolvers, filesystem loading, hot-reload, `import.meta`, source maps, bytecode caching, `HostModule` as a separate type, etc.). Any of those items may be the right call for v0.5 when v0.5 has a spec. Until then, if you find yourself reaching for one, stop and ask whether the current spec already covers the use case.
 
 ## Spec-conformance tripwires
 
@@ -162,8 +166,8 @@ If rquickjs doesn't expose something the spec requires, check rquickjs's GitHub 
 ## File map
 
 ```
-spec/implementation.md      v0.3 rewrite spec (completed at v0.3.0)
-spec/module-loading.md      v0.4 module-loading spec (active)
+spec/implementation.md      v0.3 rewrite spec (complete at v0.3.0-rc1)
+spec/module-loading.md      v0.4 module-loading spec (complete at v0.4.0-rc1)
 spec/benchmarks.md          Benchmark cases and targets
 spec/quickjs.wit            Archival interface contract
 Cargo.toml                  Rust dependencies (rquickjs, PyO3)
@@ -172,14 +176,15 @@ src/{errors,marshal,        §6 subsystems (split in v0.3)
      host_fn,runtime,
      context,handle,
      reentrance}.rs
+src/modules.rs              v0.4 — ModuleStore, StoreResolver, StoreLoader
 quickjs_rs/runtime.py       §7 — Runtime
 quickjs_rs/context.py       §7 — Context + eval_async + install (v0.4)
 quickjs_rs/handle.py        §7 — Handle
 quickjs_rs/globals.py       §7 — Globals proxy
-quickjs_rs/modules.py       v0.4 — ModuleScope (pending step 2)
+quickjs_rs/modules.py       v0.4 — ModuleScope
 quickjs_rs/errors.py        §9 — Exception hierarchy
-tests/test_smoke.py         §13 — Acceptance tests
-tests/test_modules.py       v0.4 module tests (pending step 7)
+tests/test_smoke.py         §13 — Acceptance tests (v0.1, v0.2, v0.4)
+tests/test_modules.py       v0.4 module tests (51 cases)
 tests/test_*.py             Focused tests (transferred)
 benchmarks/                 Benchmark suite (transferred)
 ```
