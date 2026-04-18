@@ -14,13 +14,22 @@ rquickjs = { version = "0.11", features = [
     "classes",
     "properties",
     "futures",
-    "bindgen",
     # v0.4: enables the Resolver / Loader traits + Runtime::set_loader
     # for ES module support. See spec/module-loading.md §5.1.
     # The feature is trait-surface only — no behavior change to any
     # existing code path. Adding it unlocks the FlatModuleStore
     # implementation that lands in step 3.
     "loader",
+    # `bindgen` is deliberately omitted: rquickjs-sys ships
+    # pre-generated bindings for every target we build wheels for
+    # (aarch64 / x86_64 × linux-gnu / linux-musl / apple-darwin /
+    # pc-windows-msvc). Enabling bindgen would pull in libclang +
+    # glibc-devel at build time, which breaks the manylinux build
+    # container (`bits/libc-header-start.h: file not found`) and
+    # slows cold compiles everywhere. If we ever target a platform
+    # without a pre-generated binding file (see
+    # rquickjs-sys/src/bindings/), add bindgen back here and
+    # ensure the build environment has libclang.
 ] }
 # v0.4 TypeScript support — str entries ending in .ts/.tsx are
 # transparently type-stripped at install() time. See
