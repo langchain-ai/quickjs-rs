@@ -45,6 +45,25 @@ jobs:
           # every Python on PATH inside the build container.
           args: --release --out dist -i python${{ matrix.python-version }}
           manylinux: auto
+          # Force C11 for the bundled QuickJS source compiled by
+          # rquickjs-sys's build.rs. The aarch64 cross-container
+          # (ghcr.io/rust-cross/manylinux2014-cross:aarch64) ships
+          # a gcc that defaults to pre-C99 mode and rejects
+          # variable-declaration-in-for-loop syntax — `for (int
+          # i=...;)` errors as "'for' loop initial declarations
+          # are only allowed in C99 mode". x86_64's PyPA image
+          # (quay.io/pypa/manylinux2014_x86_64:latest) has a
+          # newer devtoolset gcc that defaults to gnu11, which
+          # is why x86_64 alone was green before this flag. We
+          # set the flag for all Linux targets rather than just
+          # aarch64 so the flag stops being load-bearing the
+          # moment rust-cross updates its image.
+          #
+          # cc-rs (invoked by rquickjs-sys's build.rs) respects
+          # CFLAGS; maturin-action passes container-options to
+          # `docker run`, so `-e CFLAGS=-std=gnu11` lands inside
+          # the build container.
+          container-options: -e CFLAGS=-std=gnu11
 
       - uses: actions/upload-artifact@v4
         with:
