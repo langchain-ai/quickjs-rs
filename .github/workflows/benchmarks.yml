@@ -35,10 +35,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: benchmarks
 
@@ -62,7 +62,7 @@ jobs:
           maturin develop --release -E dev,bench
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@93bbfdc546455345ae00c6f4e100a37838b37bcf # v4.14.0
         with:
           mode: walltime
           token: ${{ secrets.CODSPEED_TOKEN }}
