@@ -16,7 +16,7 @@
 //! will break `test_reentrant_eval_from_host_function` — the v0.2
 //! tripwire that pinned it.
 //!
-//! SAFETY INVARIANT: requires `panic = "unwind"` (enforced in Cargo.toml).
+//! Requires `panic = "unwind"` (enforced in Cargo.toml).
 //! PyO3 wraps #[pymethods] calls in catch_unwind. Under panic=unwind, a
 //! panicking host function unwinds through the Guard (clearing the thread-local)
 //! before PyO3 catches it — the program recovers with a clean slot. Without
