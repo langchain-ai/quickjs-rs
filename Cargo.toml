@@ -46,3 +46,4 @@ oxidase = { git = "https://github.com/branchseer/oxidase", rev = "045ea46b604cee
 lto = true
 codegen-units = 1
 strip = true
+panic = "unwind" # required: see src/reentrance.rs — PyO3 catch_unwind + Guard safety
