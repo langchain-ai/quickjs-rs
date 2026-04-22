@@ -351,10 +351,11 @@ async def test_throw_in_then_callback_propagates_as_js_error() -> None:
         with rt.new_context() as ctx:
             with pytest.raises(JSError) as exc_info:
                 await ctx.eval_async(
-                    "await Promise.resolve().then(() => { throw new RangeError('boom from then'); })"
+                    "await Promise.resolve()"
+                    ".then(() => { throw new RangeError('boom'); })"
                 )
             assert exc_info.value.name == "RangeError"
-            assert "boom from then" in exc_info.value.message
+            assert "boom" in exc_info.value.message
 
 
 async def test_cumulative_timeout_two_calls_within_budget() -> None:
