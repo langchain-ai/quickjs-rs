@@ -15,6 +15,14 @@
 //! its real `'js` scope. Removing or refactoring this machinery
 //! will break `test_reentrant_eval_from_host_function` — the v0.2
 //! tripwire that pinned it.
+//!
+//! Requires `panic = "unwind"` (enforced in Cargo.toml).
+//! PyO3 wraps #[pymethods] calls in catch_unwind. Under panic=unwind, a
+//! panicking host function unwinds through the Guard (clearing the thread-local)
+//! before PyO3 catches it — the program recovers with a clean slot. Without
+//! this, PyO3 could recover the program while the thread-local still holds a
+//! dead Ctx<'static>, and the next reentrant call on that runtime would be a
+//! use-after-free.
 
 use pyo3::prelude::*;
 use rquickjs::{Context, Ctx};

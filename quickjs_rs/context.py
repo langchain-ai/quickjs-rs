@@ -710,11 +710,7 @@ class Context:
                     try:
                         while True:
                             # §7.4 step 1: drain microtasks first.
-                            rc = self._engine_ctx.run_pending_jobs()
-                            if rc < 0:
-                                raise QuickJSError(
-                                    "pending-job execution reported an error"
-                                )
+                            self._engine_ctx.run_pending_jobs()
 
                             # §7.4 step 2: check promise state.
                             state = self._engine_ctx.promise_state(inner)
