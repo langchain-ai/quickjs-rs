@@ -175,7 +175,15 @@ fn dispatch_async_host_fn<'js>(
                 to: "js",
                 message: Some(format!("async dispatcher raised: {}", e)),
             })?;
-        Ok(result.extract::<i32>().unwrap_or(0))
+        let rc: i32 = result.extract::<i32>().map_err(|e| rquickjs::Error::IntoJs {
+            from: "python",
+            to: "js",
+            message: Some(format!(
+                "async dispatcher returned a non-integer value (expected 0 or -1): {}",
+                e
+            )),
+        })?;
+        Ok(rc)
     })?;
 
     if rc < 0 {
