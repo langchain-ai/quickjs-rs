@@ -73,7 +73,7 @@ stdlib = ModuleScope({
 
 with Runtime() as rt:
     with rt.new_context() as ctx:
-        ctx.install(stdlib)
+        rt.install(stdlib)
         assert await ctx.eval_async("""
             const { slugify } = await import("@agent/utils");
             const { MAX_RETRIES } = await import("@agent/config");
@@ -88,7 +88,7 @@ Shared deps are declared by spreading (`**utils.modules`) into each scope that n
 Source strings whose key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped at `install()` time via oxidase. Enums, namespaces, and parameter properties are transformed; plain type annotations erase to whitespace. No type checking — run `tsc --noEmit` separately if you want that.
 
 ```python
-ctx.install(ModuleScope({
+rt.install(ModuleScope({
     "@util": ModuleScope({
         "index.ts": """
             export enum Mode { Strict = 1, Loose = 2 }

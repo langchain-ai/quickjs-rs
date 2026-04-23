@@ -27,7 +27,7 @@ __version__ = "0.4.0.dev0"
 
 # Public API surface. v0.3 names (Runtime, Context, Handle, errors,
 # Undefined) ship at tag v0.3.0. v0.4 adds ModuleScope here; the
-# runtime wiring (Context.install, module=True eval) lands in later
+# runtime wiring (Runtime.install, module=True eval) lands in later
 # steps of spec/module-loading.md §10.
 __all__ = [
     "Runtime",

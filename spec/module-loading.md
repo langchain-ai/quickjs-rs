@@ -31,7 +31,7 @@ stdlib = ModuleScope({
 
 with Runtime() as rt:
     with rt.new_context() as ctx:
-        ctx.install(stdlib)
+        rt.install(stdlib)
 
         @ctx.function
         async def _readFile(path: str) -> str:
@@ -120,7 +120,7 @@ class ModuleScope:
         })
 
         # Pure-dependency root (only ModuleScope entries, no str).
-        # This is the common shape of what you hand to ctx.install.
+        # This is the common shape of what you hand to rt.install.
         ModuleScope({
             "@agent/utils": ModuleScope({"index.js": "..."}),
             "@agent/fs": ModuleScope({"index.js": "..."}),
@@ -132,7 +132,7 @@ class ModuleScope:
 **Validation at construction:**
 
 - A ModuleScope that contains at least one `str` value must include an index module — any one of `index.js`, `index.mjs`, `index.cjs`, `index.ts`, `index.mts`, `index.cts`, `index.jsx`, `index.tsx`. That's what a bare `import "<scope-name>"` resolves to from the parent scope. A scope without any `index.<ext>` can't be imported by name. TypeScript extensions are accepted as entry points and stripped at install time (§5.5). When multiple index extensions are present in the same scope (unusual but legal), the resolver picks the first match in the order listed above, with JS variants ahead of TS.
-- Scopes that contain only `ModuleScope` values (pure dependency containers) don't need `index.js`. They aren't themselves importable targets — they're registry wrappers. This is how a root scope handed to `ctx.install` typically looks.
+- Scopes that contain only `ModuleScope` values (pure dependency containers) don't need `index.js`. They aren't themselves importable targets — they're registry wrappers. This is how a root scope handed to `rt.install` typically looks.
 - `str` keys may contain `/` (POSIX-style path within the scope's file tree): `"lib/util.js"`, `"tests/deep/nested.js"`. Path normalization is purely a resolver concern; the dict key stays as-given.
 - Any key, at any depth, must not start with `./` or `../`. Those are relative specifiers used in JS import statements, never valid as dict keys.
 - Nested `ModuleScope` values may themselves contain `str` and/or `ModuleScope` children. Nesting is recursive and unbounded — whatever the dependency graph requires.
@@ -166,7 +166,7 @@ ModuleScope({
 
 # Valid — pure-dependency container (only ModuleScope values → no
 #         index.js required). Common shape for the root scope
-#         passed to ctx.install.
+#         passed to rt.install.
 ModuleScope({
     "@agent/utils": ModuleScope({"index.js": "export const U = 1;"}),
     "@agent/fs": ModuleScope({"index.js": "export const F = 2;"}),
@@ -184,7 +184,7 @@ ModuleScope({"@agent/fs": 42})  # TypeError
 
 A single-file module (`ModuleScope({"lodash": "export const x = 1;"})`) from earlier drafts no longer parses. `lodash` as a str at root would be a file — but the root scope has no `index.js` sibling, so validation fails. Wrap the source in a ModuleScope (`ModuleScope({"lodash": ModuleScope({"index.js": "export const x = 1;"})})`) to declare a single-file dep. The tradeoff keeps the two-namespaces rule clean — str is always a file, ModuleScope is always a dep.
 
-### 3.2 Context.install
+### 3.2 Runtime.install
 
 ```python
 class Context:
@@ -289,7 +289,7 @@ Relative specifiers never match a dependency. Bare specifiers never match a file
 
 Given `import "X" from referrer "Y"`:
 
-1. Identify the scope `S` that contains `Y`. For a file `"path/to/foo.js"` within scope `Sname`, the containing scope is `Sname` and the referrer's position within it is `path/to/foo.js`. For `"<eval>"`, the containing scope is the root scope installed via `ctx.install` and the position is the root (empty path).
+1. Identify the scope `S` that contains `Y`. For a file `"path/to/foo.js"` within scope `Sname`, the containing scope is `Sname` and the referrer's position within it is `path/to/foo.js`. For `"<eval>"`, the containing scope is the root scope installed via `rt.install` and the position is the root (empty path).
 2. If `X` starts with `./` or `../`:
    - Compute `normalized = posixpath.normpath(posixpath.dirname(position_in_S) + "/" + X)`.
    - If `normalized` starts with `"../"` or equals `".."` → **error**: the specifier escapes scope `S`.
@@ -377,7 +377,7 @@ import "X" from "Y" where Y lives at position P within scope S:
       (X never matches a str entry — deps only)
 ```
 
-`"<eval>"` is the referrer for code passed to `ctx.eval_async(module=True)`. Its containing scope is the root scope installed via `ctx.install`; its position within that scope is the empty string (the root directory). So `./foo.js` from eval normalizes to `foo.js` and looks for a root-level str entry; `@agent/fs` from eval looks for a root-level ModuleScope entry; `../anything` fails (escape past root).
+`"<eval>"` is the referrer for code passed to `ctx.eval_async(module=True)`. Its containing scope is the root scope installed via `rt.install`; its position within that scope is the empty string (the root directory). So `./foo.js` from eval normalizes to `foo.js` and looks for a root-level str entry; `@agent/fs` from eval looks for a root-level ModuleScope entry; `../anything` fails (escape past root).
 
 ## 5. Rust extension additions
 
@@ -402,7 +402,7 @@ The backing store holds a flattened view of the scope tree. At install time, Pyt
 * Each `str` entry under a canonical path that concatenates the containing scope's canonical path plus the entry's key (which may itself contain `/` if the user used a POSIX path): `"scope1/scope2/.../lib/util.js"`.
 * Each `ModuleScope` entry as a scope record whose canonical path is the joined scope-path. Scope records also store, for each direct dict key, its kind (`File` or `Scope`) and — for `File` entries — the full POSIX path (so the resolver can do `normpath` against `str` entries only).
 
-The root scope (the one passed to `ctx.install`) has the empty canonical path `""`. A file `"lib/util.js"` inside `@agent/fs` shows up as `"@agent/fs/lib/util.js"`. A file inside `@agent/fs/@peer` shows up as `"@agent/fs/@peer/index.js"`.
+The root scope (the one passed to `rt.install`) has the empty canonical path `""`. A file `"lib/util.js"` inside `@agent/fs` shows up as `"@agent/fs/lib/util.js"`. A file inside `@agent/fs/@peer` shows up as `"@agent/fs/@peer/index.js"`.
 
 ```rust
 /// Tree registry populated from Python's ModuleScope at install time.
@@ -511,7 +511,7 @@ impl Loader for FlatModuleStore {
 }
 ```
 
-The backing store construction (from `Context.install`) walks the `ModuleScope` recursively. At each scope, Python declares the scope's direct entries with their kinds; for each `str` entry it then calls `add_source` with the canonical path (joined scope path + the str key as-given, which may contain `/`):
+The backing store construction (from `Runtime.install`) walks the `ModuleScope` recursively. At each scope, Python declares the scope's direct entries with their kinds; for each `str` entry it then calls `add_source` with the canonical path (joined scope path + the str key as-given, which may contain `/`):
 
 ```python
 def _install_scope(self, scope: ModuleScope, scope_path: str) -> None:
@@ -543,7 +543,7 @@ def install(self, scope: ModuleScope) -> None:
 
 ### 5.3 New QjsRuntime / QjsContext methods
 
-The backing `FlatModuleStore` lives on the runtime (§11 open-decision 4 — `set_loader` is per-runtime in rquickjs). Two methods on `QjsRuntime` mutate the store at install time; one method on `QjsContext` evaluates code as an ES module.
+The backing `FlatModuleStore` lives on the runtime (`set_loader` is per-runtime in rquickjs). quickjs-rs exposes `Runtime.install()` as the owning API. Two methods on `QjsRuntime` mutate the store at install time; one method on `QjsContext` evaluates code as an ES module.
 
 ```rust
 #[pymethods]
@@ -586,7 +586,7 @@ impl QjsContext {
 }
 ```
 
-See §5.2 for the Python `Context.install()` recursion that drives these two methods.
+See §5.2 for the Python `Runtime.install()` recursion that drives these two methods.
 
 Additive: each call inserts into the backing `FlatModuleStore`. No guard, no flag, no error on repeated calls. Re-inserting a name that hasn't been imported yet overwrites the previous source. Re-inserting a name that has been imported is a no-op (QuickJS module cache takes precedence). A second `install` with a different root ModuleScope also merges into the same store — users who want isolated module sets should use separate runtimes.
 
@@ -629,13 +629,13 @@ async def eval_async(self, code, *, module=False, **kw):
 
 ### 5.5 TypeScript stripping
 
-Files whose scope-entry key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are run through [oxidase](https://github.com/branchseer/oxidase) at `Context.install()` time. Oxidase erases type annotations, transforms enums / namespaces / parameter properties, and returns a plain JS source that QuickJS can execute. Plain JS extensions (`.js`, `.mjs`, `.cjs`, `.jsx`) and any other extensions pass through unchanged.
+Files whose scope-entry key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are run through [oxidase](https://github.com/branchseer/oxidase) at `Runtime.install()` time. Oxidase erases type annotations, transforms enums / namespaces / parameter properties, and returns a plain JS source that QuickJS can execute. Plain JS extensions (`.js`, `.mjs`, `.cjs`, `.jsx`) and any other extensions pass through unchanged.
 
 Key behaviors:
 
 * **Per-file decision.** The scope dict's key determines stripping. A scope can freely mix `.ts` and `.js` entries — each file is handled according to its own extension. The canonical path stored in `FlatModuleStore.sources` preserves the original extension (e.g. `"@util/helpers.ts"`), so QuickJS stack traces point at the source the user wrote.
 * **Specifiers are preserved.** Oxidase does not rewrite import specifiers. `import { x } from "./foo.ts"` stays `"./foo.ts"` in the stripped output, and the resolver looks up `"foo.ts"` against the scope's file set — matching the dict key literally. There is no `.ts → .js` fallback; keys and specifiers must agree character-for-character.
-* **Errors surface at install time.** Oxidase parses the source during stripping, so a TypeScript syntax error raises `QuickJSError` from `ctx.install(scope)` rather than later at `ctx.eval_async(..., module=True)`. The error message includes the scope-key filename and oxidase's diagnostic text. This is a nicer failure mode than plain-JS syntax errors, which still surface at eval time (QuickJS parses lazily).
+* **Errors surface at install time.** Oxidase parses the source during stripping, so a TypeScript syntax error raises `QuickJSError` from `rt.install(scope)` rather than later at `ctx.eval_async(..., module=True)`. The error message includes the scope-key filename and oxidase's diagnostic text. This is a nicer failure mode than plain-JS syntax errors, which still surface at eval time (QuickJS parses lazily).
 * **No type checking.** Oxidase only strips types — it does not validate them. `const x: number = "hi"` installs and runs successfully (produces `const x         = "hi"`). Run `tsc --noEmit` separately if you want type checking.
 * **Index-file extensions.** Because `index.ts` is a legitimate entry point, §3.1's "scope with str entries must declare an index module" rule accepts any `index.<ext>` where `<ext>` is one of `js`, `mjs`, `cjs`, `ts`, `mts`, `cts`, `jsx`, `tsx`. When a bare specifier resolves to a scope, the resolver picks the first matching `index.<ext>` in that preference order. The order means a scope with both `index.js` and `index.ts` prefers `.js` — a situation that shouldn't arise in normal authorship but is unambiguous if it does.
 
@@ -667,7 +667,7 @@ The dependency is declared in `Cargo.toml` as a pinned git rev (not a floating b
 ### 6.1 Registration → import → evaluation
 
 ```
-Python: ctx.install(scope)
+Python: rt.install(scope)
   → recurse the scope tree, calling declare_scope at each scope
     and add_source at each str entry
   → Rust: FlatModuleStore.sources and .scopes get populated with
@@ -700,7 +700,7 @@ Python: ctx.eval_async("import { readFile } from '@agent/fs'; ...", module=True)
 
 QuickJS caches module records per context. Once `@agent/fs` is imported, subsequent `import "@agent/fs"` returns the cached module — the loader is NOT called again. This is correct ES module behavior (modules are singletons per realm).
 
-Consequence for additive `install()`: calling `ctx.install()` with a new source for a module name that's already been imported is a no-op — QuickJS serves the cached version. However, installing a module name that hasn't been imported yet works normally, even if other modules have already been imported. This means the pattern "install base modules, eval some code, install additional modules, eval more code" works correctly as long as the additional modules are genuinely new names.
+Consequence for additive `install()`: calling `rt.install()` with a new source for a module name that's already been imported is a no-op — QuickJS serves the cached version. However, installing a module name that hasn't been imported yet works normally, even if other modules have already been imported. This means the pattern "install base modules, eval some code, install additional modules, eval more code" works correctly as long as the additional modules are genuinely new names.
 
 ### 6.3 Module + script interaction
 
@@ -883,7 +883,7 @@ async def test_module_acceptance():
                     ],
                 }
 
-            ctx.install(stdlib)
+            rt.install(stdlib)
 
             # The motivating pattern — with real imports
             await ctx.eval_async("""
@@ -951,7 +951,7 @@ async def test_module_acceptance():
             async def _swarm(tasks: list, concurrency: int) -> dict:
                 return {"completed": 0, "failed": 0, "results": []}
 
-            ctx.install(test_stdlib)
+            rt.install(test_stdlib)
 
             await ctx.eval_async("""
                 import { MAX_RETRIES } from "@agent/config";
@@ -966,7 +966,7 @@ async def test_module_acceptance():
         })
 
         with rt.new_context() as ctx:
-            ctx.install(restricted)
+            rt.install(restricted)
             try:
                 await ctx.eval_async("""
                     import { readFile } from "@agent/fs";
@@ -997,7 +997,7 @@ async def test_module_acceptance():
             # @agent/utils directly because root doesn't declare it.
         })
         with rt.new_context() as ctx:
-            ctx.install(recursive)
+            rt.install(recursive)
             await ctx.eval_async("""
                 import { message } from "@app";
                 globalThis.msg = message;
@@ -1022,7 +1022,7 @@ async def test_module_acceptance():
 
 2. **ModuleScope class (Python only):** frozen dataclass with validation. No Rust changes. Commit as `api: ModuleScope type with validation`.
 
-3. **Static registry + install:** implement `FlatModuleStore` in Rust (Resolver + Loader) with the scope-local resolver from §4. Expose `add_source` + `declare_scope` on `QjsRuntime`. Wire `Context.install()` as a recursive walk in Python. First test: single-file module at root, import a constant. Commit as `engine+api: module registry — install + single-file import`.
+3. **Static registry + install:** implement `FlatModuleStore` in Rust (Resolver + Loader) with the scope-local resolver from §4. Expose `add_source` + `declare_scope` on `QjsRuntime`. Wire `Runtime.install()` as a recursive walk in Python. First test: single-file module at root, import a constant. Commit as `engine+api: module registry — install + single-file import`.
 
 4. **Nested scopes and self-contained deps:** extend tests for multi-file scopes with internal `./x.js` imports and for scopes that carry their own dependency scopes. The resolver already handles both from step 3 — this step is primarily test coverage + docs. Commit as `engine: nested scope resolution — ./relative + recursive deps`.
 
@@ -1042,7 +1042,7 @@ async def test_module_acceptance():
 
 - **Module names: any string or namespaced?** The spec allows any string as a module name (`"lodash"`, `"@agent/fs"`, `"my-thing"`). No enforcement of `@scope/name` convention. Users pick their own naming. This is simpler but means collisions between independently-authored module sets are the user's problem. Lean: keep it open, document the `@scope/name` convention as recommended but not enforced.
 
-- **Install on Runtime vs Context?** Resolved: `ctx.install()` is the API, but rquickjs's `set_loader` operates at the Runtime level. The `FlatModuleStore` is set on the runtime at creation and shared across all contexts on that runtime. Multiple `install()` calls from any context add to the same backing store. This means all contexts on the same runtime see the same module set. If different contexts need different module sets, use separate runtimes (8.6 µs each). This is acceptable for v0.4 — per-context module filtering is a v0.5 concern if it ever surfaces as a real need.
+- **Install on Runtime vs Context?** Resolved: module installation is runtime-scoped (`Runtime.install()`). rquickjs's `set_loader` is runtime-level, and all contexts on the same runtime see the same module set. If different contexts need different module sets, use separate runtimes.
 
 ## 12. Out of scope for v0.4
 

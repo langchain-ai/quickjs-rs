@@ -518,7 +518,7 @@ async def test_module_acceptance() -> None:
                     ],
                 }
 
-            ctx.install(stdlib)
+            rt.install(stdlib)
 
             # The motivating pattern — imports across scopes, top-
             # level await calling async host functions, results
@@ -615,7 +615,7 @@ async def test_module_acceptance() -> None:
                 async def _swarm(tasks: list, concurrency: int) -> dict:
                     return {"completed": 0, "failed": 0, "results": []}
 
-                ctx.install(test_stdlib)
+                rt_override.install(test_stdlib)
                 await ctx.eval_async(
                     """
                     import { MAX_RETRIES } from "@agent/config";
@@ -632,7 +632,7 @@ async def test_module_acceptance() -> None:
 
         with Runtime() as rt_restricted:
             with rt_restricted.new_context() as ctx:
-                ctx.install(restricted)
+                rt_restricted.install(restricted)
                 with pytest.raises(JSError, match="@agent/fs"):
                     await ctx.eval_async(
                         """
@@ -673,7 +673,7 @@ async def test_module_acceptance() -> None:
         )
         with Runtime() as rt_recursive:
             with rt_recursive.new_context() as ctx:
-                ctx.install(recursive)
+                rt_recursive.install(recursive)
                 await ctx.eval_async(
                     """
                     import { message } from "@app";
@@ -693,5 +693,4 @@ async def test_module_acceptance() -> None:
                         """,
                         module=True,
                     )
-
 

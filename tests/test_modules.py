@@ -56,7 +56,7 @@ def test_pure_dependency_root_is_valid_without_index_js() -> None:
     """§3.1: a scope containing only ModuleScope values (no str
     entries) doesn't need its own index.js — it isn't a module
     target, just a registry wrapper. This is the common shape of
-    what gets passed to ctx.install."""
+    what gets passed to rt.install."""
     scope = ModuleScope(
         {
             "@agent/config": ModuleScope(
@@ -475,7 +475,7 @@ async def test_install_bare_specifier_from_eval() -> None:
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/config": ModuleScope(
@@ -503,7 +503,7 @@ async def test_install_relative_specifier_within_scope() -> None:
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/utils": ModuleScope(
@@ -549,7 +549,7 @@ async def test_install_posix_subdirectory_and_parent_traversal() -> None:
             # turn reaches up to `../index.js` (= `index.js` at
             # scope root) to import `ROOT`. Exercises both
             # directions of POSIX traversal within a scope.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/app": ModuleScope(
@@ -591,7 +591,7 @@ async def test_same_filename_in_sibling_scopes_resolves_independently() -> None:
     source."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@a": ModuleScope(
@@ -638,7 +638,7 @@ async def test_relative_import_from_top_level_eval_resolves_in_root_scope() -> N
     satisfies validation) plus a sibling file we import."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "index.js": "export const ENTRY = true;",
@@ -661,7 +661,7 @@ async def test_relative_import_from_eval_for_missing_file_raises() -> None:
     such file → ResolveError surfaces as JSError."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
             )
             with pytest.raises(JSError, match="missing.js"):
@@ -677,7 +677,7 @@ async def test_parent_traversal_past_scope_root_raises() -> None:
     from ``normalize_path`` in src/modules.rs."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@x": ModuleScope(
@@ -704,7 +704,7 @@ async def test_top_level_eval_cannot_escape_root_with_dotdot() -> None:
     "outside" the installed set."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
             )
             with pytest.raises(JSError, match="escapes module scope root"):
@@ -723,7 +723,7 @@ async def test_scope_can_import_its_own_declared_dep_but_not_transitive() -> Non
     the resolver does NOT walk ancestors or consult the root."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@a": ModuleScope(
@@ -767,7 +767,7 @@ async def test_scope_cannot_reach_transitive_dep_directly() -> None:
     correctness of scope-local resolution."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@a": ModuleScope(
@@ -809,7 +809,7 @@ async def test_adding_transitive_dep_directly_makes_it_importable() -> None:
     c_scope = ModuleScope({"index.js": "export const C = 'c';"})
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@a": ModuleScope(
@@ -872,7 +872,7 @@ async def test_shared_dep_via_spread_resolves_in_both_scopes() -> None:
     )
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(main)
+            rt.install(main)
             await ctx.eval_async(
                 """
                 import { id } from "@agent/utils";
@@ -897,7 +897,7 @@ async def test_module_eval_returns_none() -> None:
     undefined; the only way to surface a value is globalThis."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const V = 42;"})})
             )
             result = await ctx.eval_async(
@@ -912,7 +912,7 @@ async def test_module_scoped_let_is_not_visible_in_subsequent_eval() -> None:
     A subsequent script-mode eval cannot see them."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
             )
             await ctx.eval_async(
@@ -928,7 +928,7 @@ async def test_module_globalThis_assignment_visible_in_script_eval() -> None:
     script-mode eval."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 7;"})})
             )
             await ctx.eval_async(
@@ -944,7 +944,7 @@ async def test_script_global_visible_in_module() -> None:
     names and ``ctx.globals[...]`` values flow into modules."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const K = 1;"})})
             )
             ctx.eval("globalThis.fromScript = 'hello'")
@@ -973,7 +973,7 @@ async def test_module_top_level_await_with_async_host_function() -> None:
                 await asyncio.sleep(0.001)
                 return {"one": 1, "two": 2}[key]
 
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/lookup": ModuleScope(
@@ -1022,7 +1022,7 @@ async def test_module_importing_module_that_uses_await() -> None:
             # Self-containment: consumer must carry its own copy of
             # provider in its dict. The top-level scope doesn't
             # leak into consumer.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/provider": provider,
@@ -1055,7 +1055,7 @@ async def test_import_non_registered_module_raises() -> None:
     """§8: missing module → JSError at eval time."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
             )
             with pytest.raises(JSError, match="@nope"):
@@ -1073,7 +1073,7 @@ async def test_syntax_error_in_module_surfaces_at_eval_time() -> None:
         with rt.new_context() as ctx:
             # install() must NOT raise even though the source is
             # clearly malformed.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@broken": ModuleScope(
@@ -1101,11 +1101,11 @@ async def test_reinstall_before_import_takes_new_source() -> None:
     the import sees the new value."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
             )
             # Re-install under the same canonical path BEFORE any import.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
                 )
@@ -1124,7 +1124,7 @@ async def test_reinstall_after_import_is_no_op_cache_wins() -> None:
     expected to know not to rely on hot-reloading module sources."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
             )
             await ctx.eval_async(
@@ -1133,7 +1133,7 @@ async def test_reinstall_after_import_is_no_op_cache_wins() -> None:
             )
             assert ctx.eval("first") == 1
             # Attempted swap — ignored by QuickJS's module cache.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
                 )
@@ -1155,10 +1155,10 @@ async def test_two_installs_both_importable() -> None:
     first's modules, just merges into the same backing store."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
             )
-            ctx.install(
+            rt.install(
                 ModuleScope({"@b": ModuleScope({"index.js": "export const B = 2;"})})
             )
             await ctx.eval_async(
@@ -1178,7 +1178,7 @@ async def test_install_after_eval_is_visible_to_next_eval() -> None:
     wasn't imported earlier (which would hit the cache)."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
             )
             await ctx.eval_async(
@@ -1187,7 +1187,7 @@ async def test_install_after_eval_is_visible_to_next_eval() -> None:
             )
             assert ctx.eval("first") == 1
             # Install a NEW name after an eval has happened.
-            ctx.install(
+            rt.install(
                 ModuleScope({"@b": ModuleScope({"index.js": "export const B = 10;"})})
             )
             await ctx.eval_async(
@@ -1223,7 +1223,7 @@ async def test_spread_override_replaces_module_end_to_end() -> None:
     )
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(test_scope)
+            rt.install(test_scope)
             await ctx.eval_async(
                 """
                 import { ENV } from "@agent/config";
@@ -1254,7 +1254,7 @@ async def test_comprehension_removal_makes_module_unreachable() -> None:
     )
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(restricted)
+            rt.install(restricted)
             # Safe module still works.
             await ctx.eval_async(
                 'import { safe } from "@agent/safe"; globalThis.r = safe;',
@@ -1286,7 +1286,7 @@ async def test_ts_file_with_type_annotations_imports_and_runs() -> None:
     valid entry point alongside index.js."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@util": ModuleScope(
@@ -1325,7 +1325,7 @@ async def test_tsx_file_strips_types() -> None:
     primary thing under test."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@ui": ModuleScope(
@@ -1357,7 +1357,7 @@ async def test_ts_enum_is_transpiled_to_runtime_value() -> None:
     actually works at runtime."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@e": ModuleScope(
@@ -1392,7 +1392,7 @@ async def test_ts_interface_has_no_runtime_artifact() -> None:
             # The interface declaration itself is erased; no
             # binding is produced. The `User` reference in the
             # annotation is also erased with it.
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(
@@ -1439,11 +1439,11 @@ def test_ts_syntax_error_surfaces_at_install_time() -> None:
     Note this test is sync — install() is sync, and we don't need
     an eval to trigger the failure."""
     with Runtime() as rt:
-        with rt.new_context() as ctx:
+        with rt.new_context():
             from quickjs_rs import QuickJSError
 
             with pytest.raises(QuickJSError, match="TypeScript parse error"):
-                ctx.install(
+                rt.install(
                     ModuleScope(
                         {
                             "@broken": ModuleScope(
@@ -1464,7 +1464,7 @@ async def test_mixed_ts_and_js_files_in_same_scope() -> None:
     an install-time strip decision."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(
@@ -1503,7 +1503,7 @@ async def test_ts_to_ts_relative_import_preserves_extension() -> None:
     registered as "other.ts"."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(
@@ -1536,7 +1536,7 @@ async def test_ts_to_js_relative_import_works() -> None:
     per-file and doesn't corrupt cross-extension imports."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(
@@ -1578,7 +1578,7 @@ async def test_dynamic_import_resolves_bare_specifier() -> None:
     exports."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/config": ModuleScope(
@@ -1605,7 +1605,7 @@ async def test_dynamic_import_of_relative_specifier_from_root_eval() -> None:
     str entries must declare one (§3.1)."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "index.js": "export const marker = true;",
@@ -1631,7 +1631,7 @@ async def test_dynamic_import_unknown_specifier_rejects() -> None:
     `@/skills/<name>` lookup."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(ModuleScope({"index.js": "export const x = 1;"}))
+            rt.install(ModuleScope({"index.js": "export const x = 1;"}))
             with pytest.raises(JSError):
                 await ctx.eval_async(
                     """
@@ -1648,7 +1648,7 @@ async def test_dynamic_import_of_ts_entrypoint_strips_types() -> None:
     see the same stripped source as static import."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/ts": ModuleScope(
@@ -1682,7 +1682,7 @@ async def test_dynamic_import_is_cached() -> None:
     importee should read as 1 twice, not 2."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/stateful": ModuleScope(
@@ -1734,7 +1734,7 @@ async def test_dynamic_import_basic() -> None:
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/utils": ModuleScope(
@@ -1770,7 +1770,7 @@ async def test_dynamic_import_from_script_mode() -> None:
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/utils": ModuleScope(
@@ -1799,7 +1799,7 @@ async def test_dynamic_import_variable_specifier() -> None:
     is worth knowing."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@agent/utils": ModuleScope(
@@ -1825,7 +1825,7 @@ async def test_dynamic_import_not_found() -> None:
     the normal async driving loop as a JSError."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@real": ModuleScope(
@@ -1852,7 +1852,7 @@ async def test_dynamic_import_within_scope() -> None:
     scope. Same path a static relative import would take."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(
@@ -1888,7 +1888,7 @@ async def test_dynamic_import_typescript() -> None:
     entry in the scope."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            ctx.install(
+            rt.install(
                 ModuleScope(
                     {
                         "@m": ModuleScope(

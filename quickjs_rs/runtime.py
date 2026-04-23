@@ -8,6 +8,7 @@ from typing import Any
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
+from quickjs_rs.modules import ModuleScope
 
 
 class Runtime:
@@ -84,6 +85,37 @@ class Runtime:
             self._contexts.remove(ctx)
         except ValueError:
             pass
+
+    def install(self, scope: ModuleScope) -> None:
+        """Register modules in this runtime's shared module store.
+
+        Any context created from this runtime can import installed
+        modules (subject to QuickJS module-cache semantics).
+        """
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        self._install_recursive(scope, scope_path="")
+
+    def _install_recursive(self, scope: ModuleScope, scope_path: str) -> None:
+        for key, value in scope.modules.items():
+            if isinstance(value, str):
+                canonical = key if scope_path == "" else f"{scope_path}/{key}"
+                try:
+                    self._engine_rt.add_module_source(
+                        scope_path, key, canonical, value
+                    )
+                except _engine.QuickJSError as e:
+                    # §5.5: TypeScript parse errors surface at install.
+                    raise QuickJSError(str(e)) from e
+            elif isinstance(value, ModuleScope):
+                self._engine_rt.register_subscope(scope_path, key)
+                child_path = key if scope_path == "" else f"{scope_path}/{key}"
+                self._install_recursive(value, scope_path=child_path)
+            else:
+                raise TypeError(
+                    f"ModuleScope entry {key!r}: expected str | ModuleScope, "
+                    f"got {type(value).__name__}"
+                )
 
     def run_pending_jobs(self) -> int:
         raise NotImplementedError("run_pending_jobs lands with async support (§7.4).")
