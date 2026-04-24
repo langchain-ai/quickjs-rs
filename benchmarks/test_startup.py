@@ -1,4 +1,4 @@
-"""Startup benchmarks. See spec/benchmarks.md §5.1.
+"""Startup benchmarks. See benchmarks/README.md.
 
 These measure the fixed cost users pay before any JS runs. For agent
 workloads that create a fresh context per tool invocation, startup is

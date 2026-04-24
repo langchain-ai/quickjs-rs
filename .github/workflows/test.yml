@@ -4,7 +4,7 @@ name: test
 # maturin compiles the PyO3 extension from src/lib.rs into a venv
 # created per-job; subsequent steps (ruff, mypy, pytest) run from
 # that venv so the project's dev extras (ruff, mypy, pytest) are
-# on PATH. See spec/implementation.md §5, §10.
+# on PATH.
 #
 # Why the venv dance: `maturin develop` refuses to install into a
 # bare Python (no VIRTUAL_ENV / CONDA_PREFIX / .venv marker), which

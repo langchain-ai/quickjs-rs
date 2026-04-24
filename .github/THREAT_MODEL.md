@@ -414,7 +414,7 @@ Evidence:
 
 | Upstream | Status Signal | Practical Read |
 |---|---|---|
-| quickjs-ng | quickjs-ng repository shows active releases (for example `v0.14.0` on 2026-04-11). | Actively released upstream C engine fork, but still native in-process risk. |
+| quickjs-ng | quickjs-ng repository shows active releases (for example `previous implementation` on 2026-04-11). | Actively released upstream C engine fork, but still native in-process risk. |
 | `rquickjs` / `rquickjs-sys` | `rquickjs` 0.11.0 release (2025-12-24); repository metadata current at snapshot time. | Wrapper and bindings appear actively maintained. |
 | PyO3 | `pyo3` 0.28.3 release (2026-04-02); repository metadata current at snapshot time. | Mature, high-velocity bridge ecosystem. |
 | `oxidase` (git dep) | Pinned commit date 2025-02-09; smaller maintainer footprint than PyO3/rquickjs. | Higher governance risk than large crates.io projects; pinning helps reproducibility, not compromise resistance. |

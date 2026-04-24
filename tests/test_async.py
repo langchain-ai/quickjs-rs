@@ -1,4 +1,4 @@
-"""eval_async and eval_handle_async driving loop. §7.4, §11.1, §13.2."""
+"""eval_async and eval_handle_async driving loop."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ async def test_eval_async_fast_path_non_promise() -> None:
 
 
 async def test_eval_async_first_assertion_from_132() -> None:
-    """§13.2 north star: auto-detected async host function, top-level
+    """Auto-detected async host function, top-level
     await in module mode, single assertion."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -34,15 +34,15 @@ async def test_eval_async_first_assertion_from_132() -> None:
                 await asyncio.sleep(n / 1000)
                 return "slept"
 
-            # §7.4 auto-detection: async def → is_async=True
-            # without an explicit kwarg. Matches §13.2's @ctx.function form.
+            # auto-detection: async def → is_async=True
+            # without an explicit kwarg. Matches 's @ctx.function form.
             ctx.register("sleep_ms", sleep_ms)
             assert await ctx.eval_async("await sleep_ms(10)") == "slept"
 
 
 async def test_promise_all_fan_out() -> None:
     """Three concurrent async host calls via Promise.all. Exercises
-    multiple in-flight tasks through one eval_async. §13.2."""
+    multiple in-flight tasks through one eval_async. ."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -63,7 +63,7 @@ async def test_promise_all_fan_out() -> None:
 
 
 async def test_concurrent_eval_async_raises() -> None:
-    """§7.4 concurrency rule: two eval_async against the same context
+    """Concurrency rule: two eval_async against the same context
     simultaneously raises ConcurrentEvalError on the second one."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -87,27 +87,22 @@ async def test_concurrent_eval_async_raises() -> None:
 
 
 async def test_deadlock_error_when_no_resolver() -> None:
-    """§10.3: pending top-level promise with nothing in flight →
+    """Pending top-level promise with nothing in flight →
     DeadlockError.
 
-    v0.4 change: ``module=False`` always enables JS_EVAL_FLAG_ASYNC
-    (§7), so the body needs to actually ``await`` the pending
-    promise to keep the top-level promise pending. Returning a
-    pending promise as the last expression would be wrapped as
-    ``{value: <pending>, done: false}`` — the wrapper itself is
-    fulfilled, so the driving loop returns immediately without
-    hitting the deadlock path.
+    Returning a pending promise as the last expression would be
+    wrapped as ``{value: <pending>, done: false}`` — the wrapper
+    itself is fulfilled, so the driving loop returns immediately
+    without hitting the deadlock path.
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
             with pytest.raises(DeadlockError):
-                await ctx.eval_async(
-                    "await new Promise((resolve) => {})", module=False
-                )
+                await ctx.eval_async("await new Promise((resolve) => {})", module=False)
 
 
 async def test_mixed_sync_and_async_host_calls() -> None:
-    """§13.2: one eval can call both sync and async host functions.
+    """One eval can call both sync and async host functions.
     Sync returns immediately, async awaits — the driving loop handles
     both paths in one evaluation."""
     with Runtime() as rt:
@@ -158,7 +153,7 @@ async def test_eval_handle_async_returns_handle() -> None:
 
 async def test_eval_async_propagates_js_rejection() -> None:
     """An async host fn that raises → rejected Promise →
-    HostError surfaces from eval_async via §10.2 routing."""
+    HostError surfaces from eval_async via routing."""
     from quickjs_rs import HostError
 
     with Runtime() as rt:
@@ -177,7 +172,7 @@ async def test_eval_async_propagates_js_rejection() -> None:
 
 
 async def test_handle_await_promise_happy_path() -> None:
-    """§13.2 tail: eval_handle_async + await_promise chain. Get a
+    """Tail: eval_handle_async + await_promise chain. Get a
     Handle to a Promise.resolve(42), await it, verify the resolved
     value round-trips."""
     with Runtime() as rt:
@@ -195,7 +190,7 @@ async def test_handle_await_promise_happy_path() -> None:
 
 async def test_handle_await_promise_rejection_raises_jserror() -> None:
     """A Promise that rejects with a JS Error surfaces as JSError
-    on await_promise. §10.1 routing applies exactly as it does for
+    on await_promise. Routing applies exactly as it does for
     eval_async on the same promise."""
     from quickjs_rs import JSError
 
@@ -207,9 +202,7 @@ async def test_handle_await_promise_rejection_raises_jserror() -> None:
             # a handle to a rejected Promise directly. Use a script-
             # mode eval_handle to skip the async envelope, then hand
             # the raw Promise to await_promise.
-            p = ctx.eval_handle(
-                "Promise.reject(new TypeError('boom'))"
-            )
+            p = ctx.eval_handle("Promise.reject(new TypeError('boom'))")
             try:
                 with pytest.raises(JSError) as excinfo:
                     await p.await_promise()
@@ -250,7 +243,7 @@ async def test_handle_await_promise_shares_driving_machinery() -> None:
 
 
 async def test_handle_await_promise_non_promise_returns_self() -> None:
-    """§7.2 idiomatic fast path: calling await_promise on a Handle
+    """Idiomatic fast path: calling await_promise on a Handle
     that isn't a Promise returns self unchanged. Lets callers write
     `await h.await_promise()` without pre-checking is_promise when
     the JS-side callee may return either shape."""
@@ -273,7 +266,7 @@ async def test_handle_await_promise_non_promise_returns_self() -> None:
 
 
 async def test_handle_await_promise_concurrent_eval_raises() -> None:
-    """await_promise respects the §7.4 concurrent-eval guard: if an
+    """await_promise respects the concurrent-eval guard: if an
     eval_async is already in flight on the same context, await_promise
     raises ConcurrentEvalError. Same rule applies in reverse
     (eval_async while await_promise is running) — same guard, same
@@ -306,7 +299,7 @@ async def test_handle_await_promise_concurrent_eval_raises() -> None:
 
 
 async def test_eval_async_per_call_timeout_override() -> None:
-    """§7.4: timeout= kwarg on eval_async overrides the cumulative
+    """timeout= kwarg on eval_async overrides the cumulative
     budget for that call. With the override set short, a slow async
     host call should abort with TimeoutError."""
     from quickjs_rs import TimeoutError as _TimeoutError
@@ -337,9 +330,7 @@ async def test_promise_chain_resolves_synchronously() -> None:
     event ever fires) and they should both just work."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            result = await ctx.eval_async(
-                "await Promise.resolve(1).then(x => x + 1)"
-            )
+            result = await ctx.eval_async("await Promise.resolve(1).then(x => x + 1)")
             assert result == 2
 
 
@@ -359,7 +350,7 @@ async def test_throw_in_then_callback_propagates_as_js_error() -> None:
 
 
 async def test_cumulative_timeout_two_calls_within_budget() -> None:
-    """§7.4: the cumulative budget is shared across eval_async calls
+    """the cumulative budget is shared across eval_async calls
     on the same context. Two short calls whose combined wall-clock
     stays under the budget should both succeed."""
     with Runtime() as rt:
@@ -376,7 +367,7 @@ async def test_cumulative_timeout_two_calls_within_budget() -> None:
 
 
 async def test_cumulative_timeout_exceeded_on_later_call() -> None:
-    """§7.4: once the cumulative budget is exhausted, subsequent
+    """once the cumulative budget is exhausted, subsequent
     eval_async calls on the context raise TimeoutError — even a
     trivial 1+1 that would otherwise be instant, because the
     deadline check fires at interrupt-poll time regardless of what
@@ -408,7 +399,7 @@ async def test_cumulative_timeout_exceeded_on_later_call() -> None:
 
 
 async def test_per_call_timeout_override_lifts_above_cumulative() -> None:
-    """§7.4: timeout= kwarg on eval_async replaces the cumulative
+    """timeout= kwarg on eval_async replaces the cumulative
     deadline for that call only. A call that would otherwise bounce
     on the depleted cumulative budget can still succeed with an
     explicit override."""
@@ -426,13 +417,11 @@ async def test_per_call_timeout_override_lifts_above_cumulative() -> None:
 
             # With override: a fresh 1-second budget for this call
             # only. The cumulative deadline is irrelevant.
-            assert await ctx.eval_async(
-                "1 + 1", module=False, timeout=1.0
-            ) == 2
+            assert await ctx.eval_async("1 + 1", module=False, timeout=1.0) == 2
 
 
 def test_sync_eval_does_not_decrement_cumulative_budget() -> None:
-    """§7.4 spec-conformance tripwire: the cumulative budget applies
+    """The cumulative budget applies
     only to eval_async. Sync eval has its own per-call timeout and
     doesn't consume the async budget. If a future refactor
     accidentally unifies the sync/async deadline tracking (e.g. by

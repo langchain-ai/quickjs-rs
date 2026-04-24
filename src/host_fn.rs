@@ -1,4 +1,4 @@
-//! §6.5 / §7.4 host function plumbing.
+//! Host function plumbing.
 //!
 //! Two trampolines — sync and async — installed as JS functions on
 //! globalThis. Each captures a Python dispatcher callable (fn_id
@@ -33,7 +33,7 @@ use crate::errors::QuickJSError;
 use crate::marshal::{js_value_to_py, py_to_js_value};
 
 /// Stored resolver pair for an in-flight async host call Promise.
-/// §6.5 / §7.4: the Rust trampoline creates a Promise via
+/// The Rust trampoline creates a Promise via
 /// `ctx.promise()`, stashes (resolve_fn, reject_fn) keyed by
 /// `pending_id`, and calls back into Python with (fn_id, args,
 /// pending_id). When the Python async task completes, it calls
@@ -54,7 +54,9 @@ pub(crate) fn build_host_trampoline<'js>(
     fn_id: u32,
     name: &str,
 ) -> PyResult<Function<'js>> {
-    let trampoline = move |cx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+    let trampoline = move |cx: Ctx<'js>,
+                           args: rquickjs::function::Rest<Value<'js>>|
+          -> rquickjs::Result<Value<'js>> {
         call_host_fn(&cx, &dispatcher, fn_id, args.0)
     };
     Function::new(ctx.clone(), trampoline)
@@ -136,7 +138,7 @@ fn dispatch_async_host_fn<'js>(
 ) -> rquickjs::Result<Value<'js>> {
     let (promise, resolve, reject) = ctx.promise()?;
 
-    // §7.4: sync-eval hit async host fn. Set the flag so the
+    // sync-eval hit async host fn. Set the flag so the
     // Python sync-eval surface raises ConcurrentEvalError; also
     // reject the Promise locally so the JS expression evaluates
     // to a rejected Promise rather than never settling. The sync
@@ -191,13 +193,12 @@ fn dispatch_async_host_fn<'js>(
                 to: "js",
                 message: Some(format!("arg marshal failed: {}", e)),
             })?;
-        let args_tuple = pyo3::types::PyTuple::new(py, &py_args).map_err(|e| {
-            rquickjs::Error::IntoJs {
+        let args_tuple =
+            pyo3::types::PyTuple::new(py, &py_args).map_err(|e| rquickjs::Error::IntoJs {
                 from: "python",
                 to: "js",
                 message: Some(format!("arg tuple build failed: {}", e)),
-            }
-        })?;
+            })?;
         let result = dispatcher
             .bind(py)
             .call1((fn_id, args_tuple, pid))
@@ -206,14 +207,16 @@ fn dispatch_async_host_fn<'js>(
                 to: "js",
                 message: Some(format!("async dispatcher raised: {}", e)),
             })?;
-        let rc: i32 = result.extract::<i32>().map_err(|e| rquickjs::Error::IntoJs {
-            from: "python",
-            to: "js",
-            message: Some(format!(
-                "async dispatcher returned a non-integer value (expected 0 or -1): {}",
-                e
-            )),
-        })?;
+        let rc: i32 = result
+            .extract::<i32>()
+            .map_err(|e| rquickjs::Error::IntoJs {
+                from: "python",
+                to: "js",
+                message: Some(format!(
+                    "async dispatcher returned a non-integer value (expected 0 or -1): {}",
+                    e
+                )),
+            })?;
         Ok(rc)
     })?;
 
@@ -226,10 +229,7 @@ fn dispatch_async_host_fn<'js>(
             let resolve = entry.resolve.restore(ctx)?;
             let reject_fn = entry.reject.restore(ctx)?;
             let _ = resolve; // drop to free
-            let exc = rquickjs::Exception::from_message(
-                ctx.clone(),
-                "Host function failed",
-            )?;
+            let exc = rquickjs::Exception::from_message(ctx.clone(), "Host function failed")?;
             let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
             let _: Value<'_> = reject_fn.call((exc.into_value(),))?;
         }
@@ -266,8 +266,8 @@ fn call_host_fn<'js>(
             Ok(v) => v,
             Err(e) => return Err(throw_host_error(ctx, &e, py)),
         };
-        let args_tuple = pyo3::types::PyTuple::new(py, &py_args)
-            .map_err(|e| throw_host_error(ctx, &e, py))?;
+        let args_tuple =
+            pyo3::types::PyTuple::new(py, &py_args).map_err(|e| throw_host_error(ctx, &e, py))?;
 
         // Call the Python dispatcher.
         let dispatcher = dispatcher.bind(py);
@@ -291,8 +291,8 @@ fn call_host_fn<'js>(
 /// an infra-level Python exception — construct a generic Error
 /// with the PyErr's string representation.
 fn throw_host_error(ctx: &Ctx<'_>, err: &PyErr, py: Python<'_>) -> rquickjs::Error {
-    let (name, message) = extract_jserror_fields(err, py)
-        .unwrap_or_else(|| ("Error".to_string(), err.to_string()));
+    let (name, message) =
+        extract_jserror_fields(err, py).unwrap_or_else(|| ("Error".to_string(), err.to_string()));
 
     // Build the JS Error object via Exception::from_message, then
     // set .name to whatever the dispatcher requested.

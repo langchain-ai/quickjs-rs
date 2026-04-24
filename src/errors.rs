@@ -1,4 +1,4 @@
-//! §10 exception hierarchy + helpers that convert rquickjs errors
+//! Exception hierarchy + helpers that convert rquickjs errors
 //! into PyErr. PyO3 needs native classes to raise; the Python side
 //! re-exports these names from `quickjs_rs.errors` (see
 //! `quickjs_rs/__init__.py`). Rust error conversion lives here too
@@ -25,7 +25,7 @@ pub(crate) fn map_runtime_new_error(err: Error) -> PyErr {
 }
 
 /// Generic mapping for rquickjs errors raised during handle
-/// restore / property access / etc. §6.7 `Error::UnrelatedRuntime`
+/// restore / property access / etc. `Error::UnrelatedRuntime`
 /// is the canonical cross-context signal; it flows up to Python
 /// as `InvalidHandleError` via the handle.py layer.
 pub(crate) fn map_handle_error(err: Error) -> PyErr {
@@ -35,11 +35,8 @@ pub(crate) fn map_handle_error(err: Error) -> PyErr {
 /// Convert a caught JS exception into a `JSError` PyErr carrying
 /// (name, message, stack). Used by every sync eval / call site.
 /// The Python layer then promotes to the right public error class
-/// per §10.4 via `_classify_jserror`.
-pub(crate) fn js_error_from_caught<'js>(
-    _ctx: &Ctx<'js>,
-    caught: CaughtError<'js>,
-) -> PyErr {
+/// per via `_classify_jserror`.
+pub(crate) fn js_error_from_caught<'js>(_ctx: &Ctx<'js>, caught: CaughtError<'js>) -> PyErr {
     match caught {
         CaughtError::Exception(exc) => {
             let name = exc
@@ -51,7 +48,7 @@ pub(crate) fn js_error_from_caught<'js>(
             JSError::new_err((name, message, stack))
         }
         CaughtError::Value(val) => {
-            // §10.1: non-Error throws (`throw 42`, `throw 'x'`)
+            // non-Error throws (`throw 42`, `throw 'x'`)
             // coerce to JSError(name="Error", message=ToString(val)).
             let message: String = Coerced::<String>::from_js(_ctx, val)
                 .map(|c| c.0)

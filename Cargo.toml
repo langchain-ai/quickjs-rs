@@ -14,11 +14,10 @@ rquickjs = { version = "0.11", features = [
     "classes",
     "properties",
     "futures",
-    # v0.4: enables the Resolver / Loader traits + Runtime::set_loader
-    # for ES module support. See spec/module-loading.md §5.1.
+    # Enables Resolver / Loader traits + Runtime::set_loader
+    # for ES module support.
     # The feature is trait-surface only — no behavior change to any
-    # existing code path. Adding it unlocks the FlatModuleStore
-    # implementation that lands in step 3.
+    # existing code path.
     "loader",
     # `bindgen` is deliberately omitted: rquickjs-sys ships
     # pre-generated bindings for every target we build wheels for
@@ -31,9 +30,8 @@ rquickjs = { version = "0.11", features = [
     # rquickjs-sys/src/bindings/), add bindgen back here and
     # ensure the build environment has libclang.
 ] }
-# v0.4 TypeScript support — str entries ending in .ts/.tsx are
-# transparently type-stripped at install() time. See
-# spec/module-loading.md §5.5.
+# TypeScript support — str entries ending in .ts/.tsx are
+# transparently type-stripped at install() time.
 #
 # Pinned to a specific commit rather than `branch = "main"` because
 # oxidase is a single-maintainer project not (yet) on crates.io; a

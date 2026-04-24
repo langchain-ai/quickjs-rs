@@ -1,11 +1,11 @@
-//! §6.3 QjsContext pyclass — wraps rquickjs::Context.
+//! QjsContext pyclass — wraps rquickjs::Context.
 //!
 //! Holds the sync + async host dispatchers, the pending-resolver
-//! map for in-flight async host calls (§7.4), and the flags that
+//! map for in-flight async host calls, and the flags that
 //! propagate sync-eval-hit-async-call across the Python/Rust
 //! boundary. All eval surfaces (sync, async, handle) route through
 //! `with_active_ctx` so reentrant evals from within host functions
-//! don't re-lock rquickjs's non-reentrant runtime RefCell (§6.7).
+//! don't re-lock rquickjs's non-reentrant runtime RefCell.
 
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -18,8 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::errors::{
-    js_error_from_caught, map_handle_error, map_runtime_new_error, InvalidHandleError,
-    QuickJSError,
+    js_error_from_caught, map_handle_error, map_runtime_new_error, InvalidHandleError, QuickJSError,
 };
 use crate::handle::QjsHandle;
 use crate::host_fn::{build_async_host_trampoline, build_host_trampoline, PendingResolver};
@@ -30,30 +29,30 @@ use crate::runtime::QjsRuntime;
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 pub(crate) struct QjsContext {
     inner: Option<Context>,
-    /// §6.5 host function dispatch: a single Python-side callable
+    /// host function dispatch: a single Python-side callable
     /// that receives (fn_id, args_tuple) and returns the host fn's
     /// result. Set via set_host_call_dispatcher from the Python
     /// Context layer before any host function is registered.
     host_dispatcher: Option<Py<PyAny>>,
-    /// §7.4 async host function dispatcher. Called from the async
+    /// async host function dispatcher. Called from the async
     /// trampoline with (fn_id, args_tuple, pending_id). Schedules
     /// an asyncio task; on completion it calls resolve_pending /
     /// reject_pending to settle the JS Promise.
     async_host_dispatcher: Option<Py<PyAny>>,
-    /// §7.4 pending Promise resolvers, keyed by host-allocated
+    /// pending Promise resolvers, keyed by host-allocated
     /// pending_id. Each entry is removed when resolve_pending or
     /// reject_pending settles it. On context close, remaining
-    /// entries are drained + restored to release JSValue refs
-    /// (§6.7). Wrapped in `Rc` so the async trampoline closures
+    /// entries are drained + restored to release JSValue refs.
+    /// Wrapped in `Rc` so the async trampoline closures
     /// can insert into it.
     pending_resolvers: Rc<RefCell<HashMap<u32, PendingResolver>>>,
     next_pending_id: Rc<Cell<u32>>,
-    /// §7.4 / §10.3: set by the async trampoline when an async
+    /// Set by the async trampoline when an async
     /// host fn is dispatched from inside a sync eval (i.e. while
     /// `in_sync_eval` is true). Context.eval consumes this after
     /// the eval returns and raises ConcurrentEvalError.
     sync_eval_hit_async_call: Rc<Cell<bool>>,
-    /// §7.4: set by Python Context.eval around the synchronous
+    /// set by Python Context.eval around the synchronous
     /// eval entry so the async trampoline can detect
     /// sync-eval-with-async-hostfn regardless of whether an
     /// asyncio loop is ambient.
@@ -88,7 +87,7 @@ impl QjsContext {
         Ok(())
     }
 
-    /// §7.4: install the async-host dispatcher. Invoked from the
+    /// Install the async-host dispatcher. Invoked from the
     /// async trampoline when JS calls a registered async host fn.
     /// Signature: `dispatcher(fn_id: int, args: tuple, pending_id:
     /// int) -> int`. Returns 0 on successful scheduling, -1 if
@@ -112,9 +111,9 @@ impl QjsContext {
     }
 
     fn close(&mut self) -> PyResult<()> {
-        // §7.4: free any outstanding pending resolvers before the
+        // Free any outstanding pending resolvers before the
         // Context drops. Each Persistent<Function> holds a JSValue
-        // ref that needs a live Ctx to release (§6.7). Forgetting
+        // ref that needs a live Ctx to release. Forgetting
         // this trips QuickJS's list_empty(&rt->gc_obj_list) at
         // runtime teardown.
         if let Some(context) = self.inner.as_ref() {
@@ -153,8 +152,9 @@ impl QjsContext {
             options.global = !module;
             options.strict = strict;
             options.filename = Some(filename.to_string());
-            let result: Result<Value<'_>, CaughtError<'_>> =
-                ctx.eval_with_options::<Value<'_>, _>(code, options).catch(ctx);
+            let result: Result<Value<'_>, CaughtError<'_>> = ctx
+                .eval_with_options::<Value<'_>, _>(code, options)
+                .catch(ctx);
             match result {
                 Ok(val) => js_value_to_py(py, &val, 0),
                 Err(caught) => Err(js_error_from_caught(ctx, caught)),
@@ -163,7 +163,7 @@ impl QjsContext {
     }
 
     /// Eval that returns a QjsHandle instead of marshaling the
-    /// result to Python. §6.3 eval_handle.
+    /// result to Python. eval_handle.
     ///
     /// `promise=true` sets QuickJS's JS_EVAL_FLAG_ASYNC so the
     /// evaluator enables top-level `await` and returns a Promise
@@ -186,8 +186,9 @@ impl QjsContext {
             options.strict = strict;
             options.promise = promise;
             options.filename = Some(filename.to_string());
-            let result: Result<Value<'_>, CaughtError<'_>> =
-                ctx.eval_with_options::<Value<'_>, _>(code, options).catch(ctx);
+            let result: Result<Value<'_>, CaughtError<'_>> = ctx
+                .eval_with_options::<Value<'_>, _>(code, options)
+                .catch(ctx);
             match result {
                 Ok(val) => Ok(Persistent::save(ctx, val)),
                 Err(caught) => Err(js_error_from_caught(ctx, caught)),
@@ -200,17 +201,17 @@ impl QjsContext {
         })
     }
 
-    /// §5.4 ES-module eval. Parses `code` as an ES module (name =
+    /// ES-module eval. Parses `code` as an ES module (name =
     /// `filename`), registers it with QuickJS, and starts its
     /// evaluation. Returns a QjsHandle wrapping the Promise that
     /// resolves to `undefined` once the module (and its full
     /// import graph) has finished evaluating.
     ///
-    /// Unlike script-mode eval with JS_EVAL_FLAG_ASYNC (the v0.3
-    /// TLA path), this uses `Module::evaluate`, which is QuickJS's
-    /// actual ES-module entry point — `import` / `export` work,
-    /// module-scoped bindings don't leak to global, and the
-    /// module cache is consulted for each imported specifier.
+    /// Unlike script-mode eval with JS_EVAL_FLAG_ASYNC, this uses
+    /// `Module::evaluate`, which is QuickJS's actual ES-module entry
+    /// point — `import` / `export` work, module-scoped bindings don't
+    /// leak to global, and the module cache is consulted for each
+    /// imported specifier.
     ///
     /// The Python driving loop (Context._run_inside_task_group)
     /// treats the returned handle the same as any other pending
@@ -234,7 +235,7 @@ impl QjsContext {
         })
     }
 
-    /// §6.5 host function registration. Installs a JS function on
+    /// Host function registration. Installs a JS function on
     /// `globalThis` under `name` that, when called from JS,
     /// marshals args to Python, calls the dispatcher, and marshals
     /// the return value back to JS. On Python exception, throws a
@@ -246,7 +247,7 @@ impl QjsContext {
     /// the Python async dispatcher with (fn_id, args, pending_id)
     /// — the dispatcher schedules an asyncio task that calls
     /// resolve_pending/reject_pending when done — and returns the
-    /// Promise synchronously to JS. §7.4.
+    /// Promise synchronously to JS.
     #[pyo3(signature = (name, fn_id, is_async=false))]
     fn register_host_function(
         &self,
@@ -269,7 +270,14 @@ impl QjsContext {
             let in_sync = Rc::clone(&self.in_sync_eval);
             with_active_ctx(context, |ctx| {
                 let js_fn = build_async_host_trampoline(
-                    ctx, dispatcher, fn_id, &name_owned, pending, next_id, sync_hit, in_sync,
+                    ctx,
+                    dispatcher,
+                    fn_id,
+                    &name_owned,
+                    pending,
+                    next_id,
+                    sync_hit,
+                    in_sync,
                 )?;
                 ctx.globals().set(name_owned.clone(), js_fn).map_err(|e| {
                     QuickJSError::new_err(format!(
@@ -298,10 +306,10 @@ impl QjsContext {
         }
     }
 
-    /// §7.4: called by the Python driving loop to resolve a
+    /// Called by the Python driving loop to resolve a
     /// pending-host-call Promise with `value`. `value` is marshaled
     /// via py_to_js_value. Missing pending_id is a benign no-op
-    /// (§6.4: double-resolve/close-race treated as idempotent).
+    /// (double-resolve/close-race treated as idempotent).
     fn resolve_pending(&self, pending_id: u32, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let context = self.context()?;
         let entry = match self.pending_resolvers.borrow_mut().remove(&pending_id) {
@@ -312,14 +320,14 @@ impl QjsContext {
             let resolve = entry.resolve.restore(ctx).map_err(map_handle_error)?;
             let _ = entry.reject.restore(ctx); // drop to free the JS ref
             let js_value = py_to_js_value(ctx, value, 0)?;
-            let _: Value<'_> = resolve.call((js_value,)).map_err(|e| {
-                QuickJSError::new_err(format!("resolve call failed: {}", e))
-            })?;
+            let _: Value<'_> = resolve
+                .call((js_value,))
+                .map_err(|e| QuickJSError::new_err(format!("resolve call failed: {}", e)))?;
             Ok(())
         })
     }
 
-    /// §7.4: called by the Python driving loop to reject a
+    /// Called by the Python driving loop to reject a
     /// pending-host-call Promise with a JS Error carrying
     /// (name, message, stack). Missing pending_id: benign no-op.
     #[pyo3(signature = (pending_id, name, message, stack=None))]
@@ -345,14 +353,14 @@ impl QjsContext {
             if let Some(s) = stack {
                 let _ = exc.as_object().set(PredefinedAtom::Stack, s.to_string());
             }
-            let _: Value<'_> = reject.call((exc.into_value(),)).map_err(|e| {
-                QuickJSError::new_err(format!("reject call failed: {}", e))
-            })?;
+            let _: Value<'_> = reject
+                .call((exc.into_value(),))
+                .map_err(|e| QuickJSError::new_err(format!("reject call failed: {}", e)))?;
             Ok(())
         })
     }
 
-    /// §7.4: Promise state — 0=pending, 1=fulfilled, 2=rejected,
+    /// Promise state — 0=pending, 1=fulfilled, 2=rejected,
     /// -1=not a promise. Used by the driving loop.
     fn promise_state(&self, handle: &QjsHandle) -> PyResult<i32> {
         if handle.context_ptr != self.context()?.as_raw().as_ptr() as usize {
@@ -376,7 +384,7 @@ impl QjsContext {
         })
     }
 
-    /// §7.4: return a QjsHandle to the Promise's settled value
+    /// Return a QjsHandle to the Promise's settled value
     /// (result or reason). For Rejected, the reason comes via
     /// `ctx.catch()` — rquickjs's `Promise::result::<Value>()`
     /// returns `Some(Err(_))` on rejection and parks the actual
@@ -392,9 +400,9 @@ impl QjsContext {
         let context_ptr = handle.context_ptr;
         let new_pers = with_active_ctx(&context, |ctx| {
             let val = persistent.restore(ctx).map_err(map_handle_error)?;
-            let promise = val.as_promise().ok_or_else(|| {
-                QuickJSError::new_err("promise_result on a non-promise handle")
-            })?;
+            let promise = val
+                .as_promise()
+                .ok_or_else(|| QuickJSError::new_err("promise_result on a non-promise handle"))?;
             let settled: Option<rquickjs::Result<Value<'_>>> = promise.result();
             let settled_val: Value<'_> = match settled {
                 Some(Ok(v)) => v,
@@ -410,7 +418,7 @@ impl QjsContext {
         })
     }
 
-    /// §7.4: drain QuickJS's job queue (Promise reactions).
+    /// Drain QuickJS's job queue (Promise reactions).
     /// Returns negative on job-error, otherwise the count of jobs
     /// executed. The driving loop polls this between
     /// promise-state checks.
@@ -436,7 +444,7 @@ impl QjsContext {
         Ok(count)
     }
 
-    /// Return a handle to the global object. §6.3 global_object.
+    /// Return a handle to the global object. global_object.
     fn global_object(&self) -> PyResult<QjsHandle> {
         let ctx_owner = self.context()?.clone();
         let context_ptr = ctx_owner.as_raw().as_ptr() as usize;

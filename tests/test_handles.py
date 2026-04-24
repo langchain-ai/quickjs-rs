@@ -1,4 +1,4 @@
-"""Handle lifecycle. See spec/implementation.md §7.2, §7.3, §11.1."""
+"""Handle lifecycle. See README.md"""
 
 from __future__ import annotations
 
@@ -29,9 +29,7 @@ def test_eval_handle_roundtrip() -> None:
 def test_handle_call_method_with_python_args() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            with ctx.eval_handle(
-                "({mul(a, b) { return a * b }})"
-            ) as obj:
+            with ctx.eval_handle("({mul(a, b) { return a * b }})") as obj:
                 result = obj.call_method("mul", 6, 7)
                 try:
                     assert result.to_python() == 42
@@ -60,7 +58,7 @@ def test_handle_type_of_covers_all_kinds() -> None:
 
 
 def test_cross_context_handle_raises() -> None:
-    """§7.3: using a Handle from Context A in a call on Context B raises
+    """using a Handle from Context A in a call on Context B raises
     InvalidHandleError."""
     with Runtime() as rt:
         with rt.new_context() as ctx_a, rt.new_context() as ctx_b:
@@ -91,7 +89,7 @@ def test_dispose_is_idempotent() -> None:
 def test_leaked_handle_emits_resourcewarning() -> None:
     """__del__ on a live handle that was never disposed emits
     ResourceWarning. Convention from Python stdlib for leaked resources
-    (§7.3)."""
+    ()."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             h = ctx.eval_handle("({})")
@@ -99,9 +97,9 @@ def test_leaked_handle_emits_resourcewarning() -> None:
                 warnings.simplefilter("always", ResourceWarning)
                 del h
                 gc.collect()
-            assert any(
-                issubclass(w.category, ResourceWarning) for w in caught
-            ), [w.category for w in caught]
+            assert any(issubclass(w.category, ResourceWarning) for w in caught), [
+                w.category for w in caught
+            ]
 
 
 def test_leaked_handle_after_context_close_does_not_crash() -> None:
@@ -141,7 +139,7 @@ def test_handle_survives_across_evals() -> None:
 
 
 def test_handle_holds_function_that_would_fail_marshaling() -> None:
-    """§8: a function in an eval() result raises MarshalError, because
+    """a function in an eval() result raises MarshalError, because
     there's no way to meaningfully serialize it. eval_handle gives you
     back something you can still invoke without ever trying to marshal
     it directly."""
@@ -161,7 +159,7 @@ def test_handle_holds_function_that_would_fail_marshaling() -> None:
 
 
 def test_to_python_allow_opaque_substitutes_child_handles() -> None:
-    """§7.2: allow_opaque=True produces marshalable leaves and child
+    """allow_opaque=True produces marshalable leaves and child
     Handles at positions where msgpack would fail."""
     from quickjs_rs import MarshalError
 
@@ -212,7 +210,7 @@ def test_to_python_allow_opaque_arrays_recurse() -> None:
 def test_to_python_allow_opaque_cycle_raises_marshalerror() -> None:
     """Cycles raise MarshalError even under allow_opaque — documented
     behavior. Detection is indirect (via depth cap) rather than via a
-    same-value check, which is fine for v0.1 since the depth cap of 128
+    same-value check, which is fine since the depth cap of 128
     fails fast long before the walk does anything harmful."""
     from quickjs_rs import MarshalError
 
@@ -224,7 +222,7 @@ def test_to_python_allow_opaque_cycle_raises_marshalerror() -> None:
 
 
 def test_handle_new_constructs_instances() -> None:
-    """§7.2 Handle.new: invoke the handle as a JS constructor. Uses Date
+    """Handle.new: invoke the handle as a JS constructor. Uses Date
     because it's a canonical built-in constructor with observable state
     (the JS month argument is zero-indexed, so January = 0)."""
     with Runtime() as rt:
@@ -259,9 +257,7 @@ def test_handle_new_propagates_constructor_exceptions() -> None:
 def test_js_throw_inside_handle_call_surfaces_as_jserror() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            with ctx.eval_handle(
-                "(() => { throw new RangeError('boom'); })"
-            ) as fn:
+            with ctx.eval_handle("(() => { throw new RangeError('boom'); })") as fn:
                 with pytest.raises(JSError) as excinfo:
                     fn.call()
                 assert excinfo.value.name == "RangeError"

@@ -8,7 +8,6 @@ name: release
 # `python-version` matrix; maturin produces cp3X-abi3 wheels or
 # cp3X-cp3X wheels depending on the extension's ABI stability
 # (we don't set abi3 so each Python minor gets its own wheel).
-# See spec/implementation.md §5.2, §10 "CI matrix".
 
 on:
   push:
@@ -40,38 +39,33 @@ jobs:
         uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
         with:
           target: ${{ matrix.target }}
-          # -i targets a single Python version so each matrix cell
-          # produces exactly one wheel; maturin otherwise picks up
-          # every Python on PATH inside the build container.
+          # -i targets a single Python version so each matrix cell produces
+          # exactly one wheel; maturin otherwise picks up every Python on PATH
+          # inside the build container.
           args: --release --out dist -i python${{ matrix.python-version }}
           manylinux: auto
-          # Force C11 for the bundled QuickJS source compiled by
-          # rquickjs-sys's build.rs. The aarch64 cross-container
-          # (ghcr.io/rust-cross/manylinux2014-cross:aarch64) ships
-          # a gcc that defaults to pre-C99 mode and rejects
-          # variable-declaration-in-for-loop syntax — `for (int
-          # i=...;)` errors as "'for' loop initial declarations
-          # are only allowed in C99 mode". x86_64's PyPA image
-          # (quay.io/pypa/manylinux2014_x86_64:latest) has a
-          # newer devtoolset gcc that defaults to gnu11, which
-          # is why x86_64 alone was green before this flag. We
-          # set the flag for all Linux targets rather than just
-          # aarch64 so the flag stops being load-bearing the
-          # moment rust-cross updates its image.
+          # Force C11 for the bundled QuickJS source compiled by rquickjs-sys's
+          # build.rs. The aarch64 cross-container
+          # (ghcr.io/rust-cross/manylinux2014-cross:aarch64) ships a gcc that
+          # defaults to pre-C99 mode and rejects
+          # variable-declaration-in-for-loop syntax — `for (int i=...;)` errors
+          # as "'for' loop initial declarations are only allowed in C99 mode".
+          # x86_64's PyPA image (quay.io/pypa/manylinux2014_x86_64:latest) has a
+          # newer devtoolset gcc that defaults to gnu11, which is why x86_64
+          # alone was green before this flag. We set the flag for all Linux
+          # targets rather than just aarch64 so the flag stops being
+          # load-bearing the moment rust-cross updates its image.
           #
-          # cc-rs (invoked by rquickjs-sys's build.rs) respects
-          # CFLAGS; maturin-action forwards docker-options to
-          # `docker run`, so `-e CFLAGS=-std=gnu11` lands inside
-          # the build container.
+          # cc-rs (invoked by rquickjs-sys's build.rs) respects CFLAGS;
+          # maturin-action forwards docker-options to `docker run`, so `-e
+          # CFLAGS=-std=gnu11` lands inside the build container.
           #
-          # Note: the input is `docker-options`, NOT
-          # `container-options`. GitHub Actions silently ignores
-          # unknown inputs — the earlier b4a05e1 attempt used
-          # `container-options` and cc-rs reported `CFLAGS = None`
-          # (the var never reached the container) while the step
-          # log showed the input as configured. Lesson: after any
-          # change to workflow inputs, inspect the `docker run`
-          # command line in the job log to confirm the flag is
+          # Note: the input is `docker-options`, NOT `container-options`. GitHub
+          # Actions silently ignores unknown inputs — earlier attempts used
+          # `container-options` and cc-rs reported `CFLAGS = None` (the var
+          # never reached the container) while the step log showed the input as
+          # configured. Lesson: after any change to workflow inputs, inspect the
+          # `docker run` command line in the job log to confirm the flag is
           # actually present, not just that the step didn't error.
           docker-options: -e CFLAGS=-std=gnu11
 
@@ -98,9 +92,9 @@ jobs:
         uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
         with:
           target: ${{ matrix.target }}
-          # -i targets a single Python version so each matrix cell
-          # produces exactly one wheel; maturin otherwise picks up
-          # every Python on PATH inside the build container.
+          # -i targets a single Python version so each matrix cell produces
+          # exactly one wheel; maturin otherwise picks up every Python on PATH
+          # inside the build container.
           args: --release --out dist -i python${{ matrix.python-version }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -124,9 +118,9 @@ jobs:
       - name: Build wheels (Windows)
         uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
         with:
-          # -i targets a single Python version so each matrix cell
-          # produces exactly one wheel; maturin otherwise picks up
-          # every Python on PATH inside the build container.
+          # -i targets a single Python version so each matrix cell produces
+          # exactly one wheel; maturin otherwise picks up every Python on PATH
+          # inside the build container.
           args: --release --out dist -i python${{ matrix.python-version }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -156,7 +150,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # PyPI trusted publishing
+      id-token: write # PyPI trusted publishing
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

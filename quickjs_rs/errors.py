@@ -1,5 +1,3 @@
-"""Exception hierarchy. See spec/implementation.md §10."""
-
 from __future__ import annotations
 
 
@@ -42,7 +40,7 @@ class InterruptError(QuickJSError):
     """JS execution was interrupted by the host."""
 
 
-class TimeoutError(InterruptError):  # noqa: A001 — intentional shadow; see §10
+class TimeoutError(InterruptError):  # noqa: A001
     """The context's timeout elapsed during execution."""
 
 
@@ -54,7 +52,7 @@ class InvalidHandleError(QuickJSError):
     """A Handle was used after dispose() or across contexts."""
 
 
-# v0.2 additions. See spec/implementation.md §7.2, §10.3.
+# Additional async/concurrency error types.
 
 
 class HostCancellationError(QuickJSError):
@@ -65,7 +63,7 @@ class HostCancellationError(QuickJSError):
     JS, ``eval_async`` re-raises ``asyncio.CancelledError`` to the caller.
 
     The JS-side name is a string literal injected by the shim's
-    cancellation-encoding path — same pattern as ``HostError`` in §10.2.
+    cancellation-encoding path — same pattern as ``HostError``.
     The Python class name matches by convention; renaming either side
     requires keeping both in sync.
     """
@@ -96,3 +94,19 @@ class DeadlockError(QuickJSError):
       (``new Promise(() => {})`` with no resolver capture).
     - Logic bug in evaluated code (forgot to call ``resolve()``, etc.).
     """
+
+
+def sync_eval_async_call_error() -> ConcurrentEvalError:
+    return ConcurrentEvalError(
+        "sync ctx.eval dispatched a registered async host "
+        "function; use ctx.eval_async for code that awaits "
+        "async host calls"
+    )
+
+
+def sync_eval_handle_async_call_error() -> ConcurrentEvalError:
+    return ConcurrentEvalError(
+        "sync ctx.eval_handle dispatched a registered async "
+        "host function; use ctx.eval_async / "
+        "ctx.eval_handle_async instead"
+    )

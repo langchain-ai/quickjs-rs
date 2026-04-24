@@ -1,4 +1,4 @@
-"""Async eval benchmarks. See spec/benchmarks.md §5.3.
+"""Async eval benchmarks. See benchmarks/README.md.
 
 Measure overhead of the async driving loop, TaskGroup, and event-
 loop interaction — not the host function's own latency. The

@@ -1,4 +1,4 @@
-//! §6.2 QjsRuntime pyclass — wraps rquickjs::Runtime.
+//! QjsRuntime pyclass — wraps rquickjs::Runtime.
 
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -10,7 +10,7 @@ use crate::modules::{maybe_strip_ts, StoreHandle, StoreLoader, StoreResolver};
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 pub(crate) struct QjsRuntime {
     inner: Option<Runtime>,
-    /// §5.2: module registry. Created lazily on the first install
+    /// module registry. Created lazily on the first install
     /// call so runtimes that never use modules pay nothing. Once
     /// created, the handle stays — `rt.set_loader` consumed its
     /// own clones of the Resolver and Loader, but they share the
@@ -57,7 +57,7 @@ impl QjsRuntime {
         Ok(())
     }
 
-    /// §5.3: register a str-valued scope entry. Called from
+    /// Register a str-valued scope entry. Called from
     /// Python's recursive Context.install walk for each str entry.
     ///
     ///   * `scope_path`: canonical path of the containing scope
@@ -65,7 +65,7 @@ impl QjsRuntime {
     ///     "@agent/fs" or "@agent/fs/@peer").
     ///   * `key`: the dict key (a POSIX path within the scope,
     ///     which may itself contain '/'). The file extension on
-    ///     this key controls TypeScript stripping (§5.5).
+    ///     this key controls TypeScript stripping.
     ///   * `canonical_path`: the joined scope+key path used both
     ///     as the source-map key and as the module name QuickJS
     ///     sees when it asks the loader to materialize the module.
@@ -78,7 +78,7 @@ impl QjsRuntime {
     /// TypeScript parse errors surface HERE (install time), not
     /// later at eval time — oxidase parses during stripping, and
     /// a parser panic turns into a QuickJSError raised from this
-    /// call. That's the contract §5.5 promises: users see their
+    /// call. That's the contract promises: users see their
     /// TypeScript errors at `ctx.install(scope)` rather than at
     /// `ctx.eval_async(..., module=True)`.
     fn add_module_source(
@@ -96,7 +96,7 @@ impl QjsRuntime {
         Ok(())
     }
 
-    /// §5.3: declare that `child_key` inside `scope_path` is a
+    /// Declare that `child_key` inside `scope_path` is a
     /// ModuleScope (bare-specifier child). Called by the Python
     /// install walk for each ModuleScope-valued entry before
     /// recursing into it.
@@ -136,10 +136,7 @@ impl QjsRuntime {
                 .inner
                 .as_ref()
                 .ok_or_else(|| QuickJSError::new_err("runtime is closed"))?;
-            rt.set_loader(
-                StoreResolver(handle.clone()),
-                StoreLoader(handle.clone()),
-            );
+            rt.set_loader(StoreResolver(handle.clone()), StoreLoader(handle.clone()));
             self.module_store = Some(handle);
         }
         Ok(self.module_store.as_ref().unwrap())

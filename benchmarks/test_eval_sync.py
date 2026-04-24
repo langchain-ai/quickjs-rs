@@ -1,4 +1,4 @@
-"""Sync eval benchmarks. See spec/benchmarks.md §5.2.
+"""Sync eval benchmarks. See benchmarks/README.md.
 
 Measure JS execution overhead for representative workloads, isolating
 quickjs-wasm's cost from the cost of the JS computation itself.
