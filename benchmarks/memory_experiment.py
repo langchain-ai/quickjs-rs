@@ -464,6 +464,12 @@ def build_visual_markdown(
         valid,
         key=lambda r: max(r.after_payload_rss_bytes - r.quickjs_malloc_size_after_payload, 0),
     )
+    peak_residual_delta_mb = _mb(
+        max(
+            peak_residual.after_payload_rss_bytes - peak_residual.quickjs_malloc_size_after_payload,
+            0,
+        )
+    )
     lines = [
         "### Memory Visual Report",
         "",
@@ -477,7 +483,7 @@ def build_visual_markdown(
         ),
         (
             "- Largest RSS residual (`rss - quickjs_malloc`) after payload: "
-            f"`{_mb(max(peak_residual.after_payload_rss_bytes - peak_residual.quickjs_malloc_size_after_payload, 0)):.2f} MB` "
+            f"`{peak_residual_delta_mb:.2f} MB` "
             f"at `runtimes={peak_residual.runtimes}, "
             f"contexts_per_runtime={peak_residual.contexts_per_runtime}`"
         ),

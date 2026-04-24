@@ -6,7 +6,6 @@ import pytest
 
 from quickjs_rs import QuickJSError, Runtime
 
-
 _MEMORY_USAGE_KEYS = {
     "malloc_size",
     "malloc_limit",
