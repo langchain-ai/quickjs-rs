@@ -9,12 +9,15 @@ on:
 
 permissions:
   contents: read
+  pages: write
   id-token: write
 
 jobs:
   memory:
     name: Memory Profiling
     runs-on: ubuntu-latest
+    outputs:
+      memory_artifact_url: ${{ steps.upload_memory_artifact.outputs.artifact-url }}
     env:
       CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
     steps:
@@ -68,11 +71,62 @@ jobs:
             --output-visual-markdown artifacts/memory/memory-report.md
 
       - name: Upload memory artifacts
+        id: upload_memory_artifact
         uses: actions/upload-artifact@v4
         with:
           name: memory-profile
           path: artifacts/memory/
           if-no-files-found: error
+
+      - name: Build Pages preview bundle
+        run: |
+          set -euo pipefail
+          PAGES_RUN_DIR="pages/memory/${GITHUB_RUN_ID}"
+          mkdir -p "$PAGES_RUN_DIR"
+          cp -R artifacts/memory/plots/. "$PAGES_RUN_DIR/"
+          cp artifacts/memory/memory-profile.md "$PAGES_RUN_DIR/"
+          cp artifacts/memory/memory-report.md "$PAGES_RUN_DIR/"
+          cp artifacts/memory/memory-profile.csv "$PAGES_RUN_DIR/"
+
+          cat > "$PAGES_RUN_DIR/index.html" <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>quickjs-wasm memory profiling</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.4; }
+              h1 { margin-bottom: 8px; }
+              .meta { color: #555; margin-bottom: 20px; }
+              .plot { margin: 0 0 20px 0; }
+              img { max-width: 100%; border: 1px solid #ddd; border-radius: 8px; }
+              ul { margin-top: 6px; }
+            </style>
+          </head>
+          <body>
+            <h1>quickjs-wasm memory profiling</h1>
+            <p class="meta">Workflow run artifacts and plots.</p>
+            <ul>
+              <li><a href="memory-profile.md">memory-profile.md</a></li>
+              <li><a href="memory-report.md">memory-report.md</a></li>
+              <li><a href="memory-profile.csv">memory-profile.csv</a></li>
+            </ul>
+            <div class="plot"><h2>RSS vs QuickJS Malloc</h2><img src="rss_vs_qjs_scatter.png" alt="RSS vs QuickJS malloc scatter plot" /></div>
+            <div class="plot"><h2>Overhead Breakdown</h2><img src="overhead_stacked_top.png" alt="Overhead stacked bar chart" /></div>
+            <div class="plot"><h2>Phase RSS Lines</h2><img src="phase_rss_lines_top.png" alt="Phase RSS line chart" /></div>
+            <div class="plot"><h2>RSS Heatmap Slice</h2><img src="rss_heatmap_slice.png" alt="RSS heatmap slice" /></div>
+          </body>
+          </html>
+          HTML
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
 
       - name: Append memory summary to job summary
         run: |
@@ -80,3 +134,36 @@ jobs:
           cat artifacts/memory/memory-profile.md >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/memory/memory-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Download workflow artifact](${{ steps.upload_memory_artifact.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-pages:
+    name: Deploy Pages Preview
+    runs-on: ubuntu-latest
+    needs: memory
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Append inline plot preview
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          ARTIFACT_URL: ${{ needs.memory.outputs.memory_artifact_url }}
+        run: |
+          set -euo pipefail
+          PLOT_BASE="${PAGE_URL%/}/memory/${GITHUB_RUN_ID}"
+          echo "### Memory Plot Preview" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Published plot bundle](${PLOT_BASE}/index.html)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Download workflow artifact](${ARTIFACT_URL})" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "![RSS vs QuickJS malloc](${PLOT_BASE}/rss_vs_qjs_scatter.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "![Overhead stacked chart](${PLOT_BASE}/overhead_stacked_top.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "![Phase RSS lines](${PLOT_BASE}/phase_rss_lines_top.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "![RSS heatmap slice](${PLOT_BASE}/rss_heatmap_slice.png)" >> "$GITHUB_STEP_SUMMARY"
