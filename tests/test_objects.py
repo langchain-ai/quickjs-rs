@@ -69,11 +69,7 @@ def test_large_object_one_hundred_keys(ctx: Context) -> None:
     """Forces msgpack map32 header path (>65535 would be excessive;
     >15 is enough to verify we don't corrupt past the fixmap boundary
     where the encoding shape changes)."""
-    js = (
-        "({"
-        + ", ".join(f"k{i}: {i}" for i in range(100))
-        + "})"
-    )
+    js = "({" + ", ".join(f"k{i}: {i}" for i in range(100)) + "})"
     result = ctx.eval(js)
     assert len(result) == 100
     assert result["k0"] == 0
@@ -107,7 +103,7 @@ def test_array_of_mixed_types(ctx: Context) -> None:
     - JS numbers are always float64 on the wire, so `1` inside an
       array comes back as `1.0` (Python float). At the top level,
       ``3 == 3.0`` means users rarely notice; inside a list the
-      distinction is visible via ``==`` — and that's correct per spec.
+      distinction is visible via ``==``.
     - ``preserve_undefined=False`` coercion only applies at the root
       of ``Context.eval`` (). Nested `undefined` values keep the
       ``Undefined`` sentinel so a caller who needs to distinguish
@@ -116,8 +112,7 @@ def test_array_of_mixed_types(ctx: Context) -> None:
     from quickjs_rs import UNDEFINED
 
     result = ctx.eval(
-        "[1, 'two', true, null, undefined, 10n**20n,"
-        " new Uint8Array([9,8,7]), [1,2], {x: 'y'}]"
+        "[1, 'two', true, null, undefined, 10n**20n, new Uint8Array([9,8,7]), [1,2], {x: 'y'}]"
     )
     assert result == [
         1.0,

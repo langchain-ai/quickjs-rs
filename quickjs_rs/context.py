@@ -1,4 +1,4 @@
-"""Context. See README.md section 7."""
+"""Context. See README.md"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
-    """section 7.4: infer async-ness of a registered host function.
+    """Infer async-ness of a registered host function.
 
     Uses ``inspect.iscoroutinefunction`` directly. If it says False
     but the ``__wrapped__`` chain reveals a coroutine function
@@ -87,17 +87,17 @@ class Context:
         # globals access doesn't pay for the handle allocation.
         self._globals: Globals | None = None
 
-        # section 6.5 host function registry. fn_id -> Python callable.
+        # Host function registry. fn_id -> Python callable.
         # Monotonically-increasing ints, never reused (cheap and
         # matches previous implementation). The dispatcher looks up fn_id here.
         self._host_registry: dict[int, Callable[..., Any]] = {}
         self._next_fn_id: int = 1
-        # section 10.2 host-exception side channel: when a host fn raises,
+        # Host-exception side channel: when a host fn raises,
         # the dispatcher stashes the Python exception here so eval's
         # HostError catch can thread it via __cause__.
         self._last_host_exception: BaseException | None = None
 
-        # section 7.4 async machinery. _eval_async_in_flight is the
+        # Async machinery. _eval_async_in_flight is the
         # concurrent-eval guard — only one eval_async / await_promise
         # at a time per context. _cumulative_deadline is the rolling
         # budget shared across eval_async calls; per-call timeout=
@@ -165,7 +165,7 @@ class Context:
 
         Unlike :meth:`eval`, the result is never marshaled — functions,
         symbols, promises, and other opaque values all come back as
-        Handles. section 7.2.
+        Handles.
         """
         if self._closed:
             raise QuickJSError("context is closed")
@@ -210,19 +210,19 @@ class Context:
     ) -> Any:
         """Evaluate JS code and return the result as a Python value.
 
-        section 7.3: the wall-clock timeout is measured from the start of
+        Tthe wall-clock timeout is measured from the start of
         each call. The runtime's interrupt handler reads the deadline
         written here and aborts execution when it elapses.
         """
         if self._closed:
             raise QuickJSError("context is closed")
 
-        # section 10.2: clear the side channel at each sync-eval entry so a
+        # Clear the side channel at each sync-eval entry so a
         # swallowed raise from an earlier eval can't attach itself as
         # __cause__ on an unrelated later HostError. Preserves the
         # previous implementation tripwire test_swallowed_host_raise_does_not_leak_cause.
         self._last_host_exception = None
-        # section 7.4: clear any stale sync-eval-hit-async-call flag left
+        # Clear any stale sync-eval-hit-async-call flag left
         # from a prior eval that itself raised before consuming it.
         self._engine_ctx.take_sync_eval_hit_async_call()
         self._engine_ctx.set_in_sync_eval(True)
@@ -239,7 +239,7 @@ class Context:
             )
         except _engine.JSError as e:
             name, message, stack = e.args
-            # section 7.4: if an async host fn fired during this sync eval,
+            # If an async host fn fired during this sync eval,
             # the user's real bug is "sync eval on a context with
             # async host fns". Surface that instead of whatever
             # downstream error the async-rejected promise produced.
@@ -260,7 +260,7 @@ class Context:
         # Normal return: still check the flag. An async host fn that
         # fired and whose rejection was caught by JS wouldn't raise,
         # but it's still a bug — the user's code ignored an async-
-        # host result. section 7.4.
+        # host result.
         if self._engine_ctx.take_sync_eval_hit_async_call():
             raise sync_eval_async_call_error()
         return result
@@ -272,7 +272,7 @@ class Context:
         stack: str | None,
         deadline: float | None,
     ) -> QuickJSError:
-        """section 10.4: promote a raw (name, message, stack) triple into the
+        """Promote a raw (name, message, stack) triple into the
         right public exception class.
 
         - name == "HostError": threaded with __cause__ from
@@ -288,11 +288,11 @@ class Context:
         - name == "InternalError" with message "out of memory":
           MemoryLimitError. QuickJS raises this from
           JS_ThrowOutOfMemory when an allocation fails past the
-          memory limit set by JS_SetMemoryLimit (section 9).
+          memory limit set by JS_SetMemoryLimit.
         - Everything else, including stack overflow (rquickjs-0.11
           surfaces it as RangeError "Maximum call stack size
           exceeded"), falls through to plain JSError. The
-          test_stack_overflow_is_jserror_not_memory tripwire (section 11.1)
+          test_stack_overflow_is_jserror_not_memory tripwire
           asserts this routing.
         """
         if name == "HostError":
@@ -369,18 +369,14 @@ class Context:
             # Bare @ctx.function (no parens).
             js_name = name if name is not None else getattr(fn, "__name__", None)
             if not js_name:
-                raise QuickJSError(
-                    "host function has no __name__; use @ctx.function(name=...)"
-                )
+                raise QuickJSError("host function has no __name__; use @ctx.function(name=...)")
             return self.register(js_name, fn, is_async=is_async)
 
         # Factory form.
         def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
             js_name = name if name is not None else getattr(f, "__name__", None)
             if not js_name:
-                raise QuickJSError(
-                    "host function has no __name__; use @ctx.function(name=...)"
-                )
+                raise QuickJSError("host function has no __name__; use @ctx.function(name=...)")
             return self.register(js_name, f, is_async=is_async)
 
         return decorator
@@ -398,7 +394,7 @@ class Context:
     ) -> Any:
         """Evaluate code with top-level await + async host-call support.
 
-        See section 7.4. Two modes:
+        Two modes:
 
         * ``module=False`` (default): script-mode eval with
           JS_EVAL_FLAG_ASYNC. Top-level ``await`` works; the return
@@ -415,7 +411,7 @@ class Context:
         ``module=True``. Under previous implementation, ``module=True`` means real ES
         modules with different scoping — silently flipping the
         behavior of existing code would be worse than requiring the
-        explicit opt-in. See README.md section 7.
+        explicit opt-in.
 
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
@@ -500,11 +496,11 @@ class Context:
         """Shared prologue + eval + driving loop for eval_async and
         eval_handle_async. Returns a Handle to the settled value
         (fulfilled result or {value, done} envelope for module mode).
-        Raises on JS exception via the section 10.4 classifier.
+        Raises on JS exception via the classifier.
         """
         if self._closed:
             raise QuickJSError("context is closed")
-        # section 7.4 concurrency rule. Check BEFORE touching the engine so
+        # Check BEFORE touching the engine so
         # a violation is cheap and leaves no side effects.
         if self._eval_async_in_flight:
             raise ConcurrentEvalError(
@@ -513,7 +509,7 @@ class Context:
                 "workloads"
             )
         self._last_host_exception = None
-        # section 7.4 timeout semantics: per-call override or cumulative.
+        # Timeout semantics: per-call override or cumulative.
         if timeout is not None:
             deadline = time.monotonic() + timeout
         else:
@@ -553,7 +549,7 @@ class Context:
     ) -> Handle:
         """Synchronous eval inside an already-open TaskGroup scope.
         Any async host calls dispatched during this eval become
-        children of the group (section 7.4).
+        children of the group.
 
         Two eval paths:
         * ``module=True`` (previous implementation): ``eval_module_async`` uses
@@ -592,7 +588,7 @@ class Context:
         get_handle: Callable[[], Handle],
         deadline: float,
     ) -> Handle:
-        """section 7.4 driving flow. Open a TaskGroup, obtain the initial
+        """Open a TaskGroup, obtain the initial
         Handle via ``get_handle`` (runs synchronously inside the
         group so any async host calls dispatched during initial eval
         become children of the group), then drive the resulting
@@ -604,7 +600,7 @@ class Context:
         cascade to them and they leak — same seam as previous implementation's fix
         that caught the cancel-leak bug.
 
-        Cancellation flow (section 7.4):
+        Cancellation flow:
 
         1. Driving loop's ``event.wait()`` raises CancelledError.
         2. We reject every in-flight Promise with a
@@ -640,13 +636,13 @@ class Context:
                         return fast
                     try:
                         while True:
-                            # section 7.4 step 1: drain microtasks first.
+                            # Step 1: drain microtasks first.
                             self._engine_ctx.run_pending_jobs()
 
-                            # section 7.4 step 2: check promise state.
+                            # Step 2: check promise state.
                             state = self._engine_ctx.promise_state(inner)
 
-                            # section 7.4 step 3: fulfilled → return result.
+                            # Step 3: fulfilled → return result.
                             if state == 1:
                                 result_inner = self._engine_ctx.promise_result(inner)
                                 result_handle = Handle(self, result_inner)
@@ -654,18 +650,16 @@ class Context:
                                 handle = None
                                 return result_handle
 
-                            # section 7.4 step 4: rejected → raise from reason.
+                            # Step 4: rejected → raise from reason.
                             if state == 2:
                                 reason_inner = self._engine_ctx.promise_result(inner)
                                 reason_handle = Handle(self, reason_inner)
                                 try:
-                                    self._raise_from_reason_handle(
-                                        reason_handle, deadline
-                                    )
+                                    self._raise_from_reason_handle(reason_handle, deadline)
                                 finally:
                                     reason_handle.dispose()
 
-                            # section 7.4 step 5/6: pending.
+                            # Step 5/6: pending.
                             if not self._pending_tasks:
                                 raise DeadlockError(
                                     "eval_async's top-level promise "
@@ -679,22 +673,19 @@ class Context:
 
                             event = self._pending_completed
                             assert event is not None, (
-                                "pending task present but completion "
-                                "event is None"
+                                "pending task present but completion event is None"
                             )
                             await event.wait()
                             event.clear()
 
                             if time.monotonic() >= deadline:
-                                raise TimeoutError(
-                                    "eval_async exceeded its deadline"
-                                )
+                                raise TimeoutError("eval_async exceeded its deadline")
                     except asyncio.CancelledError:
                         cancelled = True
                         self._reject_pending_with_cancellation()
                         raise
             except* asyncio.CancelledError:
-                # section 7.4 cancellation step 4-6.
+                # Cancellation step 4-6.
                 self._runtime._deadline = None
                 self._active_task_group = None
                 assert handle is not None
@@ -714,9 +705,7 @@ class Context:
                                 reason_handle, "HostCancellationError"
                             )
                             if not is_our_cancel:
-                                self._raise_from_reason_handle(
-                                    reason_handle, None
-                                )
+                                self._raise_from_reason_handle(reason_handle, None)
                         finally:
                             reason_handle.dispose()
                         handle.dispose()
@@ -742,9 +731,7 @@ class Context:
         assert absorbed_handle is not None
         return absorbed_handle
 
-    def _raise_from_reason_handle(
-        self, reason: Handle, deadline: float | None
-    ) -> None:
+    def _raise_from_reason_handle(self, reason: Handle, deadline: float | None) -> None:
         """Read name/message/stack off a JS reason Handle, classify
         via _classify_jserror, and raise. Used by the driving loop
         on the rejected-promise path and by the absorption-inspect
@@ -783,10 +770,10 @@ class Context:
         return bool(got == expected)
 
     def _reject_pending_with_cancellation(self) -> None:
-        """section 7.4 cancellation step 2: reject every in-flight async
+        """Cancellation step 2: reject every in-flight async
         host-call Promise with a HostCancellationError record.
         Matches the previous implementation pattern — the error's JS-side name is the
-        literal "HostCancellationError" (section 10.3)."""
+        literal "HostCancellationError"."""
         for pid in list(self._pending_tasks):
             try:
                 self._engine_ctx.reject_pending(
@@ -800,10 +787,8 @@ class Context:
                 # our list() snapshot and the call. Swallow.
                 pass
 
-    def _dispatch_async_host_call(
-        self, fn_id: int, args: tuple[Any, ...], pending_id: int
-    ) -> int:
-        """section 6.5 async fn_id → coroutine lookup and scheduling.
+    def _dispatch_async_host_call(self, fn_id: int, args: tuple[Any, ...], pending_id: int) -> int:
+        """Async fn_id → coroutine lookup and scheduling.
         Invoked from the Rust async trampoline. Returns 0 on
         successful scheduling, -1 on failure (the Rust side rejects
         the Promise locally with a HostError in that case).
@@ -881,13 +866,11 @@ class Context:
                 if resolve_ok:
                     self._engine_ctx.resolve_pending(pending_id, value)
                 else:
-                    self._engine_ctx.reject_pending(
-                        pending_id, err_name, err_message, err_stack
-                    )
+                    self._engine_ctx.reject_pending(pending_id, err_name, err_message, err_stack)
             except Exception:
                 # Benign: the context may have closed under us, or
                 # the pid was already settled by the cancellation
-                # walk. section 6.4 tolerates both as no-ops.
+                # walk.
                 pass
         finally:
             self._pending_tasks.pop(pending_id, None)
@@ -895,7 +878,7 @@ class Context:
                 self._pending_completed.set()
 
     def _dispatch_host_call(self, fn_id: int, args: tuple[Any, ...]) -> Any:
-        """section 6.5 fn_id → callable lookup and call. Invoked from the
+        """fn_id → callable lookup and call. Invoked from the
         Rust trampoline with the GIL held.
 
         On user-fn exception: stash the Python exception on the
@@ -919,6 +902,4 @@ class Context:
             self._last_host_exception = exc
             # Preserve original exception in __cause__, while
             # sanitizing the JS-visible HostError payload.
-            raise _engine.JSError(
-                "HostError", _HOST_ERROR_SANITIZED_MESSAGE, None
-            ) from None
+            raise _engine.JSError("HostError", _HOST_ERROR_SANITIZED_MESSAGE, None) from None

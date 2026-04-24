@@ -16,7 +16,7 @@ from quickjs_rs import Context, Runtime
 
 @pytest.fixture(scope="module")
 def rt() -> Iterator[Runtime]:
-    """Module-scoped Runtime so theinstantiation cost
+    """Module-scoped Runtime so the instantiation cost
     doesn't get counted against every benchmark in a file. Benchmarks
     that measure startup construct their own Runtime explicitly."""
     runtime = Runtime()

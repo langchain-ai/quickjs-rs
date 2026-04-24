@@ -1,4 +1,4 @@
-"""Runtime. See README.md section 7."""
+"""Runtime. See README.md"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class Runtime:
     reads that slot on every QuickJS interrupt poll and returns True
     once the deadline has elapsed. This is the same design as previous implementation's
     bridge — single shared deadline per runtime — now without the
-    wasmtime epoch backup (section 8 "No wasm epoch interruption").
+    wasmtime epoch backup.
     """
 
     def __init__(
@@ -101,11 +101,9 @@ class Runtime:
             if isinstance(value, str):
                 canonical = key if scope_path == "" else f"{scope_path}/{key}"
                 try:
-                    self._engine_rt.add_module_source(
-                        scope_path, key, canonical, value
-                    )
+                    self._engine_rt.add_module_source(scope_path, key, canonical, value)
                 except _engine.QuickJSError as e:
-                    # section 5.5: TypeScript parse errors surface at install.
+                    # TypeScript parse errors surface at install.
                     raise QuickJSError(str(e)) from e
             elif isinstance(value, ModuleScope):
                 self._engine_rt.register_subscope(scope_path, key)
@@ -116,10 +114,3 @@ class Runtime:
                     f"ModuleScope entry {key!r}: expected str | ModuleScope, "
                     f"got {type(value).__name__}"
                 )
-
-    def run_pending_jobs(self) -> int:
-        raise NotImplementedError("run_pending_jobs lands with async support (section 7.4).")
-
-    @property
-    def has_pending_jobs(self) -> bool:
-        raise NotImplementedError("has_pending_jobs lands with async support (section 7.4).")

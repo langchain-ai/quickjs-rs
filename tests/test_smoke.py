@@ -1,12 +1,4 @@
-"""Acceptance tests. See README.md section 13 and
-README.md section 9.2 / section 13.3.
-
-The north stars: previous implementation's ``test_acceptance`` (section 13.1), previous implementation's
-``test_async_acceptance`` (section 13.2), and previous implementation's
-``test_module_acceptance`` (section 13.3 / module-loading section 9.2). Each is
-a single end-to-end scenario exercising the full feature set of
-its version — a tripwire that goes red if anything fundamental
-regresses.
+"""Acceptance tests.
 
 ``test_smoke_primitives`` is a focused happy-path check that
 greened the first primitive-marshaling commits; it remains as a
@@ -34,7 +26,7 @@ from quickjs_rs import (
 
 
 def test_smoke_primitives() -> None:
-    """Greens the primitive block of section 13 plus bigint and Uint8Array."""
+    """Greens the primitive block plus bigint and Uint8Array."""
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:
             assert ctx.eval("1 + 2") == 3
@@ -100,10 +92,7 @@ def test_smoke_primitives() -> None:
             # JS-side visibility: a try/catch inside JS sees the error's
             # name and message and can round-trip them back as a string.
             assert (
-                ctx.eval(
-                    "try { boom(); 'unreachable'; }"
-                    " catch (e) { e.name + ': ' + e.message }"
-                )
+                ctx.eval("try { boom(); 'unreachable'; } catch (e) { e.name + ': ' + e.message }")
                 == "HostError: Host function failed"
             )
 
@@ -129,9 +118,7 @@ def test_smoke_primitives() -> None:
             with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
                 with mem_rt.new_context() as mem_ctx:
                     with pytest.raises(MemoryLimitError):
-                        mem_ctx.eval(
-                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
-                        )
+                        mem_ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
 
             # Timeout: infinite loop terminates within the configured
             # deadline. Context uses its default 5 s budget; this test
@@ -147,9 +134,7 @@ def test_smoke_primitives() -> None:
             # invocation, and to_python marshaling for the subset of
             # values that are marshalable. allow_opaque=True substitutes
             # child Handles for unmarshalable values (functions here).
-            with ctx.eval_handle(
-                "({x: 1, y: 2, add(a, b) { return a + b }})"
-            ) as obj:
+            with ctx.eval_handle("({x: 1, y: 2, add(a, b) { return a + b }})") as obj:
                 assert obj.type_of == "object"
                 x_handle = obj.get("x")
                 try:
@@ -247,9 +232,7 @@ def test_acceptance() -> None:
             with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
                 with mem_rt.new_context() as mem_ctx:
                     with pytest.raises(MemoryLimitError):
-                        mem_ctx.eval(
-                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
-                        )
+                        mem_ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
 
             # Timeout
             with pytest.raises(TimeoutError):
@@ -276,16 +259,13 @@ def test_acceptance() -> None:
 
 
 async def test_async_acceptance() -> None:
-    """section 13.2 acceptance. Ported verbatim from the spec. If this
-    passes, previous implementation's async surface is behaviorally complete.
-
+    """
     The ``except asyncio.CancelledError: pass`` tolerance around the
     absorption case is intentional, not sloppy: cancellation delivery
     timing is implementation-dependent in asyncio, and on slow
     runners the cancellation may propagate before JS's catch handler
     runs. Both outcomes — JS absorbs, or cancellation propagates
-    before absorption — are valid implementations of section 7.4 per the
-    spec, so the test tolerates either.
+    before absorption — are valid implementations so the test tolerates either.
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -368,9 +348,7 @@ async def test_async_acceptance() -> None:
             assert captured_reads == ["/context.txt"]
 
             # Cancellation: task.cancel() propagates through eval_async
-            task = asyncio.create_task(
-                ctx.eval_async("await sleep_ms(10000)")
-            )
+            task = asyncio.create_task(ctx.eval_async("await sleep_ms(10000)"))
             await asyncio.sleep(0.01)  # let it start
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -393,11 +371,11 @@ async def test_async_acceptance() -> None:
                 except asyncio.CancelledError:
                     # Acceptable alternate path: cancellation propagated
                     # before JS catch handler ran. Either outcome is a
-                    # valid implementation of section 7.4 cancellation.
+                    # valid implementation of cancellation.
                     pass
 
             # DeadlockError: pending promise with no async work
-            # section 7 previous implementation: module=False enables JS_EVAL_FLAG_ASYNC, so
+            # previous implementation: module=False enables JS_EVAL_FLAG_ASYNC, so
             # returning a pending promise as the body's last
             # expression gets wrapped as {value: <pending>, done:
             # false} — wrapper is fulfilled, driving loop returns.
@@ -432,27 +410,16 @@ async def test_async_acceptance() -> None:
 
 
 async def test_module_acceptance() -> None:
-    """section 13.3 / README.md section 9.2 acceptance.
-
-    The motivating agent-code pattern end-to-end: a stdlib
+    """The motivating agent-code pattern end-to-end: a stdlib
     ModuleScope carrying multiple named deps, a script that imports
     across scopes, uses top-level await against async host
     functions, and reads a global set by script-mode eval. Plus
     composition tests (override, capability restriction, recursive
     self-contained deps).
-
-    Adapted from the spec's snippet for the "bare strings need
-    wrapping" reality in bb6b2fd: single-value modules like
-    ``@agent/config`` are wrapped in a ``ModuleScope`` with
-    ``index.js`` instead of being a bare str at scope root (str
-    at root needs an index.js sibling per section 3.1, so a lone
-    ``@agent/config: "..."`` no longer validates).
     """
     stdlib = ModuleScope(
         {
-            "@agent/config": ModuleScope(
-                {"index.js": "export const MAX_RETRIES = 3;"}
-            ),
+            "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 3;"}),
             "@agent/utils": ModuleScope(
                 {
                     "index.js": """
@@ -591,16 +558,14 @@ async def test_module_acceptance() -> None:
 
         # Composition: override for testing. Build a fresh
         # Runtime for each alternate stdlib — the module store is
-        # per-runtime (section 5.3 / section 11), so mixing overrides on the
+        # per-runtime, so mixing overrides on the
         # same runtime would layer on top of existing caches in
         # ways that depend on import order. Separate runtimes
         # give each composition a clean slate.
         test_stdlib = ModuleScope(
             {
                 **stdlib.modules,
-                "@agent/config": ModuleScope(
-                    {"index.js": "export const MAX_RETRIES = 1;"}
-                ),
+                "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 1;"}),
             }
         )
 
@@ -626,9 +591,7 @@ async def test_module_acceptance() -> None:
                 assert ctx.eval("retries") == 1  # overridden
 
         # Capability restriction: no @agent/fs.
-        restricted = ModuleScope(
-            {k: v for k, v in stdlib.modules.items() if k != "@agent/fs"}
-        )
+        restricted = ModuleScope({k: v for k, v in stdlib.modules.items() if k != "@agent/fs"})
 
         with Runtime() as rt_restricted:
             with rt_restricted.new_context() as ctx:
@@ -649,9 +612,7 @@ async def test_module_acceptance() -> None:
             {
                 "@agent/utils": ModuleScope(
                     {
-                        "index.js": (
-                            "export function greet(n) { return 'hi ' + n; }"
-                        ),
+                        "index.js": ("export function greet(n) { return 'hi ' + n; }"),
                     }
                 ),
             }
@@ -693,4 +654,3 @@ async def test_module_acceptance() -> None:
                         """,
                         module=True,
                     )
-

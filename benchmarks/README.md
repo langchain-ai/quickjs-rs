@@ -42,11 +42,11 @@ commits.
 | File | Scope (`benchmarks/README.md`) |
 |---|---|
 | `conftest.py` | Shared fixtures: `rt` (module-scoped), `ctx` (function-scoped), `async_ctx` (owns its Runtime + pre-registers the `instant` async host fn) |
-| `test_startup.py` | section 5.1 — `Runtime()`, `new_context()`, full cold-start |
-| `test_eval_sync.py` | section 5.2 — noop, arithmetic, JSON parse, `fib(30)`, loop 1M, regex, object churn |
-| `test_marshaling.py` | section 5.4 — int, string, dict, list, bytes round-trips |
-| `test_host_functions.py` | section 5.5 — sync + async host call dispatch |
-| `test_eval_async.py` | section 5.3 — async pipeline, fan-out, sequential await |
+| `test_startup.py` | `Runtime()`, `new_context()`, full cold-start |
+| `test_eval_sync.py` | noop, arithmetic, JSON parse, `fib(30)`, loop 1M, regex, object churn |
+| `test_marshaling.py` | int, string, dict, list, bytes round-trips |
+| `test_host_functions.py` | sync + async host call dispatch |
+| `test_eval_async.py` | async pipeline, fan-out, sequential await |
 | `test_threaded_stress.py` | Threaded stress: multi-runtime/context isolation under concurrent load + TPS |
 
 ## Naming convention
@@ -100,12 +100,3 @@ It reuses the `build-wasm` workflow to get a fresh `quickjs.wasm`, then
 invokes `CodSpeedHQ/action@v4` with `mode: walltime`. Simulation mode
 (Valgrind) can't see wasm execution cost, so wall-time is the only
 meaningful mode for this project.
-
-## When a benchmark lands outside its expected range
-
-`benchmarks/README.md section 8` lists order-of-magnitude targets. If a run lands
-outside its range, the rule is: **investigate, don't silently adjust.**
-Either the range is wrong and the spec needs an update (separate commit),
-or the implementation has an unexpected cost center worth profiling in
-previous implementation. Known items flagged against the previous implementation baseline are recorded in the
-relevant commit bodies.

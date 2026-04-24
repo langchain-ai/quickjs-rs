@@ -88,10 +88,7 @@ def test_shadowing_js_builtin(ctx: Context) -> None:
 
 def test_del_unsupported_raises_typeerror(ctx: Context) -> None:
     """Globals signature defines __getitem__ / __setitem__ /
-    __contains__ / get_handle — but not __delitem__. Python's default
-    ``del`` on a dict-like without that method raises TypeError;
-    locking the behavior in so we don't silently acquire a
-    __delitem__ later without a spec update."""
+    __contains__ / get_handle — but not __delitem__."""
     ctx.globals["throwaway"] = 1
     with pytest.raises((TypeError, AttributeError)):
         del ctx.globals["throwaway"]

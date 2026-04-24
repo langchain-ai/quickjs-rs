@@ -81,7 +81,7 @@ def run_threaded_runtime_context_stress(
                             # on return indicates context crossover in bridge execution.
                             @ctx.function(name="host_mix")
                             def host_mix(n: int, _token: str = token) -> dict[str, int | str]:
-                                # special RNG generator
+                                # special RNG
                                 mixed = ((n * 1315423911) ^ 0x9E3779B9) & 0x7FFFFFFF
                                 return {"owner": _token, "mix": mixed}
 

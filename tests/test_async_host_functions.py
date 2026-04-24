@@ -267,8 +267,7 @@ async def test_cancel_finally_host_calls_also_cancelled() -> None:
             # cleanup() was dispatched and started, but the TaskGroup
             # cancellation prevented its sleep from completing —
             # cleanup_completed stays False. The cleanup code RAN but
-            # didn't finish its await. This is the spec-locked
-            # semantic.
+            # didn't finish its await.
             assert cleanup_completed is False
 
 
@@ -400,7 +399,7 @@ async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
     """Handle.call on an async host function from sync context must
     raise ConcurrentEvalError, matching Context.eval's behavior for
     the same failure mode. The flag-and-surface pattern
-    extends to Handle.call as a spec-compliance property — the
+    extends to Handle.call — the
     user-visible behavior should be consistent regardless of which
     sync entry point invoked the async host function."""
     from quickjs_rs import ConcurrentEvalError

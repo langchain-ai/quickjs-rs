@@ -1,7 +1,6 @@
 //! quickjs_rs._engine — PyO3 extension wrapping rquickjs.
 //!
-//! See README.md for the full Rust-layer spec. The
-//! code is split into focused modules:
+//! The code is split into modules:
 //!
 //!   * `errors`     — exception classes + rquickjs→PyErr mapping
 //!   * `reentrance` — thread-local active_ctx slot + helper
@@ -41,6 +40,9 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("QuickJSError", m.py().get_type::<QuickJSError>())?;
     m.add("JSError", m.py().get_type::<JSError>())?;
     m.add("MarshalError", m.py().get_type::<MarshalError>())?;
-    m.add("InvalidHandleError", m.py().get_type::<InvalidHandleError>())?;
+    m.add(
+        "InvalidHandleError",
+        m.py().get_type::<InvalidHandleError>(),
+    )?;
     Ok(())
 }
