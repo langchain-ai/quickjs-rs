@@ -236,11 +236,12 @@ flowchart TD
 |----|-----------|----------------|--------|----------|----------|--------|------------|----------------|
 | T1 | DF7, DF8 | DC1 | Untrusted JS can invoke privileged registered callbacks, enabling Python-side side effects (file/network/process access) equivalent to code execution through callback capabilities. | TB3 | Critical | Accepted (by design) | Verified | `quickjs_rs/context.py:Context.register`, `src/context.rs:QjsContext::register_host_function`, `src/host_fn.rs:call_host_fn` |
 | T2 | DF1, DF4 | DC2, DC4 | CPU/memory denial-of-service when callers disable/raise limits (`memory_limit=None`, permissive timeout) while executing attacker-influenced scripts. | TB1 | High | Accepted with guardrails | Verified | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context._eval_and_drive` |
-| T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Unmitigated | Verified | `quickjs_rs/context.py:Context._run_async_host_call`, `src/context.rs:QjsContext::reject_pending`, `src/host_fn.rs:throw_host_error` |
+| T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Mitigated (sanitized JS HostError payload) | Verified | `quickjs_rs/context.py:Context._dispatch_host_call`, `quickjs_rs/context.py:Context._run_async_host_call`, `src/host_fn.rs:dispatch_async_host_fn` |
 | T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted (architectural) | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
 | T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (`oxidase` transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
-| T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Unmitigated | Likely | `src/host_fn.rs:dispatch_async_host_fn`, `src/context.rs:QjsContext::resolve_pending` |
+| T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Mitigated (collision-safe allocator) | Verified | `src/host_fn.rs:dispatch_async_host_fn`, `src/host_fn.rs:find_available_pending_id`, `src/context.rs:QjsContext::resolve_pending` |
 | T7 | DF2, DF3, DF5 | DC2 | Runtime-level shared module store can allow cross-tenant module poisoning if one runtime serves multiple trust domains (multi-tenant pooled-runtime pattern). | TB1, TB4 | High (conditional) | Accepted (documented constraint) | Likely | `quickjs_rs/runtime.py:Runtime.install`, `quickjs_rs/runtime.py:Runtime._install_recursive`, `src/runtime.rs:QjsRuntime::ensure_module_store` |
+| T8 | DF7, DF10 | DC2, DC5 | Reentrant eval across sibling contexts on one runtime can run against the wrong context identity, causing cross-context read/write contamination. | TB2, TB3 | High | Mitigated (requested-context enforcement) | Verified | `src/reentrance.rs:with_active_ctx`, `tests/test_reentrance.py` |
 
 ### Threat Details
 
@@ -265,8 +266,8 @@ flowchart TD
 - **Flow**: DF9.
 - **Description**: callback exceptions include message/traceback that can surface to JS error objects and upstream service logs.
 - **Preconditions**: callback throws with sensitive content in message/stack; caller exposes error payload.
-- **Mitigations**: none in-repo for redaction; only transport mechanism is provided.
-- **Residual risk**: high when callbacks manipulate secrets.
+- **Mitigations**: JS-visible host callback failures are sanitized to a stable `HostError` message (`"Host function failed"`) for both sync and async dispatch paths.
+- **Residual risk**: medium; original Python exception details remain available in Python (`HostError.__cause__`) and can still leak if callers log them verbatim.
 
 #### T4: Native engine exploitability path
 
@@ -289,8 +290,16 @@ flowchart TD
 - **Flow**: DF8.
 - **Description**: wraparound IDs can overwrite unresolved resolver entries and settle wrong Promise.
 - **Preconditions**: very long-lived process, high async callback volume, unresolved entries still present near wrap.
-- **Mitigations**: remove-on-settle behavior in `quickjs_rs/context.py:Context._run_async_host_call`; no collision guard.
-- **Residual risk**: medium integrity issue in extreme workloads.
+- **Mitigations**: collision-safe pending ID allocation scans for a free slot before insert and rejects cleanly if ID space is exhausted; regression tests cover free, occupied, and wraparound paths.
+- **Residual risk**: low; remaining risk is bounded to extreme full-ID-space exhaustion conditions.
+
+#### T8: Reentrant cross-context identity confusion
+
+- **Flow**: DF7/DF10.
+- **Description**: reentrant eval chains in sibling contexts sharing one runtime can execute against an unintended context identity if reentrance routing uses the wrong context pointer.
+- **Preconditions**: nested host-callback-driven eval occurs while runtime lock is active, and reentrance routing does not preserve requested context identity.
+- **Mitigations**: reentrance path enforces requested-context identity via `with_active_ctx`, using runtime-active tracking with per-call context pointer restoration; sync/async cross-context regression tests validate read/write isolation.
+- **Residual risk**: low; future refactors in reentrance routing must preserve current invariants and test coverage.
 
 #### T7: Shared runtime module poisoning
 
@@ -303,7 +312,8 @@ flowchart TD
 ### Threat Chain Analysis
 
 - **TC1 (T7 + T1)**: in pooled-runtime multi-tenant deployments, cross-tenant module poisoning can seed hostile helper code, then invoke privileged callback paths for lateral movement.
-- **TC2 (T3 + T1)**: callback abuse triggers targeted exceptions whose stack payload leaks additional sensitive data, amplifying exfiltration impact.
+- **TC2 (T3 + T1)**: callback abuse can still trigger sensitive failures; JS payloads are sanitized, but Python-side logging of underlying causes can still amplify exposure if not controlled.
+- **TC3 (T8 + T1)**: if reentrant context identity were to regress, callback-assisted cross-context eval could become a tenant-isolation bypass path on shared-runtime deployments.
 
 ---
 
@@ -312,7 +322,7 @@ flowchart TD
 | Input Source | Data Flows | Threats | Validation Points | Responsibility | Gaps |
 |-------------|-----------|---------|-------------------|----------------|------|
 | User direct input (JS code, module source, values) | DF1, DF2, DF10 | T1, T2, T4, T7 | `quickjs_rs/context.py:Context.eval`, `quickjs_rs/modules.py:ModuleScope.__post_init__`, `src/marshal.rs:py_to_js_value` | project | No provenance/trust policy enforcement at eval/install boundary |
-| Tool/function results (registered callbacks) | DF7, DF8, DF9 | T1, T3, T6 | `src/host_fn.rs:call_host_fn`, `quickjs_rs/context.py:Context._run_async_host_call`, `src/context.rs:QjsContext::resolve_pending` | project | No built-in callback capability sandbox or output redaction |
+| Tool/function results (registered callbacks) | DF7, DF8, DF9 | T1, T3, T6, T8 | `src/host_fn.rs:call_host_fn`, `quickjs_rs/context.py:Context._run_async_host_call`, `src/context.rs:QjsContext::resolve_pending`, `src/reentrance.rs:with_active_ctx` | project | JS-visible callback errors are sanitized by default; Python-side exception logging policy remains caller responsibility |
 | Configuration (limits/timeouts/module topology) | DF1, DF3, DF4 | T2, T7 | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `src/modules.rs:resolve_with` | project | Safe defaults exist, but unsafe overrides are not blocked |
 | LLM output (only when caller forwards to eval) | DF1 | T1, T2, T4 | Same as user direct input path | project | No distinct guardrails for model-generated code payloads |
 
@@ -336,7 +346,7 @@ Callback-level vulnerabilities are constrained by this library only at the invoc
 | ID | Original Threat | Investigation | Evidence | Conclusion |
 |----|----------------|---------------|----------|------------|
 | D1 | Relative import path traversal could read arbitrary filesystem files. | Traced resolver and loader path from `import` specifier through normalization and source fetch. | `src/modules.rs:normalize_path`, `src/modules.rs:resolve_with`, `src/modules.rs:StoreLoader::load` | Disproven: loader fetches only `ModuleStore.sources` in-memory entries; no filesystem read path exists. |
-| D2 | Cross-context handle confusion allows reading/writing values across contexts. | Traced handle context ID checks and promise APIs for context-pointer validation before restore. | `quickjs_rs/handle.py:Handle._require_same_context`, `src/marshal.rs:handle_or_py_to_js`, `src/context.rs:QjsContext::promise_state` | Disproven: cross-context operations raise `InvalidHandleError` and are blocked before value access. |
+| D2 | Cross-context handle confusion allows reading/writing values across contexts. | Traced handle context ID checks, promise APIs for context-pointer validation before restore, and reentrant context identity routing. | `quickjs_rs/handle.py:Handle._require_same_context`, `src/marshal.rs:handle_or_py_to_js`, `src/context.rs:QjsContext::promise_state`, `src/reentrance.rs:with_active_ctx`, `tests/test_reentrance.py` | Disproven for handle marshaling path; reentrant context-identity risk is tracked separately as T8 and currently mitigated. |
 
 ---
 
@@ -492,3 +502,4 @@ Policy phrasing:
 | 2026-04-24 | updated by langster-threat-model | Clarified T1/T2/T4 acceptance rationale: callback bridge is by-design capability boundary, T2 is configuration-dependent with guardrail expectations, and T4 is accepted architectural native-engine risk with explicit compensating controls. |
 | 2026-04-24 | updated by langster-threat-model | Reframed T7 as a documented deployment constraint (runtime-per-trust-domain) with conditional severity for pooled multi-tenant runtime patterns. |
 | 2026-04-24 | updated by langster-threat-model | Added T5 compensating controls: CI RustSec advisory scanning and Cargo.lock git-source allowlist policy gate, and updated residual-risk language accordingly. |
+| 2026-04-24 | updated by langster-threat-model | Aligned threat statuses with stacked fixes: T3 sanitized JS-visible host errors, T6 collision-safe pending-id allocation, and T8 reentrant requested-context identity enforcement. |
