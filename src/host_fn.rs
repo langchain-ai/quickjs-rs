@@ -189,7 +189,7 @@ fn dispatch_async_host_fn<'js>(
             let _ = resolve; // drop to free
             let exc = rquickjs::Exception::from_message(
                 ctx.clone(),
-                "async host dispatcher rejected",
+                "Host function failed",
             )?;
             let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
             let _: Value<'_> = reject_fn.call((exc.into_value(),))?;

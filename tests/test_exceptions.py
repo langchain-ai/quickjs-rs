@@ -96,7 +96,7 @@ def test_js_catches_hosterror_and_reads_name_and_message() -> None:
                     "try { raiser(); 'unreachable'; }"
                     " catch (e) { `${e.name}: ${e.message}` }"
                 )
-                == "HostError: inner detail"
+                == "HostError: Host function failed"
             )
 
 
