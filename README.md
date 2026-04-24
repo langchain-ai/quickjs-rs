@@ -1,6 +1,6 @@
 # quickjs-rs
 
-Sandboxed JavaScript execution for Python.
+QuickJS execution for Python.
 
 Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [QuickJS](https://bellard.org/quickjs/). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
 
@@ -117,4 +117,4 @@ ruff check
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE)

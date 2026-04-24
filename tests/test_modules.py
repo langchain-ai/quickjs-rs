@@ -22,11 +22,7 @@ def test_single_file_module_wrapped_in_scope_is_valid() -> None:
     index.js. A bare str at scope root has no index.js sibling and
     no longer parses — the wrap is the canonical shape."""
     scope = ModuleScope(
-        {
-            "lodash": ModuleScope(
-                {"index.js": "export function get(o, k) { return o[k]; }"}
-            )
-        }
+        {"lodash": ModuleScope({"index.js": "export function get(o, k) { return o[k]; }"})}
     )
     assert isinstance(scope.modules["lodash"], ModuleScope)
     assert "index.js" in scope.modules["lodash"].modules
@@ -40,8 +36,7 @@ def test_multi_file_scope_is_valid() -> None:
                 {
                     "index.js": "export { slugify } from './strings.js';",
                     "strings.js": (
-                        "export function slugify(s) {"
-                        " return s.toLowerCase().replace(/ /g, '-'); }"
+                        "export function slugify(s) { return s.toLowerCase().replace(/ /g, '-'); }"
                     ),
                 }
             )
@@ -59,9 +54,7 @@ def test_pure_dependency_root_is_valid_without_index_js() -> None:
     what gets passed to rt.install."""
     scope = ModuleScope(
         {
-            "@agent/config": ModuleScope(
-                {"index.js": "export const ENV = 'prod';"}
-            ),
+            "@agent/config": ModuleScope({"index.js": "export const ENV = 'prod';"}),
             "@agent/fs": ModuleScope({"index.js": "export default 1;"}),
         }
     )
@@ -88,9 +81,7 @@ def test_posix_subdirectory_paths_in_str_keys_are_valid() -> None:
                 {
                     "index.js": "export { foo } from './lib/util.js';",
                     "lib/util.js": "export function foo() { return 1; }",
-                    "lib/helpers/str.js": (
-                        "export function lower(s) { return s.toLowerCase(); }"
-                    ),
+                    "lib/helpers/str.js": ("export function lower(s) { return s.toLowerCase(); }"),
                 }
             )
         }
@@ -119,31 +110,19 @@ def test_recursive_nesting_is_unbounded() -> None:
                                 {
                                     "D": ModuleScope(
                                         {
-                                            "E": ModuleScope(
-                                                {"index.js": "export const v = 5;"}
-                                            ),
+                                            "E": ModuleScope({"index.js": "export const v = 5;"}),
                                             "index.js": (
-                                                'import { v } from "E";'
-                                                " export const d = v + 1;"
+                                                'import { v } from "E"; export const d = v + 1;'
                                             ),
                                         }
                                     ),
-                                    "index.js": (
-                                        'import { d } from "D";'
-                                        " export const c = d + 1;"
-                                    ),
+                                    "index.js": ('import { d } from "D"; export const c = d + 1;'),
                                 }
                             ),
-                            "index.js": (
-                                'import { c } from "C";'
-                                " export const b = c + 1;"
-                            ),
+                            "index.js": ('import { c } from "C"; export const b = c + 1;'),
                         }
                     ),
-                    "index.js": (
-                        'import { b } from "B";'
-                        " export const a = b + 1;"
-                    ),
+                    "index.js": ('import { b } from "B"; export const a = b + 1;'),
                 }
             )
         }
@@ -155,21 +134,14 @@ def test_scope_with_self_peer_dependency_is_valid() -> None:
     """§3.1: a scope can carry a ModuleScope-valued entry keyed the
     same way at multiple depths (self-containment via spreading).
     This is how shared deps travel into each scope that needs them."""
-    utils = {
-        "@agent/utils": ModuleScope(
-            {"index.js": "export function id(x) { return x; }"}
-        )
-    }
+    utils = {"@agent/utils": ModuleScope({"index.js": "export function id(x) { return x; }"})}
     scope = ModuleScope(
         {
             **utils,
             "@agent/fs": ModuleScope(
                 {
                     **utils,
-                    "index.js": (
-                        'import { id } from "@agent/utils";'
-                        " export const p = id;"
-                    ),
+                    "index.js": ('import { id } from "@agent/utils"; export const p = id;'),
                 }
             ),
         }
@@ -195,9 +167,7 @@ def test_two_namespaces_coexist_same_key() -> None:
                     # bare specifier `"index.js"` is an odd dep name,
                     # but it's legal and mirrors the strict two-namespace
                     # rule.)
-                    "helpers": ModuleScope(
-                        {"index.js": "export const H = 1;"}
-                    ),
+                    "helpers": ModuleScope({"index.js": "export const H = 1;"}),
                 }
             )
         }
@@ -218,9 +188,7 @@ def test_scope_with_str_entries_missing_index_raises() -> None:
     That's what a bare `import ... from 'scope-name'` resolves to.
     """
     with pytest.raises(ValueError, match="missing required index module"):
-        ModuleScope(
-            {"@agent/fs": ModuleScope({"helpers.js": "export default 1;"})}
-        )
+        ModuleScope({"@agent/fs": ModuleScope({"helpers.js": "export default 1;"})})
 
 
 def test_nested_scope_missing_index_at_top_level_raises() -> None:
@@ -292,9 +260,7 @@ def test_modules_dict_is_read_only() -> None:
     """§3.1 describes ModuleScope as frozen. Mutating `.modules`
     after construction would let a caller smuggle in invalid
     entries, bypassing the validation above — block it."""
-    scope = ModuleScope(
-        {"@a": ModuleScope({"index.js": "export const X = 1;"})}
-    )
+    scope = ModuleScope({"@a": ModuleScope({"index.js": "export const X = 1;"})})
     with pytest.raises(TypeError):
         scope.modules["@b"] = "export const Y = 2;"  # type: ignore[index]
 
@@ -302,9 +268,7 @@ def test_modules_dict_is_read_only() -> None:
 def test_scope_instance_is_frozen_at_dataclass_level() -> None:
     """Dataclass(frozen=True) — reassigning the modules attribute
     itself also fails, not just mutating the dict contents."""
-    scope = ModuleScope(
-        {"@a": ModuleScope({"index.js": "export const X = 1;"})}
-    )
+    scope = ModuleScope({"@a": ModuleScope({"index.js": "export const X = 1;"})})
     with pytest.raises(FrozenInstanceError):
         scope.modules = {}  # type: ignore[misc]
 
@@ -313,9 +277,7 @@ def test_constructor_takes_defensive_copy() -> None:
     """Passing a dict in and mutating it afterwards must NOT affect
     the scope — validation happens once, at construction time, and
     then the scope snapshot is immutable."""
-    raw: dict[str, object] = {
-        "@a": ModuleScope({"index.js": "export const X = 1;"})
-    }
+    raw: dict[str, object] = {"@a": ModuleScope({"index.js": "export const X = 1;"})}
     scope = ModuleScope(raw)  # type: ignore[arg-type]
     raw["@sneaky"] = "this should not appear"
     assert "@sneaky" not in scope.modules
@@ -327,9 +289,7 @@ def test_constructor_takes_defensive_copy() -> None:
 def test_dict_spread_extend() -> None:
     """Spread an existing scope's modules into a new dict to add
     entries. The new ModuleScope re-validates on construction."""
-    base = ModuleScope(
-        {"@a": ModuleScope({"index.js": "export const X = 1;"})}
-    )
+    base = ModuleScope({"@a": ModuleScope({"index.js": "export const X = 1;"})})
     extended = ModuleScope(
         {
             **base.modules,
@@ -344,9 +304,7 @@ def test_dict_spread_extend() -> None:
 def test_dict_spread_override() -> None:
     """Later keys win in a dict spread — the canonical way to
     override one module in a composed scope."""
-    base = ModuleScope(
-        {"@a": ModuleScope({"index.js": "export const X = 1;"})}
-    )
+    base = ModuleScope({"@a": ModuleScope({"index.js": "export const X = 1;"})})
     overridden = ModuleScope(
         {
             **base.modules,
@@ -367,21 +325,15 @@ def test_dict_comprehension_filter() -> None:
             "@c": ModuleScope({"index.js": "export const Z = 3;"}),
         }
     )
-    filtered = ModuleScope(
-        {k: v for k, v in full.modules.items() if k != "@b"}
-    )
+    filtered = ModuleScope({k: v for k, v in full.modules.items() if k != "@b"})
     assert set(filtered.modules.keys()) == {"@a", "@c"}
 
 
 def test_merge_independent_scopes() -> None:
     """Two scopes authored independently can be combined by
     spreading both into a fresh ModuleScope."""
-    team_a = ModuleScope(
-        {"@a/lib": ModuleScope({"index.js": "export const A = 1;"})}
-    )
-    team_b = ModuleScope(
-        {"@b/lib": ModuleScope({"index.js": "export const B = 2;"})}
-    )
+    team_a = ModuleScope({"@a/lib": ModuleScope({"index.js": "export const A = 1;"})})
+    team_b = ModuleScope({"@b/lib": ModuleScope({"index.js": "export const B = 2;"})})
     combined = ModuleScope({**team_a.modules, **team_b.modules})
     assert set(combined.modules.keys()) == {"@a/lib", "@b/lib"}
 
@@ -415,30 +367,20 @@ def test_recursive_spread_creates_self_contained_subscope() -> None:
     """§3.4: spreading a utils dict into a nested scope creates a
     self-contained subscope that carries the shared dep. Each
     spread is an independent canonical path at install time."""
-    utils = {
-        "@agent/utils": ModuleScope(
-            {"index.js": "export const U = 1;"}
-        )
-    }
+    utils = {"@agent/utils": ModuleScope({"index.js": "export const U = 1;"})}
     main = ModuleScope(
         {
             **utils,
             "@agent/fs": ModuleScope(
                 {
                     **utils,
-                    "index.js": (
-                        'import { U } from "@agent/utils";'
-                        " export const F = U;"
-                    ),
+                    "index.js": ('import { U } from "@agent/utils"; export const F = U;'),
                 }
             ),
             "@agent/http": ModuleScope(
                 {
                     **utils,
-                    "index.js": (
-                        'import { U } from "@agent/utils";'
-                        " export const H = U;"
-                    ),
+                    "index.js": ('import { U } from "@agent/utils"; export const H = U;'),
                 }
             ),
         }
@@ -478,9 +420,7 @@ async def test_install_bare_specifier_from_eval() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@agent/config": ModuleScope(
-                            {"index.js": "export const MAX_RETRIES = 3;"}
-                        ),
+                        "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 3;"}),
                     }
                 )
             )
@@ -509,12 +449,10 @@ async def test_install_relative_specifier_within_scope() -> None:
                         "@agent/utils": ModuleScope(
                             {
                                 "index.js": (
-                                    'import { lower } from "./helpers.js";'
-                                    " export { lower };"
+                                    'import { lower } from "./helpers.js"; export { lower };'
                                 ),
                                 "helpers.js": (
-                                    "export function lower(s)"
-                                    " { return s.toLowerCase(); }"
+                                    "export function lower(s) { return s.toLowerCase(); }"
                                 ),
                             }
                         ),
@@ -597,8 +535,7 @@ async def test_same_filename_in_sibling_scopes_resolves_independently() -> None:
                         "@a": ModuleScope(
                             {
                                 "index.js": (
-                                    'import { v } from "./helpers.js";'
-                                    " export const A = v;"
+                                    'import { v } from "./helpers.js"; export const A = v;'
                                 ),
                                 "helpers.js": "export const v = 'from-a';",
                             }
@@ -606,8 +543,7 @@ async def test_same_filename_in_sibling_scopes_resolves_independently() -> None:
                         "@b": ModuleScope(
                             {
                                 "index.js": (
-                                    'import { v } from "./helpers.js";'
-                                    " export const B = v;"
+                                    'import { v } from "./helpers.js"; export const B = v;'
                                 ),
                                 "helpers.js": "export const v = 'from-b';",
                             }
@@ -661,9 +597,7 @@ async def test_relative_import_from_eval_for_missing_file_raises() -> None:
     such file → ResolveError surfaces as JSError."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})}))
             with pytest.raises(JSError, match="missing.js"):
                 await ctx.eval_async(
                     'import { x } from "./missing.js"; globalThis.z = x;',
@@ -683,8 +617,7 @@ async def test_parent_traversal_past_scope_root_raises() -> None:
                         "@x": ModuleScope(
                             {
                                 "index.js": (
-                                    'import { y } from "../../escape.js";'
-                                    " export const Y = y;"
+                                    'import { y } from "../../escape.js"; export const Y = y;'
                                 ),
                             }
                         ),
@@ -704,9 +637,7 @@ async def test_top_level_eval_cannot_escape_root_with_dotdot() -> None:
     "outside" the installed set."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})}))
             with pytest.raises(JSError, match="escapes module scope root"):
                 await ctx.eval_async(
                     'import { y } from "../outside.js"; globalThis.r = y;',
@@ -732,9 +663,7 @@ async def test_scope_can_import_its_own_declared_dep_but_not_transitive() -> Non
                                 "@b": ModuleScope(
                                     {
                                         # B carries C directly.
-                                        "@c": ModuleScope(
-                                            {"index.js": "export const C = 'c';"}
-                                        ),
+                                        "@c": ModuleScope({"index.js": "export const C = 'c';"}),
                                         "index.js": (
                                             'import { C } from "@c";'
                                             " export const B = C + '-via-b';"
@@ -744,8 +673,7 @@ async def test_scope_can_import_its_own_declared_dep_but_not_transitive() -> Non
                                 # A does NOT carry @c in its own dict,
                                 # even though A's dep B carries it.
                                 "index.js": (
-                                    'import { B } from "@b";'
-                                    " export const A = 'a-then-' + B;"
+                                    "import { B } from \"@b\"; export const A = 'a-then-' + B;"
                                 ),
                             }
                         ),
@@ -753,9 +681,7 @@ async def test_scope_can_import_its_own_declared_dep_but_not_transitive() -> Non
                 )
             )
             # Happy path: A→B→C all resolve.
-            await ctx.eval_async(
-                'import { A } from "@a"; globalThis.r = A;', module=True
-            )
+            await ctx.eval_async('import { A } from "@a"; globalThis.r = A;', module=True)
             assert ctx.eval("r") == "a-then-c-via-b"
 
 
@@ -774,21 +700,13 @@ async def test_scope_cannot_reach_transitive_dep_directly() -> None:
                             {
                                 "@b": ModuleScope(
                                     {
-                                        "@c": ModuleScope(
-                                            {"index.js": "export const C = 'c';"}
-                                        ),
-                                        "index.js": (
-                                            'import { C } from "@c";'
-                                            " export const B = C;"
-                                        ),
+                                        "@c": ModuleScope({"index.js": "export const C = 'c';"}),
+                                        "index.js": ('import { C } from "@c"; export const B = C;'),
                                     }
                                 ),
                                 # Reaches into B's transitive dep C
                                 # directly — illegal.
-                                "index.js": (
-                                    'import { C } from "@c";'
-                                    " export const A = C;"
-                                ),
+                                "index.js": ('import { C } from "@c"; export const A = C;'),
                             }
                         ),
                     }
@@ -834,9 +752,7 @@ async def test_adding_transitive_dep_directly_makes_it_importable() -> None:
                     }
                 )
             )
-            await ctx.eval_async(
-                'import { A } from "@a"; globalThis.r = A;', module=True
-            )
+            await ctx.eval_async('import { A } from "@a"; globalThis.r = A;', module=True)
             assert ctx.eval("r") == "c|b-uses-c"
 
 
@@ -851,9 +767,7 @@ async def test_shared_dep_via_spread_resolves_in_both_scopes() -> None:
     The same source shows up under two canonical paths; QuickJS
     caches them as independent module records."""
     stdlib = {
-        "@agent/utils": ModuleScope(
-            {"index.js": "export function id(x) { return 'u:' + x; }"}
-        )
+        "@agent/utils": ModuleScope({"index.js": "export function id(x) { return 'u:' + x; }"})
     }
     main = ModuleScope(
         {
@@ -897,12 +811,8 @@ async def test_module_eval_returns_none() -> None:
     undefined; the only way to surface a value is globalThis."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const V = 42;"})})
-            )
-            result = await ctx.eval_async(
-                'import { V } from "@x"; V * 2;', module=True
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const V = 42;"})}))
+            result = await ctx.eval_async('import { V } from "@x"; V * 2;', module=True)
             assert result is None
 
 
@@ -912,9 +822,7 @@ async def test_module_scoped_let_is_not_visible_in_subsequent_eval() -> None:
     A subsequent script-mode eval cannot see them."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})}))
             await ctx.eval_async(
                 'import { Y } from "@x"; let moduleLocal = 42;',
                 module=True,
@@ -928,9 +836,7 @@ async def test_module_globalThis_assignment_visible_in_script_eval() -> None:
     script-mode eval."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 7;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 7;"})}))
             await ctx.eval_async(
                 'import { Y } from "@x"; globalThis.fromModule = Y * 2;',
                 module=True,
@@ -944,9 +850,7 @@ async def test_script_global_visible_in_module() -> None:
     names and ``ctx.globals[...]`` values flow into modules."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const K = 1;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const K = 1;"})}))
             ctx.eval("globalThis.fromScript = 'hello'")
             await ctx.eval_async(
                 'import { K } from "@x"; globalThis.concat = fromScript + K;',
@@ -979,8 +883,7 @@ async def test_module_top_level_await_with_async_host_function() -> None:
                         "@agent/lookup": ModuleScope(
                             {
                                 "index.js": (
-                                    "export async function lookup(k)"
-                                    " { return await _lookup(k); }"
+                                    "export async function lookup(k) { return await _lookup(k); }"
                                 ),
                             }
                         ),
@@ -1055,9 +958,7 @@ async def test_import_non_registered_module_raises() -> None:
     """§8: missing module → JSError at eval time."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})})
-            )
+            rt.install(ModuleScope({"@x": ModuleScope({"index.js": "export const Y = 1;"})}))
             with pytest.raises(JSError, match="@nope"):
                 await ctx.eval_async(
                     'import { x } from "@nope"; globalThis.z = x;',
@@ -1101,18 +1002,10 @@ async def test_reinstall_before_import_takes_new_source() -> None:
     the import sees the new value."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
-            )
+            rt.install(ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})}))
             # Re-install under the same canonical path BEFORE any import.
-            rt.install(
-                ModuleScope(
-                    {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
-                )
-            )
-            await ctx.eval_async(
-                'import { V } from "@cfg"; globalThis.r = V;', module=True
-            )
+            rt.install(ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 999;"})}))
+            await ctx.eval_async('import { V } from "@cfg"; globalThis.r = V;', module=True)
             assert ctx.eval("r") == 999
 
 
@@ -1124,20 +1017,14 @@ async def test_reinstall_after_import_is_no_op_cache_wins() -> None:
     expected to know not to rely on hot-reloading module sources."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})})
-            )
+            rt.install(ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 1;"})}))
             await ctx.eval_async(
                 'import { V } from "@cfg"; globalThis.first = V;',
                 module=True,
             )
             assert ctx.eval("first") == 1
             # Attempted swap — ignored by QuickJS's module cache.
-            rt.install(
-                ModuleScope(
-                    {"@cfg": ModuleScope({"index.js": "export const V = 999;"})}
-                )
-            )
+            rt.install(ModuleScope({"@cfg": ModuleScope({"index.js": "export const V = 999;"})}))
             await ctx.eval_async(
                 'import { V } from "@cfg"; globalThis.second = V;',
                 module=True,
@@ -1155,12 +1042,8 @@ async def test_two_installs_both_importable() -> None:
     first's modules, just merges into the same backing store."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
-            )
-            rt.install(
-                ModuleScope({"@b": ModuleScope({"index.js": "export const B = 2;"})})
-            )
+            rt.install(ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})}))
+            rt.install(ModuleScope({"@b": ModuleScope({"index.js": "export const B = 2;"})}))
             await ctx.eval_async(
                 """
                 import { A } from "@a";
@@ -1178,18 +1061,14 @@ async def test_install_after_eval_is_visible_to_next_eval() -> None:
     wasn't imported earlier (which would hit the cache)."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            rt.install(
-                ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})})
-            )
+            rt.install(ModuleScope({"@a": ModuleScope({"index.js": "export const A = 1;"})}))
             await ctx.eval_async(
                 'import { A } from "@a"; globalThis.first = A;',
                 module=True,
             )
             assert ctx.eval("first") == 1
             # Install a NEW name after an eval has happened.
-            rt.install(
-                ModuleScope({"@b": ModuleScope({"index.js": "export const B = 10;"})})
-            )
+            rt.install(ModuleScope({"@b": ModuleScope({"index.js": "export const B = 10;"})}))
             await ctx.eval_async(
                 'import { B } from "@b"; globalThis.second = B;',
                 module=True,
@@ -1206,9 +1085,7 @@ async def test_spread_override_replaces_module_end_to_end() -> None:
     pattern for test fixtures and capability reduction."""
     base = ModuleScope(
         {
-            "@agent/config": ModuleScope(
-                {"index.js": "export const ENV = 'prod';"}
-            ),
+            "@agent/config": ModuleScope({"index.js": "export const ENV = 'prod';"}),
             "@agent/lib": ModuleScope({"index.js": "export const L = 1;"}),
         }
     )
@@ -1216,9 +1093,7 @@ async def test_spread_override_replaces_module_end_to_end() -> None:
         {
             **base.modules,
             # Override @agent/config with test values.
-            "@agent/config": ModuleScope(
-                {"index.js": "export const ENV = 'test';"}
-            ),
+            "@agent/config": ModuleScope({"index.js": "export const ENV = 'test';"}),
         }
     )
     with Runtime() as rt:
@@ -1243,15 +1118,11 @@ async def test_comprehension_removal_makes_module_unreachable() -> None:
     importing it errors at eval time."""
     full = ModuleScope(
         {
-            "@agent/fs": ModuleScope(
-                {"index.js": "export const unsafe = true;"}
-            ),
+            "@agent/fs": ModuleScope({"index.js": "export const unsafe = true;"}),
             "@agent/safe": ModuleScope({"index.js": "export const safe = 1;"}),
         }
     )
-    restricted = ModuleScope(
-        {k: v for k, v in full.modules.items() if k != "@agent/fs"}
-    )
+    restricted = ModuleScope({k: v for k, v in full.modules.items() if k != "@agent/fs"})
     with Runtime() as rt:
         with rt.new_context() as ctx:
             rt.install(restricted)
@@ -1474,12 +1345,8 @@ async def test_mixed_ts_and_js_files_in_same_scope() -> None:
                                     'import { typed } from "./typed.ts";\n'
                                     "export const combined: string = plain + '|' + typed;\n"
                                 ),
-                                "plain.js": (
-                                    "export const plain = 'js-side';\n"
-                                ),
-                                "typed.ts": (
-                                    "export const typed: string = 'ts-side';\n"
-                                ),
+                                "plain.js": ("export const plain = 'js-side';\n"),
+                                "typed.ts": ("export const typed: string = 'ts-side';\n"),
                             }
                         ),
                     }
@@ -1512,9 +1379,7 @@ async def test_ts_to_ts_relative_import_preserves_extension() -> None:
                                     'import { x } from "./other.ts";\n'
                                     "export const y: number = x * 2;\n"
                                 ),
-                                "other.ts": (
-                                    "export const x: number = 21;\n"
-                                ),
+                                "other.ts": ("export const x: number = 21;\n"),
                             }
                         ),
                     }
@@ -1581,9 +1446,7 @@ async def test_dynamic_import_resolves_bare_specifier() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@agent/config": ModuleScope(
-                            {"index.js": "export const MAX_RETRIES = 3;"}
-                        ),
+                        "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 3;"}),
                     }
                 )
             )
@@ -1656,7 +1519,7 @@ async def test_dynamic_import_of_ts_entrypoint_strips_types() -> None:
                                 "index.ts": (
                                     "export const n: number = 42;\n"
                                     "export function greet(who: string): string {"
-                                    ' return `hi ${who}`; }\n'
+                                    " return `hi ${who}`; }\n"
                                 ),
                             }
                         ),
@@ -1688,8 +1551,7 @@ async def test_dynamic_import_is_cached() -> None:
                         "@agent/stateful": ModuleScope(
                             {
                                 "index.js": (
-                                    "let n = 0;\n"
-                                    "export function bump() { return ++n; }\n"
+                                    "let n = 0;\nexport function bump() { return ++n; }\n"
                                 ),
                             }
                         ),
@@ -1737,9 +1599,7 @@ async def test_dynamic_import_basic() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@agent/utils": ModuleScope(
-                            {"index.js": "export const V = 7;"}
-                        ),
+                        "@agent/utils": ModuleScope({"index.js": "export const V = 7;"}),
                     }
                 )
             )
@@ -1773,9 +1633,7 @@ async def test_dynamic_import_from_script_mode() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@agent/utils": ModuleScope(
-                            {"index.js": "export const V = 11;"}
-                        ),
+                        "@agent/utils": ModuleScope({"index.js": "export const V = 11;"}),
                     }
                 )
             )
@@ -1802,9 +1660,7 @@ async def test_dynamic_import_variable_specifier() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@agent/utils": ModuleScope(
-                            {"index.js": "export const V = 'dyn';"}
-                        ),
+                        "@agent/utils": ModuleScope({"index.js": "export const V = 'dyn';"}),
                     }
                 )
             )
@@ -1828,9 +1684,7 @@ async def test_dynamic_import_not_found() -> None:
             rt.install(
                 ModuleScope(
                     {
-                        "@real": ModuleScope(
-                            {"index.js": "export const V = 1;"}
-                        ),
+                        "@real": ModuleScope({"index.js": "export const V = 1;"}),
                     }
                 )
             )
@@ -1917,3 +1771,39 @@ async def test_dynamic_import_typescript() -> None:
                 module=True,
             )
             assert ctx.eval("r") == "ts[x]"
+
+
+async def test_module_store_is_shared_across_contexts_in_one_runtime() -> None:
+    """Threat: tenant A installs modules, tenant B can import them.
+
+    Module store is runtime-scoped, not context-scoped.
+    """
+    with Runtime() as rt:
+        with rt.new_context(), rt.new_context() as ctx_b:
+            rt.install(
+                ModuleScope(
+                    {"@secret": ModuleScope({"index.js": "export const TOKEN = 's3cr3t';"})}
+                )
+            )
+            # Runtime.install is the owning API; modules are shared
+            # across contexts on the same runtime.
+            await ctx_b.eval_async(
+                'import { TOKEN } from "@secret"; globalThis.t = TOKEN;',
+                module=True,
+            )
+            assert ctx_b.eval("t") == "s3cr3t"
+
+
+async def test_modules_do_not_cross_runtime_boundary() -> None:
+    """Control: runtime separation does isolate module registries."""
+    with Runtime() as rt_a:
+        with rt_a.new_context():
+            rt_a.install(ModuleScope({"@only_a": ModuleScope({"index.js": "export const V = 7;"})}))
+
+        with Runtime() as rt_b:
+            with rt_b.new_context() as ctx_b:
+                with pytest.raises(JSError):
+                    await ctx_b.eval_async(
+                        'import { V } from "@only_a"; globalThis.v = V;',
+                        module=True,
+                    )

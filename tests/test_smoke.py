@@ -693,4 +693,3 @@ async def test_module_acceptance() -> None:
                         """,
                         module=True,
                     )
-

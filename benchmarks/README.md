@@ -47,6 +47,7 @@ commits.
 | `test_marshaling.py` | §5.4 — int, string, dict, list, bytes round-trips |
 | `test_host_functions.py` | §5.5 — sync + async host call dispatch |
 | `test_eval_async.py` | §5.3 — async pipeline, fan-out, sequential await |
+| `test_threaded_stress.py` | Threaded stress: multi-runtime/context isolation under concurrent load + TPS |
 
 ## Naming convention
 
