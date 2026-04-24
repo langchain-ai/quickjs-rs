@@ -392,7 +392,7 @@ async def test_async_host_function_raises_surfaces_hosterror() -> None:
 
             with pytest.raises(HostError) as excinfo:
                 await ctx.eval_async("await broken()")
-            assert "specific failure mode" in excinfo.value.message
+            assert excinfo.value.message == "Host function failed"
             assert isinstance(excinfo.value.__cause__, CustomError)
 
 

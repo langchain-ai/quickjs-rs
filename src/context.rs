@@ -423,19 +423,21 @@ impl QjsContext {
     /// executed. The driving loop polls this between
     /// promise-state checks.
     fn run_pending_jobs(&self) -> PyResult<i32> {
-        let runtime = self.context()?.runtime().clone();
+        let context = self.context()?;
+        let runtime = context.runtime().clone();
         let mut count: i32 = 0;
         loop {
             match runtime.execute_pending_job() {
                 Ok(true) => count += 1,
                 Ok(false) => break,
                 Err(_) => {
-                    // Job-level exception: the reaction threw.
-                    // QuickJS reports this via a return value; we
-                    // surface it as a negative count so the Python
-                    // driving loop can decide whether to raise.
-                    count = -1;
-                    break;
+                    return with_active_ctx(context, |ctx| {
+                        let caught = ctx.catch();
+                        Err(js_error_from_caught(
+                            ctx,
+                            rquickjs::CaughtError::Value(caught),
+                        ))
+                    });
                 }
             }
         }

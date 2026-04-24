@@ -383,24 +383,25 @@ pub(crate) fn maybe_strip_ts(key: &str, source: &str) -> Result<String, String> 
         return Ok(source.to_string());
     };
 
-    let allocator = oxidase::Allocator::default();
-    let mut buf = source.to_string();
-    let ret = oxidase::transpile(&allocator, source_type, &mut buf);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let allocator = oxidase::Allocator::default();
+        let mut buf = source.to_string();
+        let ret = oxidase::transpile(&allocator, source_type, &mut buf);
+        (buf, ret.parser_panicked, ret.parser_errors
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>())
+    }));
 
-    if ret.parser_panicked {
-        // Parser bailed — the output is unsafe to use. Stringify
-        // whatever diagnostics came back; if there are none, give
-        // a generic message so the user at least knows which file.
-        let msg = if ret.parser_errors.is_empty() {
+    let (buf, panicked, errors) = outcome.map_err(|_| {
+        format!("oxidase panicked unexpectedly while parsing {}", key)
+    })?;
+    
+    if panicked {
+        let msg = if errors.is_empty() {
             format!("oxidase failed to parse {}", key)
         } else {
-            let joined = ret
-                .parser_errors
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!("TypeScript parse error in {}: {}", key, joined)
+            format!("TypeScript parse error in {}: {}", key, errors.join("; "))
         };
         return Err(msg);
     }

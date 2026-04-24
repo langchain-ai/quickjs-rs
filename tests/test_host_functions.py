@@ -72,7 +72,7 @@ def test_host_function_exception_surfaces_as_hosterror() -> None:
             try:
                 ctx.eval("explode()")
             except HostError as exc:
-                assert "bang" in exc.message
+                assert exc.message == "Host function failed"
             else:
                 raise AssertionError("expected HostError")
 

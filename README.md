@@ -2,7 +2,10 @@
 
 Sandboxed JavaScript execution for Python.
 
-Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [QuickJS](https://bellard.org/quickjs/). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+
+> [!WARNING]
+> `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
 
 ## Install
 
@@ -73,7 +76,7 @@ stdlib = ModuleScope({
 
 with Runtime() as rt:
     with rt.new_context() as ctx:
-        ctx.install(stdlib)
+        rt.install(stdlib)
         assert await ctx.eval_async("""
             const { slugify } = await import("@agent/utils");
             const { MAX_RETRIES } = await import("@agent/config");
@@ -88,7 +91,7 @@ Shared deps are declared by spreading (`**utils.modules`) into each scope that n
 Source strings whose key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped at `install()` time via oxidase. Enums, namespaces, and parameter properties are transformed; plain type annotations erase to whitespace. No type checking — run `tsc --noEmit` separately if you want that.
 
 ```python
-ctx.install(ModuleScope({
+rt.install(ModuleScope({
     "@util": ModuleScope({
         "index.ts": """
             export enum Mode { Strict = 1, Loose = 2 }
@@ -101,6 +104,19 @@ ctx.install(ModuleScope({
 ```
 
 TypeScript syntax errors surface at `install()` time (oxidase parses during stripping) rather than at eval.
+
+## Security
+
+- This library is not a host-memory isolation boundary. The JS engine (`quickjs-ng` via `rquickjs`/`rquickjs-sys`) runs in the same process/address space as Python.
+
+  - When running untrusted or semi-trusted JS, run execution in isolated worker processes/containers with restricted network/filesystem access and recycle workers on timeout/OOM/failure.
+
+- Registered host callbacks are capability boundaries. Any callback exposed to JS should be treated as privileged if this runtime is being used to run untrusted code
+
+- Do not share a single `Runtime` across different trust domains/tenants. Use one runtime per trust domain to avoid cross-context module contamination.
+
+See [`.github/THREAT_MODEL.md`](.github/THREAT_MODEL.md) for more information on the threat boundaries and supply-chain posture of `quickjs-rs`
+
 
 ## Development
 

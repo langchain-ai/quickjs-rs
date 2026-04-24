@@ -1,4 +1,4 @@
-//! Host function plumbing.
+//! section 6.5 / section 7.4 host function plumbing.
 //!
 //! Two trampolines — sync and async — installed as JS functions on
 //! globalThis. Each captures a Python dispatcher callable (fn_id
@@ -33,7 +33,7 @@ use crate::errors::QuickJSError;
 use crate::marshal::{js_value_to_py, py_to_js_value};
 
 /// Stored resolver pair for an in-flight async host call Promise.
-/// The Rust trampoline creates a Promise via
+/// section 6.5 / section 7.4: the Rust trampoline creates a Promise via
 /// `ctx.promise()`, stashes (resolve_fn, reject_fn) keyed by
 /// `pending_id`, and calls back into Python with (fn_id, args,
 /// pending_id). When the Python async task completes, it calls
@@ -54,9 +54,7 @@ pub(crate) fn build_host_trampoline<'js>(
     fn_id: u32,
     name: &str,
 ) -> PyResult<Function<'js>> {
-    let trampoline = move |cx: Ctx<'js>,
-                           args: rquickjs::function::Rest<Value<'js>>|
-          -> rquickjs::Result<Value<'js>> {
+    let trampoline = move |cx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Value<'js>> {
         call_host_fn(&cx, &dispatcher, fn_id, args.0)
     };
     Function::new(ctx.clone(), trampoline)
@@ -97,6 +95,21 @@ pub(crate) fn build_async_host_trampoline<'js>(
         .map_err(|e| QuickJSError::new_err(format!("Function::with_name failed: {}", e)))
 }
 
+/// Find the next unoccupied pending id, starting at `start` and wrapping
+/// on overflow. Returns None only if every u32 slot is occupied.
+fn find_available_pending_id<V>(occupied: &HashMap<u32, V>, start: u32) -> Option<u32> {
+    let mut pid = start;
+    loop {
+        if !occupied.contains_key(&pid) {
+            return Some(pid);
+        }
+        pid = pid.wrapping_add(1);
+        if pid == start {
+            return None;
+        }
+    }
+}
+
 /// Shared body for the async host trampoline. On entry:
 ///   1. Create a JS Promise + resolver pair via `ctx.promise()`.
 ///   2. If we're inside a sync eval, set the sync_hit flag and
@@ -123,7 +136,7 @@ fn dispatch_async_host_fn<'js>(
 ) -> rquickjs::Result<Value<'js>> {
     let (promise, resolve, reject) = ctx.promise()?;
 
-    // sync-eval hit async host fn. Set the flag so the
+    // section 7.4: sync-eval hit async host fn. Set the flag so the
     // Python sync-eval surface raises ConcurrentEvalError; also
     // reject the Promise locally so the JS expression evaluates
     // to a rejected Promise rather than never settling. The sync
@@ -142,8 +155,24 @@ fn dispatch_async_host_fn<'js>(
         return Ok(promise.into_value());
     }
 
-    // Allocate pending_id and stash the resolver pair.
-    let pid = next_id.get();
+    // Allocate pending_id and stash the resolver pair. Use collision-safe
+    // allocation so long-lived processes can't overwrite unresolved entries
+    // when the u32 counter wraps.
+    let pid = {
+        let pending_ref = pending.borrow();
+        match find_available_pending_id(&pending_ref, next_id.get()) {
+            Some(pid) => pid,
+            None => {
+                let exc = rquickjs::Exception::from_message(
+                    ctx.clone(),
+                    "too many pending async host calls",
+                )?;
+                let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
+                let _: Value<'_> = reject.call((exc.into_value(),))?;
+                return Ok(promise.into_value());
+            }
+        }
+    };
     next_id.set(pid.wrapping_add(1));
     let entry = PendingResolver {
         resolve: Persistent::save(ctx, resolve),
@@ -162,12 +191,13 @@ fn dispatch_async_host_fn<'js>(
                 to: "js",
                 message: Some(format!("arg marshal failed: {}", e)),
             })?;
-        let args_tuple =
-            pyo3::types::PyTuple::new(py, &py_args).map_err(|e| rquickjs::Error::IntoJs {
+        let args_tuple = pyo3::types::PyTuple::new(py, &py_args).map_err(|e| {
+            rquickjs::Error::IntoJs {
                 from: "python",
                 to: "js",
                 message: Some(format!("arg tuple build failed: {}", e)),
-            })?;
+            }
+        })?;
         let result = dispatcher
             .bind(py)
             .call1((fn_id, args_tuple, pid))
@@ -176,7 +206,15 @@ fn dispatch_async_host_fn<'js>(
                 to: "js",
                 message: Some(format!("async dispatcher raised: {}", e)),
             })?;
-        Ok(result.extract::<i32>().unwrap_or(0))
+        let rc: i32 = result.extract::<i32>().map_err(|e| rquickjs::Error::IntoJs {
+            from: "python",
+            to: "js",
+            message: Some(format!(
+                "async dispatcher returned a non-integer value (expected 0 or -1): {}",
+                e
+            )),
+        })?;
+        Ok(rc)
     })?;
 
     if rc < 0 {
@@ -188,8 +226,10 @@ fn dispatch_async_host_fn<'js>(
             let resolve = entry.resolve.restore(ctx)?;
             let reject_fn = entry.reject.restore(ctx)?;
             let _ = resolve; // drop to free
-            let exc =
-                rquickjs::Exception::from_message(ctx.clone(), "async host dispatcher rejected")?;
+            let exc = rquickjs::Exception::from_message(
+                ctx.clone(),
+                "Host function failed",
+            )?;
             let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
             let _: Value<'_> = reject_fn.call((exc.into_value(),))?;
         }
@@ -226,8 +266,8 @@ fn call_host_fn<'js>(
             Ok(v) => v,
             Err(e) => return Err(throw_host_error(ctx, &e, py)),
         };
-        let args_tuple =
-            pyo3::types::PyTuple::new(py, &py_args).map_err(|e| throw_host_error(ctx, &e, py))?;
+        let args_tuple = pyo3::types::PyTuple::new(py, &py_args)
+            .map_err(|e| throw_host_error(ctx, &e, py))?;
 
         // Call the Python dispatcher.
         let dispatcher = dispatcher.bind(py);
@@ -251,8 +291,8 @@ fn call_host_fn<'js>(
 /// an infra-level Python exception — construct a generic Error
 /// with the PyErr's string representation.
 fn throw_host_error(ctx: &Ctx<'_>, err: &PyErr, py: Python<'_>) -> rquickjs::Error {
-    let (name, message) =
-        extract_jserror_fields(err, py).unwrap_or_else(|| ("Error".to_string(), err.to_string()));
+    let (name, message) = extract_jserror_fields(err, py)
+        .unwrap_or_else(|| ("Error".to_string(), err.to_string()));
 
     // Build the JS Error object via Exception::from_message, then
     // set .name to whatever the dispatcher requested.
@@ -279,4 +319,32 @@ fn extract_jserror_fields(err: &PyErr, py: Python<'_>) -> Option<(String, String
     let name: String = tup.get_item(0).ok()?.extract().ok()?;
     let message: String = tup.get_item(1).ok()?.extract().ok()?;
     Some((name, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_available_pending_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn pending_id_allocator_returns_start_when_free() {
+        let occupied: HashMap<u32, ()> = HashMap::new();
+        assert_eq!(find_available_pending_id(&occupied, 42), Some(42));
+    }
+
+    #[test]
+    fn pending_id_allocator_skips_occupied_slots() {
+        let mut occupied: HashMap<u32, ()> = HashMap::new();
+        occupied.insert(7, ());
+        occupied.insert(8, ());
+        assert_eq!(find_available_pending_id(&occupied, 7), Some(9));
+    }
+
+    #[test]
+    fn pending_id_allocator_wraps_after_u32_max() {
+        let mut occupied: HashMap<u32, ()> = HashMap::new();
+        occupied.insert(u32::MAX, ());
+        occupied.insert(0, ());
+        assert_eq!(find_available_pending_id(&occupied, u32::MAX), Some(1));
+    }
 }

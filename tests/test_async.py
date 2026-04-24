@@ -9,6 +9,7 @@ import pytest
 from quickjs_rs import (
     ConcurrentEvalError,
     DeadlockError,
+    JSError,
     Runtime,
 )
 
@@ -166,7 +167,7 @@ async def test_eval_async_propagates_js_rejection() -> None:
 
             with pytest.raises(HostError) as excinfo:
                 await ctx.eval_async("await fail()")
-            assert "from async host" in excinfo.value.message
+            assert excinfo.value.message == "Host function failed"
             assert isinstance(excinfo.value.__cause__, ValueError)
 
 
@@ -331,6 +332,21 @@ async def test_promise_chain_resolves_synchronously() -> None:
         with rt.new_context() as ctx:
             result = await ctx.eval_async("await Promise.resolve(1).then(x => x + 1)")
             assert result == 2
+
+
+async def test_throw_in_then_callback_propagates_as_js_error() -> None:
+    """A throw inside a .then() reaction fires as a pending job.
+    run_pending_jobs must propagate the actual JS exception — name,
+    message, stack — not swallow it or raise a generic string."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError) as exc_info:
+                await ctx.eval_async(
+                    "await Promise.resolve()"
+                    ".then(() => { throw new RangeError('boom'); })"
+                )
+            assert exc_info.value.name == "RangeError"
+            assert "boom" in exc_info.value.message
 
 
 async def test_cumulative_timeout_two_calls_within_budget() -> None:

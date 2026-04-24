@@ -1,3 +1,5 @@
+"""Runtime. See README.md section 7."""
+
 from __future__ import annotations
 
 import time
@@ -6,6 +8,7 @@ from typing import Any
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
+from quickjs_rs.modules import ModuleScope
 
 
 class Runtime:
@@ -18,7 +21,7 @@ class Runtime:
     reads that slot on every QuickJS interrupt poll and returns True
     once the deadline has elapsed. This is the same design as previous implementation's
     bridge — single shared deadline per runtime — now without the
-    wasmtime epoch backup ("No wasm epoch interruption").
+    wasmtime epoch backup (section 8 "No wasm epoch interruption").
     """
 
     def __init__(
@@ -82,3 +85,41 @@ class Runtime:
             self._contexts.remove(ctx)
         except ValueError:
             pass
+
+    def install(self, scope: ModuleScope) -> None:
+        """Register modules in this runtime's shared module store.
+
+        Any context created from this runtime can import installed
+        modules (subject to QuickJS module-cache semantics).
+        """
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        self._install_recursive(scope, scope_path="")
+
+    def _install_recursive(self, scope: ModuleScope, scope_path: str) -> None:
+        for key, value in scope.modules.items():
+            if isinstance(value, str):
+                canonical = key if scope_path == "" else f"{scope_path}/{key}"
+                try:
+                    self._engine_rt.add_module_source(
+                        scope_path, key, canonical, value
+                    )
+                except _engine.QuickJSError as e:
+                    # section 5.5: TypeScript parse errors surface at install.
+                    raise QuickJSError(str(e)) from e
+            elif isinstance(value, ModuleScope):
+                self._engine_rt.register_subscope(scope_path, key)
+                child_path = key if scope_path == "" else f"{scope_path}/{key}"
+                self._install_recursive(value, scope_path=child_path)
+            else:
+                raise TypeError(
+                    f"ModuleScope entry {key!r}: expected str | ModuleScope, "
+                    f"got {type(value).__name__}"
+                )
+
+    def run_pending_jobs(self) -> int:
+        raise NotImplementedError("run_pending_jobs lands with async support (section 7.4).")
+
+    @property
+    def has_pending_jobs(self) -> bool:
+        raise NotImplementedError("has_pending_jobs lands with async support (section 7.4).")
