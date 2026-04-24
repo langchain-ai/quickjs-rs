@@ -81,7 +81,7 @@ with Runtime() as rt:
         """) == "hello-world/3"
 ```
 
-Shared deps are declared by spreading (`**utils.modules`) into each scope that needs them. See [`spec/module-loading.md`](spec/module-loading.md) for the full resolver rules and patterns.
+Shared deps are declared by spreading (`**utils.modules`) into each scope that needs them. Resolver conventions are documented in `AGENTS.md`.
 
 ## TypeScript
 

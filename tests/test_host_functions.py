@@ -1,4 +1,4 @@
-"""Host function registration. See spec/implementation.md §11.1."""
+"""Host function registration. See README.md"""
 
 from __future__ import annotations
 
@@ -61,9 +61,10 @@ def test_host_function_args_are_copied_before_dispatch() -> None:
 
 def test_host_function_exception_surfaces_as_hosterror() -> None:
     """Python exception out of a registered host function round-trips as
-    HostError when it escapes back through ctx.eval. §10.2."""
+    HostError when it escapes back through ctx.eval. ."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
+
             @ctx.function
             def explode() -> None:
                 raise RuntimeError("bang")
@@ -82,6 +83,7 @@ def test_register_preserves_callable_identity() -> None:
     erase the Python reference."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
+
             @ctx.function
             def named_fn(x: int) -> int:
                 return x + 1
@@ -94,6 +96,7 @@ def test_register_preserves_callable_identity() -> None:
 def test_register_with_name_override() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
+
             @ctx.function(name="jsName")
             def python_name(x: int) -> int:
                 return x * 10

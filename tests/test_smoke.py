@@ -1,17 +1,4 @@
-"""Acceptance tests. See spec/implementation.md §13 and
-spec/module-loading.md §9.2 / §13.3.
-
-The north stars: v0.1's ``test_acceptance`` (§13.1), v0.2's
-``test_async_acceptance`` (§13.2), and v0.4's
-``test_module_acceptance`` (§13.3 / module-loading §9.2). Each is
-a single end-to-end scenario exercising the full feature set of
-its version — a tripwire that goes red if anything fundamental
-regresses.
-
-``test_smoke_primitives`` is a focused happy-path check that
-greened the first primitive-marshaling commits; it remains as a
-fast narrow-surface verification.
-"""
+"""End-to-end acceptance tests for sync, async, and module workflows."""
 
 from __future__ import annotations
 
@@ -23,9 +10,7 @@ from quickjs_rs import (
     ConcurrentEvalError,
     DeadlockError,
     HostError,
-    InvalidHandleError,  # noqa: F401 — exercised once handles land
     JSError,
-    MarshalError,  # noqa: F401 — exercised when handle marshaling lands
     MemoryLimitError,
     ModuleScope,
     Runtime,
@@ -34,7 +19,7 @@ from quickjs_rs import (
 
 
 def test_smoke_primitives() -> None:
-    """Greens the primitive block of §13 plus bigint and Uint8Array."""
+    """Focused happy-path coverage for primitive marshaling."""
     with Runtime(memory_limit=64 * 1024 * 1024) as rt:
         with rt.new_context(timeout=5.0) as ctx:
             assert ctx.eval("1 + 2") == 3
@@ -100,10 +85,7 @@ def test_smoke_primitives() -> None:
             # JS-side visibility: a try/catch inside JS sees the error's
             # name and message and can round-trip them back as a string.
             assert (
-                ctx.eval(
-                    "try { boom(); 'unreachable'; }"
-                    " catch (e) { e.name + ': ' + e.message }"
-                )
+                ctx.eval("try { boom(); 'unreachable'; } catch (e) { e.name + ': ' + e.message }")
                 == "HostError: from python"
             )
 
@@ -124,14 +106,12 @@ def test_smoke_primitives() -> None:
             # 8 MB reproduces OOM cleanly everywhere we've tested. The
             # behavioral guarantee (runaway allocation → MemoryLimitError)
             # is identical; only the smoke-test's memory budget changes.
-            # The v0.2 tripwire test_memory_limit_trips_with_runaway_
+            # The previous implementation tripwire test_memory_limit_trips_with_runaway_
             # allocation lives in test_limits.py at the same 8 MB.
             with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
                 with mem_rt.new_context() as mem_ctx:
                     with pytest.raises(MemoryLimitError):
-                        mem_ctx.eval(
-                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
-                        )
+                        mem_ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
 
             # Timeout: infinite loop terminates within the configured
             # deadline. Context uses its default 5 s budget; this test
@@ -147,9 +127,7 @@ def test_smoke_primitives() -> None:
             # invocation, and to_python marshaling for the subset of
             # values that are marshalable. allow_opaque=True substitutes
             # child Handles for unmarshalable values (functions here).
-            with ctx.eval_handle(
-                "({x: 1, y: 2, add(a, b) { return a + b }})"
-            ) as obj:
+            with ctx.eval_handle("({x: 1, y: 2, add(a, b) { return a + b }})") as obj:
                 assert obj.type_of == "object"
                 x_handle = obj.get("x")
                 try:
@@ -247,9 +225,7 @@ def test_acceptance() -> None:
             with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
                 with mem_rt.new_context() as mem_ctx:
                     with pytest.raises(MemoryLimitError):
-                        mem_ctx.eval(
-                            "let a = []; while(true) a.push(new Array(1e6).fill(0))"
-                        )
+                        mem_ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
 
             # Timeout
             with pytest.raises(TimeoutError):
@@ -276,17 +252,7 @@ def test_acceptance() -> None:
 
 
 async def test_async_acceptance() -> None:
-    """§13.2 acceptance. Ported verbatim from the spec. If this
-    passes, v0.2's async surface is behaviorally complete.
-
-    The ``except asyncio.CancelledError: pass`` tolerance around the
-    absorption case is intentional, not sloppy: cancellation delivery
-    timing is implementation-dependent in asyncio, and on slow
-    runners the cancellation may propagate before JS's catch handler
-    runs. Both outcomes — JS absorbs, or cancellation propagates
-    before absorption — are valid implementations of §7.4 per the
-    spec, so the test tolerates either.
-    """
+    """Acceptance coverage for async host calls, cancellation, and promises."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             # Auto-detected async host function
@@ -368,9 +334,7 @@ async def test_async_acceptance() -> None:
             assert captured_reads == ["/context.txt"]
 
             # Cancellation: task.cancel() propagates through eval_async
-            task = asyncio.create_task(
-                ctx.eval_async("await sleep_ms(10000)")
-            )
+            task = asyncio.create_task(ctx.eval_async("await sleep_ms(10000)"))
             await asyncio.sleep(0.01)  # let it start
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -393,11 +357,11 @@ async def test_async_acceptance() -> None:
                 except asyncio.CancelledError:
                     # Acceptable alternate path: cancellation propagated
                     # before JS catch handler ran. Either outcome is a
-                    # valid implementation of §7.4 cancellation.
+                    # valid implementation of cancellation.
                     pass
 
             # DeadlockError: pending promise with no async work
-            # §7 v0.4: module=False enables JS_EVAL_FLAG_ASYNC, so
+            # previous implementation: module=False enables JS_EVAL_FLAG_ASYNC, so
             # returning a pending promise as the body's last
             # expression gets wrapped as {value: <pending>, done:
             # false} — wrapper is fulfilled, driving loop returns.
@@ -432,7 +396,7 @@ async def test_async_acceptance() -> None:
 
 
 async def test_module_acceptance() -> None:
-    """§13.3 / spec/module-loading.md §9.2 acceptance.
+    """Acceptance coverage for module install/import semantics.
 
     The motivating agent-code pattern end-to-end: a stdlib
     ModuleScope carrying multiple named deps, a script that imports
@@ -441,18 +405,16 @@ async def test_module_acceptance() -> None:
     composition tests (override, capability restriction, recursive
     self-contained deps).
 
-    Adapted from the spec's snippet for the "bare strings need
+    Adapted from the original design snippet for the "bare strings need
     wrapping" reality in bb6b2fd: single-value modules like
     ``@agent/config`` are wrapped in a ``ModuleScope`` with
     ``index.js`` instead of being a bare str at scope root (str
-    at root needs an index.js sibling per §3.1, so a lone
+    at root needs an index.js sibling, so a lone
     ``@agent/config: "..."`` no longer validates).
     """
     stdlib = ModuleScope(
         {
-            "@agent/config": ModuleScope(
-                {"index.js": "export const MAX_RETRIES = 3;"}
-            ),
+            "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 3;"}),
             "@agent/utils": ModuleScope(
                 {
                     "index.js": """
@@ -591,16 +553,14 @@ async def test_module_acceptance() -> None:
 
         # Composition: override for testing. Build a fresh
         # Runtime for each alternate stdlib — the module store is
-        # per-runtime (§5.3 / §11), so mixing overrides on the
+        # per-runtime, so mixing overrides on the
         # same runtime would layer on top of existing caches in
         # ways that depend on import order. Separate runtimes
         # give each composition a clean slate.
         test_stdlib = ModuleScope(
             {
                 **stdlib.modules,
-                "@agent/config": ModuleScope(
-                    {"index.js": "export const MAX_RETRIES = 1;"}
-                ),
+                "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 1;"}),
             }
         )
 
@@ -626,9 +586,7 @@ async def test_module_acceptance() -> None:
                 assert ctx.eval("retries") == 1  # overridden
 
         # Capability restriction: no @agent/fs.
-        restricted = ModuleScope(
-            {k: v for k, v in stdlib.modules.items() if k != "@agent/fs"}
-        )
+        restricted = ModuleScope({k: v for k, v in stdlib.modules.items() if k != "@agent/fs"})
 
         with Runtime() as rt_restricted:
             with rt_restricted.new_context() as ctx:
@@ -649,9 +607,7 @@ async def test_module_acceptance() -> None:
             {
                 "@agent/utils": ModuleScope(
                     {
-                        "index.js": (
-                            "export function greet(n) { return 'hi ' + n; }"
-                        ),
+                        "index.js": ("export function greet(n) { return 'hi ' + n; }"),
                     }
                 ),
             }
@@ -693,5 +649,3 @@ async def test_module_acceptance() -> None:
                         """,
                         module=True,
                     )
-
-

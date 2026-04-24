@@ -1,4 +1,4 @@
-"""Marshaling benchmarks. See spec/benchmarks.md §5.4.
+"""Marshaling benchmarks. See benchmarks/README.md.
 
 Isolate the cost of Python ↔ JS value conversion from eval
 overhead. Each benchmark does a full round-trip: set via globals
@@ -77,8 +77,8 @@ def bench_marshal_dict_nested_5(benchmark: BenchmarkFixture, ctx: Context) -> No
 
 def bench_marshal_list_10k_ints(benchmark: BenchmarkFixture, ctx: Context) -> None:
     """Round-trip a 10,000-element list of integers. Exercises the
-    array32 header path plus per-element float64 encoding (§8:
-    numbers are always float64 on the wire)."""
+    array32 header path plus per-element float64 encoding (numbers
+    are always float64 on the wire)."""
     data = list(range(10_000))
 
     def round_trip() -> object:

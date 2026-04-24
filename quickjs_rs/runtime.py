@@ -1,5 +1,3 @@
-"""Runtime. See spec/implementation.md §7."""
-
 from __future__ import annotations
 
 import time
@@ -18,9 +16,9 @@ class Runtime:
     Per-eval deadlines are written into ``self._deadline`` by the
     ``Context`` layer before each eval and cleared after; the handler
     reads that slot on every QuickJS interrupt poll and returns True
-    once the deadline has elapsed. This is the same design as v0.2's
+    once the deadline has elapsed. This is the same design as previous implementation's
     bridge — single shared deadline per runtime — now without the
-    wasmtime epoch backup (§8 "No wasm epoch interruption").
+    wasmtime epoch backup ("No wasm epoch interruption").
     """
 
     def __init__(
@@ -84,10 +82,3 @@ class Runtime:
             self._contexts.remove(ctx)
         except ValueError:
             pass
-
-    def run_pending_jobs(self) -> int:
-        raise NotImplementedError("run_pending_jobs lands with async support (§7.4).")
-
-    @property
-    def has_pending_jobs(self) -> bool:
-        raise NotImplementedError("has_pending_jobs lands with async support (§7.4).")

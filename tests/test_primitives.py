@@ -1,4 +1,4 @@
-"""Primitive round-trip. See spec/implementation.md §11.1."""
+"""Primitive round-trip. See README.md."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from quickjs_rs import Runtime
 def test_large_payload_overflow() -> None:
     """The shim's per-context msgpack scratch starts small and grows on demand.
 
-    §15 calls out this buffer as open for tuning — the current 64 KB initial
+    calls out this buffer as open for tuning — the current 64 KB initial
     fast path is smaller than the 1 MB value the spec floats, so a 200 KB
     payload forces two reallocations. This test exercises that overflow path
-    and confirms the (out_ptr, out_len) contract from §6.2/§6.4: the Python
+    and confirms the (out_ptr, out_len) contract from /the Python
     side must re-read both every call (the buffer may have moved).
     """
     size = 200_000

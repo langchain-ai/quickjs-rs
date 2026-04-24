@@ -1,4 +1,4 @@
-"""Handle — Python wrapper around _engine.QjsHandle. See §7.2."""
+"""Handle — Python wrapper around _engine.QjsHandle."""
 
 from __future__ import annotations
 
@@ -10,9 +10,8 @@ import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     InvalidHandleError,
-    JSError,
     MarshalError,
-    QuickJSError,
+    sync_eval_async_call_error,
 )
 
 if TYPE_CHECKING:
@@ -29,12 +28,12 @@ class Handle:
       - Manual ``dispose()`` is idempotent.
       - ``__del__`` emits :class:`ResourceWarning` if the handle is
         still live at garbage-collection time, following the Python
-        stdlib convention for leaked resources (§7.3).
+        stdlib convention for leaked resources.
 
     Cross-context guard:
       - Every method validates that the handle was created by its
-        owning context. Using a handle from context A in a method on
-        context B raises :class:`InvalidHandleError` (§7.3).
+      owning context. Using a handle from context A in a method on
+        context B raises :class:`InvalidHandleError`.
     """
 
     def __init__(self, context: Context, engine_handle: _engine.QjsHandle) -> None:
@@ -47,8 +46,6 @@ class Handle:
         self._context_id: int = engine_handle.context_id
         self._disposed = False
 
-    # ---- Cross-context guard helpers --------------------------------
-
     def _require_live(self) -> _engine.QjsHandle:
         if self._disposed or self._engine_handle is None:
             raise InvalidHandleError("handle is disposed")
@@ -58,11 +55,7 @@ class Handle:
 
     def _require_same_context(self, other: Handle) -> None:
         if other._context_id != self._context_id:
-            raise InvalidHandleError(
-                "handle belongs to a different context"
-            )
-
-    # ---- Context manager protocol -----------------------------------
+            raise InvalidHandleError("handle belongs to a different context")
 
     def __enter__(self) -> Handle:
         return self
@@ -76,7 +69,7 @@ class Handle:
         self.dispose()
 
     def dispose(self) -> None:
-        """Release the JS reference. Idempotent."""
+        """Release the JS reference"""
         if self._disposed:
             return
         self._disposed = True
@@ -128,20 +121,16 @@ class Handle:
             pass
         return "unknown"
 
-    # ---- Introspection ----------------------------------------------
-
     @property
     def type_of(self) -> str:
         """Structural type tag — one of "null", "undefined", "boolean",
         "number", "bigint", "string", "symbol", "object", "array",
-        "function". §7.2.
+        "function". .
         """
         return self._require_live().type_of
 
     def is_promise(self) -> bool:
         return self._require_live().is_promise()
-
-    # ---- Property access --------------------------------------------
 
     def get(self, key: str) -> Handle:
         inner = self._require_live().get(key)
@@ -171,8 +160,6 @@ class Handle:
     def has(self, key: str) -> bool:
         return self._require_live().has(key)
 
-    # ---- Invocation --------------------------------------------------
-
     def call(self, *args: Any) -> Handle:
         """Call as a function. Args may be Python values or other
         Handles on the same context.
@@ -183,7 +170,7 @@ class Handle:
         return self._invoke_sync("call_method", args, method_name=name)
 
     def new(self, *args: Any) -> Handle:
-        """Invoke as a JS constructor (`new fn(...)`). §7.2."""
+        """Invoke as a JS constructor (`new fn(...)`)"""
         return self._invoke_sync("new_instance", args)
 
     def _invoke_sync(
@@ -195,7 +182,7 @@ class Handle:
     ) -> Handle:
         """Shared body for call / call_method / new.
 
-        §7.4: sync-eval-hit-async-call detection extends to the
+        sync-eval-hit-async-call detection extends to the
         Handle surface — invoking a registered async host function
         via Handle.call must raise ConcurrentEvalError just like
         sync ctx.eval does. Sets in_sync_eval before the engine
@@ -217,34 +204,20 @@ class Handle:
                 inner = live.new_instance(*unwrapped)
         except _engine.JSError as e:
             if engine_ctx.take_sync_eval_hit_async_call():
-                raise ConcurrentEvalError(
-                    f"Handle.{kind} dispatched a registered async host "
-                    "function; use ctx.eval_async / await_promise "
-                    "instead"
-                ) from None
+                raise sync_eval_async_call_error() from None
             ename, message, stack = e.args
-            classified = self._context._classify_jserror(
-                ename, message, stack, None
-            )
+            classified = self._context._classify_jserror(ename, message, stack, None)
             raise classified from classified.__cause__
         except _engine.InvalidHandleError as e:
             raise InvalidHandleError(str(e)) from None
         except _engine.MarshalError as e:
             if engine_ctx.take_sync_eval_hit_async_call():
-                raise ConcurrentEvalError(
-                    f"Handle.{kind} dispatched a registered async host "
-                    "function; use ctx.eval_async / await_promise "
-                    "instead"
-                ) from None
+                raise sync_eval_async_call_error() from None
             raise MarshalError(str(e)) from None
         finally:
             engine_ctx.set_in_sync_eval(False)
         if engine_ctx.take_sync_eval_hit_async_call():
-            raise ConcurrentEvalError(
-                f"Handle.{kind} dispatched a registered async host "
-                "function; use ctx.eval_async / await_promise "
-                "instead"
-            )
+            raise sync_eval_async_call_error()
         return Handle(self._context, inner)
 
     def _unwrap_args(self, args: tuple[Any, ...]) -> list[Any]:
@@ -262,10 +235,8 @@ class Handle:
                 out.append(a)
         return out
 
-    # ---- Marshaling --------------------------------------------------
-
     def to_python(self, *, allow_opaque: bool = False) -> Any:
-        """Marshal the JS value to a Python value per §6.6.
+        """Marshal the JS value to a Python value per .
 
         ``allow_opaque=True`` substitutes fresh :class:`Handle` objects
         at positions that would otherwise raise :class:`MarshalError`
@@ -285,7 +256,7 @@ class Handle:
         return raw
 
     def dup(self) -> Handle:
-        """Create a second handle to the same JS value. §7.2."""
+        """Create a second handle to the same JS value. ."""
         inner = self._require_live().dup()
         return Handle(self._context, inner)
 
@@ -295,27 +266,25 @@ class Handle:
 
         If this Handle isn't a Promise, returns ``self`` unchanged —
         idiomatic for chained handle ops where the caller may or
-        may not know whether they're holding a Promise. §7.2.
+        may not know whether they're holding a Promise.
 
         Respects the enclosing cancel scope (cancellation in the
         driving task cascades here). Uses the owning Context's
         cumulative eval_async budget unless ``timeout=`` is passed,
         in which case that value applies for this call only.
 
-        Honours the §7.4 concurrent-eval rule: if an ``eval_async``
+        Honours the concurrent-eval rule: if an ``eval_async``
         or another ``await_promise`` is in flight on the same
         Context, raises ``ConcurrentEvalError``.
         """
         import time as _time
-
-        from quickjs_rs.errors import ConcurrentEvalError
 
         live = self._require_live()
         ctx = self._context
         if ctx._closed:
             raise InvalidHandleError("owning context has been closed")
 
-        # §7.4 fast path: not a Promise → return self.
+        # fast path: not a Promise → return self.
         if not live.is_promise():
             return self
 
@@ -366,7 +335,3 @@ def _wrap_opaque(context: Context, value: Any) -> Any:
 
 
 __all__ = ["Handle"]
-
-
-# Re-exported error imports kept from the original surface:
-_ = (JSError, QuickJSError)

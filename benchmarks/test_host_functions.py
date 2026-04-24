@@ -1,4 +1,4 @@
-"""Host function call overhead benchmarks. See spec/benchmarks.md §5.5.
+"""Host function call overhead benchmarks. See benchmarks/README.md.
 
 Measure the per-call cost of crossing the JS → Python → JS boundary.
 Sync path traffics through host_call; async path goes through

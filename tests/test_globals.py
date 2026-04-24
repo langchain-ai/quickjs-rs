@@ -1,4 +1,4 @@
-"""Globals proxy. See spec/implementation.md §7.2, §7.3, §11.1."""
+"""Globals proxy. See README.md"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def test_set_and_read_array(ctx: Context) -> None:
 
 
 def test_set_and_read_bytes(ctx: Context) -> None:
-    """Python bytes → JS Uint8Array per §8's Python-side table."""
+    """Python bytes → JS Uint8Array per 's Python-side table."""
     ctx.globals["buf"] = b"\x01\x02\x03"
     assert ctx.globals["buf"] == b"\x01\x02\x03"
     assert ctx.eval("buf instanceof Uint8Array") is True
@@ -50,7 +50,7 @@ def test_contains_returns_false_for_missing(ctx: Context) -> None:
 
 
 def test_contains_false_when_value_is_undefined(ctx: Context) -> None:
-    """§7.3-adjacent semantics: ``in`` collapses the JS distinction
+    """``in`` collapses the JS distinction
     between "own property set to undefined" and "not defined" — both
     are "not present" from Python's dict-like perspective. Documented
     in Globals docstring."""
@@ -87,7 +87,7 @@ def test_shadowing_js_builtin(ctx: Context) -> None:
 
 
 def test_del_unsupported_raises_typeerror(ctx: Context) -> None:
-    """§7.2 Globals signature defines __getitem__ / __setitem__ /
+    """Globals signature defines __getitem__ / __setitem__ /
     __contains__ / get_handle — but not __delitem__. Python's default
     ``del`` on a dict-like without that method raises TypeError;
     locking the behavior in so we don't silently acquire a
@@ -98,7 +98,7 @@ def test_del_unsupported_raises_typeerror(ctx: Context) -> None:
 
 
 def test_get_handle_returns_handle_for_any_global(ctx: Context) -> None:
-    """§7.2 Globals.get_handle returns a Handle wrapping the value,
+    """Globals.get_handle returns a Handle wrapping the value,
     even when the value would be trivially marshalable. Useful when
     the caller wants to hold a reference or call methods without
     going through __getitem__."""
@@ -109,7 +109,7 @@ def test_get_handle_returns_handle_for_any_global(ctx: Context) -> None:
 
 
 def test_handle_valued_assignment_stores_value(ctx: Context) -> None:
-    """§7.2 Globals.__setitem__ accepts Handle | Any. Assigning a
+    """Globals.__setitem__ accepts Handle | Any. Assigning a
     Handle stores the JS value it refers to on globalThis; the Handle
     itself remains valid and disposable by the caller."""
     with ctx.eval_handle("({value: 42})") as h:
@@ -118,8 +118,8 @@ def test_handle_valued_assignment_stores_value(ctx: Context) -> None:
 
 
 def test_unsupported_python_type_raises_marshalerror(ctx: Context) -> None:
-    """Assigning a Python value that isn't in §8's table (set here)
-    surfaces as MarshalError, not a bare TypeError. §10.3 invariant:
+    """Assigning a Python value that isn't in 's table (set here)
+    surfaces as MarshalError, not a bare TypeError. invariant:
     every public method either returns or raises a QuickJSError
     subclass."""
     with pytest.raises(MarshalError):
@@ -127,7 +127,7 @@ def test_unsupported_python_type_raises_marshalerror(ctx: Context) -> None:
 
 
 def test_globals_do_not_leak_across_contexts() -> None:
-    """§13 / §7.3: two contexts on the same Runtime have independent
+    """Two contexts on the same Runtime have independent
     global objects. Previously covered inline in the smoke test;
     lives here as its focused home since this is the canonical
     "globals" behavior."""

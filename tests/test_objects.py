@@ -1,4 +1,4 @@
-"""Object and array round-trip. See spec/implementation.md §8, §11.1."""
+"""Object and array round-trip. See README.md."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def test_deeply_nested_objects(ctx: Context) -> None:
 
 
 def test_unicode_keys_roundtrip(ctx: Context) -> None:
-    """§8: string keys are UTF-8 on the wire. Non-ASCII keys must survive
+    """string keys are UTF-8 on the wire. Non-ASCII keys must survive
     both JS Atom → msgpack str and msgpack str → Python str."""
     result = ctx.eval("({'café': 1, '日本語': 2, '🔥': 'spicy'})")
     assert result == {"café": 1, "日本語": 2, "🔥": "spicy"}
@@ -46,7 +46,7 @@ def test_numeric_string_keys_vs_array(ctx: Context) -> None:
 
 
 def test_key_insertion_order_preserved(ctx: Context) -> None:
-    """§8: plain Object is map with insertion-ordered str keys. Only
+    """plain Object is map with insertion-ordered str keys. Only
     applies to non-integer-indexed keys — JS itself enumerates
     integer-looking keys first in numeric order, then string keys in
     insertion order. This test uses only string keys so the insertion-
@@ -104,12 +104,12 @@ def test_array_of_mixed_types(ctx: Context) -> None:
 
     Two asymmetries vs top-level ``ctx.eval`` worth noting:
 
-    - §8: JS numbers are always float64 on the wire, so `1` inside an
+    - JS numbers are always float64 on the wire, so `1` inside an
       array comes back as `1.0` (Python float). At the top level,
       ``3 == 3.0`` means users rarely notice; inside a list the
       distinction is visible via ``==`` — and that's correct per spec.
     - ``preserve_undefined=False`` coercion only applies at the root
-      of ``Context.eval`` (§8). Nested `undefined` values keep the
+      of ``Context.eval`` (). Nested `undefined` values keep the
       ``Undefined`` sentinel so a caller who needs to distinguish
       holes from nulls inside a structure can still see it.
     """

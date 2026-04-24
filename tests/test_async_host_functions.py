@@ -1,4 +1,4 @@
-"""Async host-function registration. See spec/implementation.md §7.4, §11.1."""
+"""Async host-function registration. See README.md."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from quickjs_rs import Runtime
 
 
 async def test_async_def_auto_detected_via_decorator() -> None:
-    """§7.4: @ctx.function on an async def auto-detects as async."""
+    """@ctx.function on an async def auto-detects as async."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -24,7 +24,7 @@ async def test_async_def_auto_detected_via_decorator() -> None:
 
 
 async def test_async_def_auto_detected_via_register() -> None:
-    """§7.4: ctx.register(name, fn) with no is_async kwarg auto-detects."""
+    """ctx.register(name, fn) with no is_async kwarg auto-detects."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -38,7 +38,7 @@ async def test_async_def_auto_detected_via_register() -> None:
 
 async def test_sync_def_auto_detected_as_sync() -> None:
     """Regression: plain def functions still register as sync under the
-    new auto-detection default. Guards against §7.4 default
+    new auto-detection default. Guards against default
     flipping the wrong way."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -73,7 +73,7 @@ async def test_functools_wraps_preserves_coroutine_detection() -> None:
 
 
 async def test_wrapped_chain_with_broken_marker_raises_typeerror() -> None:
-    """§7.4: a non-coroutine wrapper around a coroutine (the broken-
+    """a non-coroutine wrapper around a coroutine (the broken-
     decorator case) surfaces as TypeError at registration rather than
     silent misclassification. The error message tells the user to
     pass is_async= explicitly."""
@@ -105,7 +105,6 @@ async def test_explicit_override_beats_auto_detection() -> None:
     any other callable shape auto-detection can't see through."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-
             # A plain function that the user promises is really
             # an async dispatcher into an event loop they manage
             # themselves. Auto-detection would say sync; they know
@@ -137,11 +136,8 @@ async def test_explicit_sync_override_on_callable_class() -> None:
             assert ctx.eval("plain(21)") == 42
 
 
-# ---- §7.4 cancellation (step 7) ---------------------------------------
-
-
 async def test_cancel_propagates_through_eval_async() -> None:
-    """§13.2: task.cancel() on an in-flight eval_async re-raises
+    """task.cancel() on an in-flight eval_async re-raises
     CancelledError to the caller when JS doesn't catch."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -160,7 +156,7 @@ async def test_cancel_propagates_through_eval_async() -> None:
 
 
 async def test_cancel_absorbed_by_js_catch_handler() -> None:
-    """§7.4: JS catching HostCancellationError and returning normally
+    """JS catching HostCancellationError and returning normally
     causes eval_async to return that value without re-raising. The
     cancellation counter remains non-zero for callers who need strict
     propagation (via asyncio.current_task().cancelling())."""
@@ -185,7 +181,7 @@ async def test_cancel_absorbed_by_js_catch_handler() -> None:
                             }
                         """)
                 except asyncio.CancelledError:
-                    # Acceptable alternate path per §13.2: cancellation
+                    # Acceptable alternate path per cancellation
                     # propagated before the JS catch handler ran. On
                     # slower systems the timeout might fire before JS
                     # even reaches its catch block.
@@ -193,8 +189,7 @@ async def test_cancel_absorbed_by_js_catch_handler() -> None:
 
             result = await runner()
             # Either JS absorbed (returning the error name) or the
-            # cancellation propagated before JS saw it. Both are
-            # spec-valid per §13.2.
+            # cancellation propagated before JS saw it.
             assert result in ("HostCancellationError", "propagated")
 
 
@@ -217,16 +212,14 @@ async def test_cancel_with_no_host_calls_pure_js_loop() -> None:
                 # Any exception is acceptable here — TimeoutError from
                 # the deadline or CancelledError from task.cancel().
                 # The assertion is "doesn't hang."
-                task = asyncio.create_task(
-                    ctx.eval_async("while(true){}", module=False)
-                )
+                task = asyncio.create_task(ctx.eval_async("while(true){}", module=False))
                 await asyncio.sleep(0.05)
                 task.cancel()
                 await task
 
 
 async def test_cancel_finally_host_calls_also_cancelled() -> None:
-    """§7.4 subtle case: JS `finally` that awaits another host call
+    """Subtle case: JS `finally` that awaits another host call
     does NOT get a free pass — the cleanup host call is scheduled into
     the same TaskGroup as the original, so it's cancelled with the
     rest. This means JS finally blocks can't do async cleanup reliably
@@ -258,13 +251,15 @@ async def test_cancel_finally_host_calls_also_cancelled() -> None:
             ctx.register("sleep_long", sleep_long)
             ctx.register("cleanup", cleanup)
 
-            task = asyncio.create_task(ctx.eval_async("""
+            task = asyncio.create_task(
+                ctx.eval_async("""
                 try {
                     await sleep_long();
                 } finally {
                     await cleanup();
                 }
-            """))
+            """)
+            )
             await asyncio.sleep(0.01)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -278,9 +273,8 @@ async def test_cancel_finally_host_calls_also_cancelled() -> None:
 
 
 async def test_sync_eval_with_async_hostfn_raises_concurrent_eval_error() -> None:
-    """§13.2 / §7.4: sync ctx.eval that invokes a registered async host
-    function raises ConcurrentEvalError. Step 11's structural
-    detection (``Bridge._in_sync_eval`` boolean) fires regardless of
+    """Sync ctx.eval that invokes a registered async host
+    function raises ConcurrentEvalError. Structural detection fires regardless of
     whether an asyncio loop is ambient, so this test runs as a plain
     async test rather than needing to escape pytest-asyncio's
     auto-mode loop via a thread."""
@@ -330,8 +324,7 @@ def test_sync_eval_pure_js_promise_is_not_error() -> None:
     level, not the eval-return-type level.
 
     If this test ever fails because the check moved to
-    'eval returned a Promise, raise', that's a regression against a
-    legitimate usage pattern.
+    'eval returned a Promise, raise', that's a regression.
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -372,18 +365,15 @@ async def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> No
             ctx.register("slow", slow)
 
             with pytest.raises(ConcurrentEvalError):
-                ctx.eval(
-                    "try { slow(); 'unreachable' } "
-                    "catch (e) { e.name }"
-                )
+                ctx.eval("try { slow(); 'unreachable' } catch (e) { e.name }")
 
 
 async def test_async_host_function_raises_surfaces_hosterror() -> None:
-    """§10.2 async path: a non-cancellation exception in an async host
+    """async path: a non-cancellation exception in an async host
     function surfaces as HostError on the eval_async caller with the
     original Python exception threaded via __cause__.
 
-    Distinct from the cancellation path (step 7) — this is the
+    Distinct from the cancellation path — this is the
     ordinary raise, not a CancelledError. Exercises the dispatcher's
     encode-as-HostError-record branch in _run_async_host_call."""
     from quickjs_rs import HostError
@@ -409,7 +399,7 @@ async def test_async_host_function_raises_surfaces_hosterror() -> None:
 async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
     """Handle.call on an async host function from sync context must
     raise ConcurrentEvalError, matching Context.eval's behavior for
-    the same failure mode. The step-9 flag-and-surface pattern
+    the same failure mode. The flag-and-surface pattern
     extends to Handle.call as a spec-compliance property — the
     user-visible behavior should be consistent regardless of which
     sync entry point invoked the async host function."""
@@ -451,9 +441,7 @@ async def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -
             # method calls it. Handle.call_method on that object
             # triggers the async host fn during the method's body.
             ctx.register("slow", slow)
-            obj = ctx.eval_handle(
-                "({ invoke(n) { return slow(n); } })"
-            )
+            obj = ctx.eval_handle("({ invoke(n) { return slow(n); } })")
             try:
                 with pytest.raises(ConcurrentEvalError):
                     obj.call_method("invoke", 1)
@@ -462,7 +450,7 @@ async def test_handle_call_method_async_host_fn_raises_concurrent_eval_error() -
 
 
 async def test_cancelling_counter_preserved_after_absorption() -> None:
-    """§7.4: when JS absorbs cancellation, asyncio.CancelledError is
+    """when JS absorbs cancellation, asyncio.CancelledError is
     not re-raised — but the task's cancelling counter (set by
     task.cancel()) is not cleared by us. Callers who need strict
     propagation check this counter after the call.
@@ -494,7 +482,7 @@ async def test_cancelling_counter_preserved_after_absorption() -> None:
                         return r, cancelling
                 except asyncio.CancelledError:
                     # Cancellation arrived before JS could absorb.
-                    # Still a valid path per §13.2; report it so the
+                    # Still a valid path per ; report it so the
                     # assertion below can handle either case.
                     return "propagated", -1
 

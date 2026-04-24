@@ -1,4 +1,4 @@
-"""Memory, stack, and timeout limits. See spec/implementation.md §9, §11.1."""
+"""Memory, stack, and timeout limits. See README.md."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from quickjs_rs import JSError, MemoryLimitError, Runtime, TimeoutError
 
 
 def test_memory_limit_trips_with_runaway_allocation() -> None:
-    """§9: JS_ATOM_out_of_memory surfaces as MemoryLimitError once JS
+    """JS_ATOM_out_of_memory surfaces as MemoryLimitError once JS
     pushes heap usage past the limit set by JS_SetMemoryLimit."""
     with Runtime(memory_limit=8 * 1024 * 1024) as rt:
         with rt.new_context() as ctx:
@@ -19,7 +19,7 @@ def test_memory_limit_trips_with_runaway_allocation() -> None:
 
 
 def test_timeout_terminates_infinite_loop() -> None:
-    """§7.3: wall-clock deadline in host_interrupt kicks QuickJS out of
+    """wall-clock deadline in host_interrupt kicks QuickJS out of
     an infinite loop within the configured budget."""
     with Runtime() as rt:
         with rt.new_context(timeout=0.2) as ctx:
@@ -28,7 +28,7 @@ def test_timeout_terminates_infinite_loop() -> None:
 
 
 def test_stack_overflow_is_jserror_not_memory() -> None:
-    """§11.1: deep recursion trips JS_ThrowStackOverflow, which is a
+    """deep recursion trips JS_ThrowStackOverflow, which is a
     separate path from OOM. The result should be a plain JSError
     (InternalError name), not a MemoryLimitError."""
     with Runtime() as rt:
@@ -54,7 +54,7 @@ def test_timeout_resets_between_evals() -> None:
 
 
 def test_memory_limit_isolated_per_runtime() -> None:
-    """§9: memory limit is Runtime-scoped. One runtime hitting its limit
+    """memory limit is Runtime-scoped. One runtime hitting its limit
     must not poison a sibling runtime in the same process."""
     with Runtime(memory_limit=8 * 1024 * 1024) as rt1:
         with rt1.new_context() as ctx1:

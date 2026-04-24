@@ -1,4 +1,4 @@
-"""Module loading. See spec/module-loading.md §3.1.
+"""Module loading primitives.
 
 ModuleScope is a frozen dataclass — a recursive, self-contained
 registry of JS module sources and named dependencies. Each scope
@@ -7,8 +7,7 @@ are files (addressed by relative specifiers with POSIX-path keys
 that may contain `/`), and `ModuleScope` values are named
 dependencies (addressed by bare import specifiers).
 
-Validation happens at construction — see __post_init__ and
-CLAUDE.md's non-negotiables block. Nesting is recursive and
+Validation happens at construction via ``__post_init__``. Nesting is recursive and
 unbounded; the dependency graph shape is whatever the user hands
 us.
 """
@@ -18,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
-# §5.5: recognized extensions for a scope's entry-point module.
+# recognized extensions for a scope's entry-point module.
 # Order is the resolver's preference order when a bare specifier
 # lands on a scope: whichever index.<ext> exists first in this
 # list wins. JS variants first (faster — no strip), then TS
@@ -55,9 +54,7 @@ class ModuleScope:
     even if the names happen to be identical.
 
     Validation is done at construction. Syntax errors in source
-    strings are NOT caught here — they surface at eval time per
-    spec/module-loading.md §11 (pre-parse on install was considered
-    and deferred).
+    strings are NOT caught here — they surface at install/eval time.
 
     Examples:
         # Multi-file scope with a subdirectory path
@@ -134,7 +131,7 @@ class ModuleScope:
         # A scope that owns any files must expose an entry point.
         # Bare `import "scope-name"` from the parent resolves to
         # "scope-name/index.<ext>" where <ext> is one of the
-        # recognized module extensions (§5.5). Accept .js, .mjs,
+        # recognized module extensions. Accept .js, .mjs,
         # .cjs for plain JS and .ts, .mts, .cts, .jsx, .tsx for
         # files that get processed at install time. A pure-
         # dependency container (only ModuleScope entries, no str

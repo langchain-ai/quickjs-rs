@@ -1,7 +1,6 @@
 """quickjs-rs: sandboxed JavaScript execution for Python.
 
-See spec/implementation.md §7 for the v0.3 public API and
-spec/module-loading.md §3 for the v0.4 additions (ModuleScope).
+Public entrypoint for Runtime/Context/Handle plus module-loading APIs.
 """
 
 from quickjs_rs._engine import UNDEFINED, Undefined
@@ -23,12 +22,8 @@ from quickjs_rs.handle import Handle
 from quickjs_rs.modules import ModuleScope
 from quickjs_rs.runtime import Runtime
 
-__version__ = "0.4.0.dev0"
+__version__ = "0.1.0.dev0"
 
-# Public API surface. v0.3 names (Runtime, Context, Handle, errors,
-# Undefined) ship at tag v0.3.0. v0.4 adds ModuleScope here; the
-# runtime wiring (Context.install, module=True eval) lands in later
-# steps of spec/module-loading.md §10.
 __all__ = [
     "Runtime",
     "Context",

@@ -1,4 +1,4 @@
-//! §6.7: reentrance-safe Ctx access.
+//! Reentrance-safe Ctx access.
 //!
 //! rquickjs's non-parallel runtime guard is a non-reentrant RefCell
 //! (per-runtime, not per-context), so nested `Context::with` from
@@ -13,7 +13,7 @@
 //! `with_active_ctx` — the slot is set on entry and cleared on exit
 //! via an RAII guard, so no `Ctx` handed out from it ever outlives
 //! its real `'js` scope. Removing or refactoring this machinery
-//! will break `test_reentrant_eval_from_host_function` — the v0.2
+//! will break `test_reentrant_eval_from_host_function` — the previous implementation
 //! tripwire that pinned it.
 
 use pyo3::prelude::*;
@@ -38,23 +38,21 @@ where
     // Fast path: reentrant call — use the stashed Ctx. We clone it
     // out of the map so the closure can borrow the clone; the
     // stashed entry stays in place for any deeper nesting.
-    let stashed: Option<Ctx<'static>> = ACTIVE_CTX_BY_RT
-        .with(|cell| cell.borrow().get(&rt_key).cloned());
+    let stashed: Option<Ctx<'static>> =
+        ACTIVE_CTX_BY_RT.with(|cell| cell.borrow().get(&rt_key).cloned());
     if let Some(stashed) = stashed {
         // Shrink 'static back down to the local borrow. Sound because
         // we're inside the outer with's closure body right now.
-        let as_short: &Ctx<'_> = unsafe {
-            core::mem::transmute::<&Ctx<'static>, &Ctx<'_>>(&stashed)
-        };
+        let as_short: &Ctx<'_> =
+            unsafe { core::mem::transmute::<&Ctx<'static>, &Ctx<'_>>(&stashed) };
         return f(as_short);
     }
 
     // Slow path: enter Context::with, publish the Ctx into the
     // thread-local, clear on exit (incl. panic unwind via RAII).
     context.with(|ctx| {
-        let static_ctx: Ctx<'static> = unsafe {
-            core::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone())
-        };
+        let static_ctx: Ctx<'static> =
+            unsafe { core::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone()) };
         ACTIVE_CTX_BY_RT.with(|cell| {
             cell.borrow_mut().insert(rt_key, static_ctx);
         });

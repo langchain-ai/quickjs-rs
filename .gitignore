@@ -25,8 +25,17 @@ __pycache__/
 htmlcov/
 .venv/
 venv/
+node_modules/
 
-# Local package manager lockfiles — §12 pins deps in pyproject.toml;
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+*.crt
+credentials.json
+
+# Local package manager lockfiles — deps are pinned in pyproject.toml;
 # uv/poetry lockfiles are a local tooling choice and don't belong in
 # the repo.
 uv.lock

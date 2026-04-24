@@ -1,4 +1,4 @@
-//! §6.6 value marshaling — JS↔Python conversion.
+//! value marshaling — JS↔Python conversion.
 //!
 //! Split into:
 //!   * `js_value_to_py` — the plain marshaler (MarshalError on
@@ -12,7 +12,7 @@
 //!     Handle surface that accept "Python value OR Handle" uniformly
 //!     while enforcing the cross-context invariant.
 //!   * `Undefined` — the sentinel class for nested JS `undefined`
-//!     values that need to survive a round-trip (§6.6 preserve-
+//!     values that need to survive a round-trip (preserve-
 //!     undefined).
 
 use pyo3::prelude::*;
@@ -29,14 +29,14 @@ use rquickjs::{
 use crate::errors::{InvalidHandleError, MarshalError, QuickJSError};
 use crate::handle::QjsHandle;
 
-/// §8 invariant: depth cap for recursive marshaling. Matches v0.2's
+/// invariant: depth cap for recursive marshaling. Matches previous implementation's
 /// bridge (cycle detection via depth limit, no ref tracking). Cycles
 /// go around the guard only by being genuinely deeper than 128 — at
 /// which point the MarshalError is the right signal regardless.
 pub(crate) const MAX_MARSHAL_DEPTH: u32 = 128;
 
 /// Sentinel for JS `undefined` when it appears nested inside a
-/// structure. §6.6: distinct from `None` so a future
+/// structure. distinct from `None` so a future
 /// `preserve_undefined=True` mode can keep the distinction at the
 /// root too. Equality is instance-agnostic: any two Undefined
 /// objects compare equal, so Rust creating fresh instances is fine.
@@ -74,7 +74,7 @@ fn depth_error() -> PyErr {
     ))
 }
 
-/// Marshal a JS value to a Python object per §6.6. `depth` is the
+/// Marshal a JS value to a Python object. `depth` is the
 /// current recursion level; start at 0.
 pub(crate) fn js_value_to_py<'js>(
     py: Python<'_>,
@@ -89,7 +89,7 @@ pub(crate) fn js_value_to_py<'js>(
         Type::Null => Ok(py.None()),
         Type::Undefined | Type::Uninitialized => {
             if depth == 0 {
-                // Root of ctx.eval: coerce to None per §6.6
+                // Root of ctx.eval: coerce to None per
                 // (preserve_undefined=False is the default; a future
                 // preserve_undefined=True flag flips this).
                 Ok(py.None())
@@ -112,7 +112,7 @@ pub(crate) fn js_value_to_py<'js>(
         }
         Type::Float => {
             let n = val.as_float().expect("Type::Float has as_float");
-            // §6.6: "PyFloat (or PyInt if integer-valued)" — preserve
+            // "PyFloat (or PyInt if integer-valued)" — preserve
             // narrowing so `1 + 2` returns int 3, not float 3.0.
             if n.is_finite() && n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
                 Ok((n as i64).into_pyobject(py)?.unbind().into_any())
@@ -122,13 +122,13 @@ pub(crate) fn js_value_to_py<'js>(
         }
         Type::String => {
             let s = val.as_string().expect("Type::String has as_string");
-            let rust_str = s.to_string().map_err(|e| {
-                MarshalError::new_err(format!("failed to decode JS string: {}", e))
-            })?;
+            let rust_str = s
+                .to_string()
+                .map_err(|e| MarshalError::new_err(format!("failed to decode JS string: {}", e)))?;
             Ok(PyString::new(py, &rust_str).unbind().into_any())
         }
         Type::BigInt => {
-            // §6.6: BigInt → Python int. Python int is arbitrary
+            // BigInt → Python int. Python int is arbitrary
             // precision, so there's no upper bound. Go via the
             // JS-side decimal-string representation — i64 wouldn't
             // cover 2^63+ values.
@@ -137,11 +137,9 @@ pub(crate) fn js_value_to_py<'js>(
             // BigInt is the full decimal representation.
             let s: String = Coerced::<String>::from_js(val.ctx(), val.clone())
                 .map(|c| c.0)
-                .map_err(|e| {
-                    MarshalError::new_err(format!("failed to stringify BigInt: {}", e))
-                })?;
+                .map_err(|e| MarshalError::new_err(format!("failed to stringify BigInt: {}", e)))?;
             let _ = bi; // keep the variable for clarity; as_big_int is the type gate
-            // Parse the decimal string into a Python int.
+                        // Parse the decimal string into a Python int.
             py.import("builtins")?
                 .getattr("int")?
                 .call1((s,))
@@ -174,7 +172,7 @@ pub(crate) fn js_value_to_py<'js>(
             }
             let dict = PyDict::new(py);
             // Enumerable string-keyed own properties, preserving
-            // insertion order (QuickJS's iterator does this; §6.6
+            // insertion order (QuickJS's iterator does this;
             // "Object → PyDict with string keys").
             for entry in obj.own_props::<String, Value<'js>>(Filter::default()) {
                 let (key, value) = entry.map_err(|e| {
@@ -184,7 +182,7 @@ pub(crate) fn js_value_to_py<'js>(
             }
             Ok(dict.unbind().into_any())
         }
-        // §6.6: functions/symbols raise MarshalError unless
+        // functions/symbols raise MarshalError unless
         // allow_opaque=true (which is the QjsHandle path; sync eval
         // result rejects them).
         Type::Function | Type::Constructor => Err(MarshalError::new_err(
@@ -202,7 +200,7 @@ pub(crate) fn js_value_to_py<'js>(
     }
 }
 
-/// Marshal a Python object to a JS value per §6.6.
+/// Marshal a Python object to a JS value.
 pub(crate) fn py_to_js_value<'js>(
     ctx: &Ctx<'js>,
     py_val: &Bound<'_, PyAny>,
@@ -249,21 +247,15 @@ pub(crate) fn py_to_js_value<'js>(
             Err(_) => {
                 // Larger than i64: use globalThis.BigInt(str).
                 let s: String = i.str()?.to_str()?.to_string();
-                let bigint_fn: Function<'js> = ctx
-                    .globals()
-                    .get("BigInt")
-                    .map_err(|e| {
-                        MarshalError::new_err(format!(
-                            "BigInt constructor unavailable: {}",
-                            e
-                        ))
-                    })?;
+                let bigint_fn: Function<'js> = ctx.globals().get("BigInt").map_err(|e| {
+                    MarshalError::new_err(format!("BigInt constructor unavailable: {}", e))
+                })?;
                 let js_str = JsString::from_str(ctx.clone(), &s).map_err(|e| {
                     MarshalError::new_err(format!("failed to build JS string: {}", e))
                 })?;
-                let result: Value<'js> = bigint_fn.call((js_str,)).map_err(|e| {
-                    MarshalError::new_err(format!("BigInt({}) failed: {}", s, e))
-                })?;
+                let result: Value<'js> = bigint_fn
+                    .call((js_str,))
+                    .map_err(|e| MarshalError::new_err(format!("BigInt({}) failed: {}", s, e)))?;
                 return Ok(result);
             }
         }
@@ -277,52 +269,45 @@ pub(crate) fn py_to_js_value<'js>(
     // str
     if let Ok(s) = py_val.cast::<PyString>() {
         let rust_str = s.to_str()?;
-        let js_str = JsString::from_str(ctx.clone(), rust_str).map_err(|e| {
-            MarshalError::new_err(format!("failed to build JS string: {}", e))
-        })?;
+        let js_str = JsString::from_str(ctx.clone(), rust_str)
+            .map_err(|e| MarshalError::new_err(format!("failed to build JS string: {}", e)))?;
         return Ok(js_str.into_value());
     }
 
     // bytes / bytearray → Uint8Array
     if let Ok(b) = py_val.cast::<PyBytes>() {
         let bytes = b.as_bytes();
-        let ta = TypedArray::<u8>::new_copy(ctx.clone(), bytes).map_err(|e| {
-            MarshalError::new_err(format!("Uint8Array allocation failed: {}", e))
-        })?;
+        let ta = TypedArray::<u8>::new_copy(ctx.clone(), bytes)
+            .map_err(|e| MarshalError::new_err(format!("Uint8Array allocation failed: {}", e)))?;
         return Ok(ta.into_value());
     }
     if let Ok(b) = py_val.cast::<PyByteArray>() {
         // Safety: we copy out immediately via to_vec before any other
         // Python code runs, so buffer mutation can't happen.
         let bytes = unsafe { b.as_bytes() }.to_vec();
-        let ta = TypedArray::<u8>::new_copy(ctx.clone(), &bytes[..]).map_err(|e| {
-            MarshalError::new_err(format!("Uint8Array allocation failed: {}", e))
-        })?;
+        let ta = TypedArray::<u8>::new_copy(ctx.clone(), &bytes[..])
+            .map_err(|e| MarshalError::new_err(format!("Uint8Array allocation failed: {}", e)))?;
         return Ok(ta.into_value());
     }
 
     // list / tuple → JS Array
     if let Ok(lst) = py_val.cast::<PyList>() {
-        let arr = Array::new(ctx.clone()).map_err(|e| {
-            MarshalError::new_err(format!("JS Array allocation failed: {}", e))
-        })?;
+        let arr = Array::new(ctx.clone())
+            .map_err(|e| MarshalError::new_err(format!("JS Array allocation failed: {}", e)))?;
         for (i, item) in lst.iter().enumerate() {
             let v = py_to_js_value(ctx, &item, depth + 1)?;
-            arr.set(i, v).map_err(|e| {
-                MarshalError::new_err(format!("Array set failed at {}: {}", i, e))
-            })?;
+            arr.set(i, v)
+                .map_err(|e| MarshalError::new_err(format!("Array set failed at {}: {}", i, e)))?;
         }
         return Ok(arr.into_value());
     }
     if let Ok(tup) = py_val.cast::<PyTuple>() {
-        let arr = Array::new(ctx.clone()).map_err(|e| {
-            MarshalError::new_err(format!("JS Array allocation failed: {}", e))
-        })?;
+        let arr = Array::new(ctx.clone())
+            .map_err(|e| MarshalError::new_err(format!("JS Array allocation failed: {}", e)))?;
         for (i, item) in tup.iter().enumerate() {
             let v = py_to_js_value(ctx, &item, depth + 1)?;
-            arr.set(i, v).map_err(|e| {
-                MarshalError::new_err(format!("Array set failed at {}: {}", i, e))
-            })?;
+            arr.set(i, v)
+                .map_err(|e| MarshalError::new_err(format!("Array set failed at {}: {}", i, e)))?;
         }
         return Ok(arr.into_value());
     }
@@ -331,9 +316,8 @@ pub(crate) fn py_to_js_value<'js>(
     // MarshalError because JS own-property keys are strings or
     // symbols; we don't support symbol keys on the write path.
     if let Ok(d) = py_val.cast::<PyDict>() {
-        let obj = Object::new(ctx.clone()).map_err(|e| {
-            MarshalError::new_err(format!("JS Object allocation failed: {}", e))
-        })?;
+        let obj = Object::new(ctx.clone())
+            .map_err(|e| MarshalError::new_err(format!("JS Object allocation failed: {}", e)))?;
         for (key, value) in d.iter() {
             let key_str = key
                 .cast::<PyString>()
@@ -349,10 +333,7 @@ pub(crate) fn py_to_js_value<'js>(
                 .to_str()?;
             let v = py_to_js_value(ctx, &value, depth + 1)?;
             obj.set(key_str, v).map_err(|e| {
-                QuickJSError::new_err(format!(
-                    "Object set failed for key {:?}: {}",
-                    key_str, e
-                ))
+                QuickJSError::new_err(format!("Object set failed for key {:?}: {}", key_str, e))
             })?;
         }
         let _ = py;
@@ -371,7 +352,7 @@ pub(crate) fn py_to_js_value<'js>(
 }
 
 /// Map an rquickjs Type to the string the Python API exposes via
-/// Handle.type_of. Matches the v0.2 test cases exactly — "boolean"
+/// Handle.type_of. Matches the previous implementation test cases exactly — "boolean"
 /// not "bool", "number" for both Int/Float, "bigint" for big_int,
 /// "object" for plain (Array/Function/Promise etc get their own
 /// strings where meaningful).
@@ -413,7 +394,9 @@ pub(crate) fn handle_or_py_to_js<'js>(
             ));
         }
         let persistent = borrow.persistent_clone()?;
-        return persistent.restore(ctx).map_err(crate::errors::map_handle_error);
+        return persistent
+            .restore(ctx)
+            .map_err(crate::errors::map_handle_error);
     }
     py_to_js_value(ctx, py_val, depth)
 }
@@ -429,9 +412,9 @@ pub(crate) fn collect_js_args<'js>(
     let mut js_args = rquickjs::function::Args::new(ctx.clone(), args.len());
     for (i, arg) in args.iter().enumerate() {
         let v = handle_or_py_to_js(ctx, &arg, expected_ctx_ptr, 0)?;
-        js_args.push_arg(v).map_err(|e| {
-            QuickJSError::new_err(format!("arg {} push failed: {}", i, e))
-        })?;
+        js_args
+            .push_arg(v)
+            .map_err(|e| QuickJSError::new_err(format!("arg {} push failed: {}", i, e)))?;
     }
     Ok(js_args)
 }
@@ -439,7 +422,7 @@ pub(crate) fn collect_js_args<'js>(
 /// Like `js_value_to_py` but substitutes fresh QjsHandles at
 /// positions that would otherwise raise MarshalError (functions,
 /// symbols, promises). Recursively walks objects/arrays — mixed
-/// marshalable / opaque contents work. §7.2 allow_opaque.
+/// marshalable / opaque contents work. allow_opaque.
 pub(crate) fn js_to_py_with_opaque<'js>(
     py: Python<'_>,
     val: &Value<'js>,

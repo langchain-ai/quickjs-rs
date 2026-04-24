@@ -1,4 +1,4 @@
-//! §5.2 ES module registry, resolver, and loader.
+//! ES module registry, resolver, and loader.
 //!
 //! Populated from Python's ModuleScope at install time via
 //! `Context.install()` → recursive walk → `add_source` /
@@ -22,7 +22,7 @@
 //!     ModuleScope-valued child keys (bare specifiers). The root
 //!     scope uses the empty canonical path.
 //!
-//! Resolver rule (§4): identify the referrer's containing scope by
+//! Resolver rule: identify the referrer's containing scope by
 //! prefix match against the registered scope paths (longest wins),
 //! then route based on specifier shape:
 //!
@@ -196,12 +196,7 @@ impl StoreHandle {
 pub(crate) struct StoreResolver(pub StoreHandle);
 
 impl Resolver for StoreResolver {
-    fn resolve<'js>(
-        &mut self,
-        _ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
-    ) -> QjsResult<String> {
+    fn resolve<'js>(&mut self, _ctx: &Ctx<'js>, base: &str, name: &str) -> QjsResult<String> {
         let store = self.0.inner.borrow();
         resolve_with(&store, base, name)
     }
@@ -356,7 +351,7 @@ pub(crate) fn normalize_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// §5.5: transparent TypeScript stripping. If the scope-entry key
+/// Transparent TypeScript stripping. If the scope-entry key
 /// ends in `.ts` or `.tsx`, run the source through oxidase to
 /// erase type annotations (plus transform enums, namespaces, and
 /// parameter properties — see the oxidase README). Any other
@@ -420,13 +415,19 @@ mod test {
     #[test]
     fn normalize_basic() {
         assert_eq!(normalize_path("foo.js"), Some("foo.js".to_string()));
-        assert_eq!(normalize_path("lib/util.js"), Some("lib/util.js".to_string()));
+        assert_eq!(
+            normalize_path("lib/util.js"),
+            Some("lib/util.js".to_string())
+        );
         assert_eq!(
             normalize_path("lib/./util.js"),
             Some("lib/util.js".to_string())
         );
         assert_eq!(normalize_path("lib/../foo.js"), Some("foo.js".to_string()));
-        assert_eq!(normalize_path("lib/sub/../util.js"), Some("lib/util.js".to_string()));
+        assert_eq!(
+            normalize_path("lib/sub/../util.js"),
+            Some("lib/util.js".to_string())
+        );
     }
 
     #[test]

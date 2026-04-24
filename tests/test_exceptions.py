@@ -1,4 +1,4 @@
-"""Exception propagation. See spec/implementation.md §10, §11.1."""
+"""Exception propagation. See README.md."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def test_swallowed_host_raise_does_not_leak_cause_into_later_eval() -> None:
 
 def test_js_catches_hosterror_and_reads_name_and_message() -> None:
     """The HostError the host throws must be catchable from JS with its
-    name and message intact. §10.2."""
+    name and message intact. ."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             @ctx.function
@@ -101,7 +101,7 @@ def test_js_catches_hosterror_and_reads_name_and_message() -> None:
 
 
 def test_non_error_throw_coerces_to_jserror() -> None:
-    """§10.1: `throw 'x'` / `throw 42` surface as JSError(name='Error',
+    """`throw 'x'` / `throw 42` surface as JSError(name='Error',
     message=<coerced string>, stack=None). The shim coerces via ToString."""
     with Runtime() as rt:
         with rt.new_context() as ctx:

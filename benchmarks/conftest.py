@@ -1,9 +1,8 @@
-"""Shared fixtures for the benchmark suite. See spec/benchmarks.md §3.
+"""Shared fixtures for the benchmark suite. See benchmarks/README.md.
 
 These benchmarks measure time, not correctness — setup goes in
 fixtures so only the operation under test lands inside
-``benchmark(...)``. Per §9 of the spec, assertions don't belong in
-benchmarks; correctness tests live in ``tests/``.
+``benchmark(...)``.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from quickjs_rs import Context, Runtime
 
 @pytest.fixture(scope="module")
 def rt() -> Iterator[Runtime]:
-    """Module-scoped Runtime so the wasm load + instantiation cost
+    """Module-scoped Runtime so theinstantiation cost
     doesn't get counted against every benchmark in a file. Benchmarks
     that measure startup construct their own Runtime explicitly."""
     runtime = Runtime()

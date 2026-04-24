@@ -1,7 +1,7 @@
 name: benchmarks
 
 # Runs the performance benchmarks under pytest-codspeed and uploads
-# to CodSpeed for regression detection. See spec/benchmarks.md §6.
+# to CodSpeed for regression detection.
 #
 # Mode is walltime: simulation (Valgrind) can't see QuickJS bytecode
 # execution inside the native extension any better than it saw it
