@@ -69,6 +69,19 @@ class Runtime:
         self._engine_rt.close()
         self._closed = True
 
+    def run_gc(self) -> None:
+        """Run QuickJS cycle GC on this runtime."""
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        self._engine_rt.run_gc()
+
+    def memory_usage(self) -> dict[str, int]:
+        """Return QuickJS runtime memory counters from JS_ComputeMemoryUsage."""
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        raw = self._engine_rt.memory_usage()
+        return {str(k): int(v) for k, v in raw.items()}
+
     def new_context(self, *, timeout: float = 5.0) -> Any:
         if self._closed:
             raise QuickJSError("runtime is closed")
