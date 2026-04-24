@@ -67,3 +67,33 @@ jobs:
           mode: walltime
           token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest benchmarks/ --codspeed
+
+      - name: Emit threaded TPS summary
+        # Keep a human-readable throughput line in the job summary so
+        # reviewers don't need to inspect raw benchmark tables.
+        run: |
+          set -euo pipefail
+          LOG_FILE=/tmp/threaded-stress.log
+
+          pytest benchmarks/test_threaded_stress.py::bench_threaded_runtime_context_isolation_tps \
+            --codspeed -q -s -p no:cacheprovider | tee "$LOG_FILE"
+
+          CONFIG_LINE="$(grep -E 'threaded_stress_config=' "$LOG_FILE" | tail -n 1 || true)"
+          TPS_LINE="$(grep -E 'threaded_stress_tps=' "$LOG_FILE" | tail -n 1 || true)"
+          if [ -z "$CONFIG_LINE" ]; then
+            echo "Failed to capture threaded_stress_config line from benchmark output." >&2
+            exit 1
+          fi
+          if [ -z "$TPS_LINE" ]; then
+            echo "Failed to capture threaded_stress_tps line from benchmark output." >&2
+            exit 1
+          fi
+          CONFIG_PAYLOAD="${CONFIG_LINE#threaded_stress_config=}"
+
+          {
+            echo "### Threaded Stress TPS"
+            echo
+            echo "- \`$TPS_LINE\`"
+            echo "- Config: $CONFIG_PAYLOAD"
+            echo "- Note: TPS is derived from fixed-workload benchmark runtime."
+          } >> "$GITHUB_STEP_SUMMARY"
