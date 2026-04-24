@@ -276,12 +276,6 @@ flowchart TD
 - **Mitigations**: dependency pinning/review plus memory/stack/timeout controls reduce DoS blast radius; they do not remove memory-corruption class vulnerability potential.
 - **Residual risk**: critical architectural dependency risk; accepted with compensating controls (isolated execution mode for untrusted code, patch cadence, and dependency monitoring).
 
-### Acceptance Notes (T1, T2, T4)
-
-- **T1 is accepted by design**: callback bridging is a required feature for harness/resource access. The security requirement is capability minimization, not callback removal.
-- **T2 is configuration dependent**: the risk materially increases only when operators relax/disable limits; policy for untrusted execution should prohibit unbounded limits.
-- **T4 is an architectural/native embedding risk**: documenting it in the threat model is expected and correct; it does not imply a known active exploit in this repository.
-
 #### T5: Supply-chain compromise in dependency path
 
 - **Flow**: DF11.
