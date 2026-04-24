@@ -34,7 +34,8 @@ dev = [
     "mypy",
 ]
 bench = [
-    "pytest-codspeed>=3.0",
+    "pytest-codspeed>=4.3.0",
+    "matplotlib>=3.8",
 ]
 
 [project.urls]

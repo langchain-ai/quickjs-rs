@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
+use pyo3::types::PyDict;
 use rquickjs::{runtime::InterruptHandler, Runtime};
 
 use crate::errors::{map_runtime_new_error, QuickJSError};
@@ -55,6 +56,46 @@ impl QjsRuntime {
     fn clear_interrupt_handler(&self) -> PyResult<()> {
         self.runtime()?.set_interrupt_handler(None);
         Ok(())
+    }
+
+    /// Run QuickJS cycle GC for this runtime.
+    fn run_gc(&self) -> PyResult<()> {
+        self.runtime()?.run_gc();
+        Ok(())
+    }
+
+    /// Snapshot QuickJS runtime memory counters from
+    /// JS_ComputeMemoryUsage.
+    fn memory_usage(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let usage = self.runtime()?.memory_usage();
+        let out = PyDict::new(py);
+        out.set_item("malloc_size", usage.malloc_size)?;
+        out.set_item("malloc_limit", usage.malloc_limit)?;
+        out.set_item("memory_used_size", usage.memory_used_size)?;
+        out.set_item("malloc_count", usage.malloc_count)?;
+        out.set_item("memory_used_count", usage.memory_used_count)?;
+        out.set_item("atom_count", usage.atom_count)?;
+        out.set_item("atom_size", usage.atom_size)?;
+        out.set_item("str_count", usage.str_count)?;
+        out.set_item("str_size", usage.str_size)?;
+        out.set_item("obj_count", usage.obj_count)?;
+        out.set_item("obj_size", usage.obj_size)?;
+        out.set_item("prop_count", usage.prop_count)?;
+        out.set_item("prop_size", usage.prop_size)?;
+        out.set_item("shape_count", usage.shape_count)?;
+        out.set_item("shape_size", usage.shape_size)?;
+        out.set_item("js_func_count", usage.js_func_count)?;
+        out.set_item("js_func_size", usage.js_func_size)?;
+        out.set_item("js_func_code_size", usage.js_func_code_size)?;
+        out.set_item("js_func_pc2line_count", usage.js_func_pc2line_count)?;
+        out.set_item("js_func_pc2line_size", usage.js_func_pc2line_size)?;
+        out.set_item("c_func_count", usage.c_func_count)?;
+        out.set_item("array_count", usage.array_count)?;
+        out.set_item("fast_array_count", usage.fast_array_count)?;
+        out.set_item("fast_array_elements", usage.fast_array_elements)?;
+        out.set_item("binary_object_count", usage.binary_object_count)?;
+        out.set_item("binary_object_size", usage.binary_object_size)?;
+        Ok(out.unbind())
     }
 
     /// Register a str-valued scope entry. Called from

@@ -12,11 +12,14 @@ can track regressions commit-to-commit.
 ## Running locally
 
 ```bash
-# Install bench extras (separate from dev extras)
+# Install bench extras (separate from dev extras; includes codspeed + matplotlib)
 pip install -e ".[dev,bench]"
 
 # Run every benchmark with wall-time measurement
 pytest benchmarks/ --codspeed
+
+# Run CodSpeed memory benchmarks locally
+pytest benchmarks/test_memory.py --codspeed --codspeed-mode memory
 
 # Run a single file
 pytest benchmarks/test_startup.py --codspeed
@@ -29,9 +32,24 @@ pytest benchmarks/test_eval_sync.py::bench_eval_fibonacci_30 --codspeed
 pytest benchmarks/
 ```
 
+Memory profiling sweep (CSV + markdown summary):
+
+```bash
+python3 benchmarks/memory_experiment.py \
+  --output-csv artifacts/memory/memory-profile.csv \
+  --output-markdown artifacts/memory/memory-profile.md \
+  --output-plots-dir artifacts/memory/plots \
+  --output-visual-markdown artifacts/memory/memory-report.md
+```
+
 `--codspeed` switches pytest-codspeed into measurement mode. Without it,
 benchmark bodies still execute (a good smoke check) but no timing is
 recorded.
+
+`benchmarks/memory_experiment.py` is separate from pytest-codspeed: it
+profiles runtime/context fan-out memory pressure across configurable mixes
+and emits CSV, summary markdown, and optional matplotlib visuals focused on
+whole-process RSS and QuickJS counters (residual is inferred by subtraction).
 
 Local runs do **not** need a CodSpeed account — the plugin prints a
 results table to stdout. CI uploads runs to CodSpeed for diffing across
@@ -48,6 +66,7 @@ commits.
 | `test_host_functions.py` | sync + async host call dispatch |
 | `test_eval_async.py` | async pipeline, fan-out, sequential await |
 | `test_threaded_stress.py` | Threaded stress: multi-runtime/context isolation under concurrent load + TPS |
+| `test_memory.py` | CodSpeed memory mode suite — allocation regression tracking |
 
 ## Naming convention
 
@@ -96,7 +115,20 @@ for fast benchmarks.
 ## CI
 
 `.github/workflows/benchmarks.yml` runs on push to `main` and on PRs.
-It reuses the `build-wasm` workflow to get a fresh `quickjs.wasm`, then
-invokes `CodSpeedHQ/action@v4` with `mode: walltime`. Simulation mode
-(Valgrind) can't see wasm execution cost, so wall-time is the only
-meaningful mode for this project.
+It invokes CodSpeed twice:
+
+- `mode: walltime` on the full benchmark suite (latency/throughput)
+- `mode: memory` on `test_memory.py` (heap allocation regressions)
+
+For capacity planning (runtime/context sweep under a 1 GB cap), use the
+manual/weekly `.github/workflows/memory-profiling.yml` job which emits
+CSV/markdown artifacts from `benchmarks/memory_experiment.py`.
+
+## When a benchmark lands outside its expected range
+
+`spec/benchmarks.md §8` lists order-of-magnitude targets. If a run lands
+outside its range, the rule is: **investigate, don't silently adjust.**
+Either the range is wrong and the spec needs an update (separate commit),
+or the implementation has an unexpected cost center worth profiling in
+v0.3. Known items flagged against the v0.2 baseline are recorded in the
+relevant commit bodies.
