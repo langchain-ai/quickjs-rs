@@ -150,6 +150,7 @@ jobs:
         uses: actions/deploy-pages@v4
 
       - name: Append inline plot preview
+        if: ${{ github.event.repository.private != true }}
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
           ARTIFACT_URL: ${{ needs.memory.outputs.memory_artifact_url }}
@@ -167,3 +168,21 @@ jobs:
           echo "![Phase RSS lines](${PLOT_BASE}/phase_rss_lines_top.png)" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "![RSS heatmap slice](${PLOT_BASE}/rss_heatmap_slice.png)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Append private-repo preview links
+        if: ${{ github.event.repository.private == true }}
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          ARTIFACT_URL: ${{ needs.memory.outputs.memory_artifact_url }}
+        run: |
+          set -euo pipefail
+          PLOT_BASE="${PAGE_URL%/}/memory/${GITHUB_RUN_ID}"
+          echo "### Memory Plot Preview" >> "$GITHUB_STEP_SUMMARY"
+          echo "Inline image rendering is disabled for private/internal repositories because GitHub proxies markdown images through camo without auth." >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Published plot bundle](${PLOT_BASE}/index.html)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [RSS vs QuickJS malloc PNG](${PLOT_BASE}/rss_vs_qjs_scatter.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Overhead stacked PNG](${PLOT_BASE}/overhead_stacked_top.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Phase RSS lines PNG](${PLOT_BASE}/phase_rss_lines_top.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [RSS heatmap slice PNG](${PLOT_BASE}/rss_heatmap_slice.png)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Download workflow artifact](${ARTIFACT_URL})" >> "$GITHUB_STEP_SUMMARY"
