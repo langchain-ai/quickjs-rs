@@ -50,6 +50,9 @@ recorded.
 profiles runtime/context fan-out memory pressure across configurable mixes
 and emits CSV, summary markdown, and optional matplotlib visuals focused on
 whole-process RSS and QuickJS counters (residual is inferred by subtraction).
+The visual bundle includes scatter/stack/phase plots plus capacity frontier,
+GC reclamation and residual-ratio heatmaps, sweep small multiples, and a
+failure overlay map.
 
 Local runs do **not** need a CodSpeed account — the plugin prints a
 results table to stdout. CI uploads runs to CodSpeed for diffing across

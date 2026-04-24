@@ -116,6 +116,12 @@ jobs:
             <div class="plot"><h2>Overhead Breakdown</h2><img src="overhead_stacked_top.png" alt="Overhead stacked bar chart" /></div>
             <div class="plot"><h2>Phase RSS Lines</h2><img src="phase_rss_lines_top.png" alt="Phase RSS line chart" /></div>
             <div class="plot"><h2>RSS Heatmap Slice</h2><img src="rss_heatmap_slice.png" alt="RSS heatmap slice" /></div>
+            <div class="plot"><h2>Capacity Frontier</h2><img src="capacity_frontier.png" alt="Capacity frontier chart" /></div>
+            <div class="plot"><h2>GC Reclamation Heatmap</h2><img src="gc_reclamation_heatmap.png" alt="GC reclamation heatmap" /></div>
+            <div class="plot"><h2>Residual Ratio Heatmap</h2><img src="residual_ratio_heatmap.png" alt="Residual ratio heatmap" /></div>
+            <div class="plot"><h2>Phase Waterfall</h2><img src="phase_waterfall_top.png" alt="Phase waterfall chart" /></div>
+            <div class="plot"><h2>Sweep Matrix Small Multiples</h2><img src="sweep_matrix_small_multiples.png" alt="Sweep matrix small multiples chart" /></div>
+            <div class="plot"><h2>Failure Overlay Map</h2><img src="failure_overlay_map.png" alt="Failure overlay map" /></div>
           </body>
           </html>
           HTML
@@ -157,6 +163,18 @@ jobs:
         run: |
           set -euo pipefail
           PLOT_BASE="${PAGE_URL%/}/memory/${GITHUB_RUN_ID}"
+          PLOTS=(
+            "rss_vs_qjs_scatter.png|RSS vs QuickJS malloc"
+            "overhead_stacked_top.png|Overhead stacked"
+            "phase_rss_lines_top.png|Phase RSS lines"
+            "rss_heatmap_slice.png|RSS heatmap slice"
+            "capacity_frontier.png|Capacity frontier"
+            "gc_reclamation_heatmap.png|GC reclamation heatmap"
+            "residual_ratio_heatmap.png|Residual ratio heatmap"
+            "phase_waterfall_top.png|Phase waterfall"
+            "sweep_matrix_small_multiples.png|Sweep matrix small multiples"
+            "failure_overlay_map.png|Failure overlay map"
+          )
           echo "### Memory Plot Preview" >> "$GITHUB_STEP_SUMMARY"
           echo "- [Published plot bundle](${PLOT_BASE}/index.html)" >> "$GITHUB_STEP_SUMMARY"
           echo "- [Download workflow artifact](${ARTIFACT_URL})" >> "$GITHUB_STEP_SUMMARY"
@@ -164,16 +182,22 @@ jobs:
           if [[ "$REPO_PRIVATE" == "true" ]]; then
             echo "Inline image rendering is disabled for private/internal repositories because GitHub proxies markdown images through camo without auth." >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "- [RSS vs QuickJS malloc PNG](${PLOT_BASE}/rss_vs_qjs_scatter.png)" >> "$GITHUB_STEP_SUMMARY"
-            echo "- [Overhead stacked PNG](${PLOT_BASE}/overhead_stacked_top.png)" >> "$GITHUB_STEP_SUMMARY"
-            echo "- [Phase RSS lines PNG](${PLOT_BASE}/phase_rss_lines_top.png)" >> "$GITHUB_STEP_SUMMARY"
-            echo "- [RSS heatmap slice PNG](${PLOT_BASE}/rss_heatmap_slice.png)" >> "$GITHUB_STEP_SUMMARY"
+            for plot in "${PLOTS[@]}"; do
+              IFS='|' read -r file label <<< "$plot"
+              echo "- [${label} PNG](${PLOT_BASE}/${file})" >> "$GITHUB_STEP_SUMMARY"
+            done
           else
             echo "![RSS vs QuickJS malloc](${PLOT_BASE}/rss_vs_qjs_scatter.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
             echo "![Overhead stacked chart](${PLOT_BASE}/overhead_stacked_top.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "![Phase RSS lines](${PLOT_BASE}/phase_rss_lines_top.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![GC reclamation heatmap](${PLOT_BASE}/gc_reclamation_heatmap.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "![RSS heatmap slice](${PLOT_BASE}/rss_heatmap_slice.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![Capacity frontier](${PLOT_BASE}/capacity_frontier.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "Additional plots:" >> "$GITHUB_STEP_SUMMARY"
+            for plot in "${PLOTS[@]}"; do
+              IFS='|' read -r file label <<< "$plot"
+              echo "- [${label} PNG](${PLOT_BASE}/${file})" >> "$GITHUB_STEP_SUMMARY"
+            done
           fi
