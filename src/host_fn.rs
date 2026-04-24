@@ -95,6 +95,21 @@ pub(crate) fn build_async_host_trampoline<'js>(
         .map_err(|e| QuickJSError::new_err(format!("Function::with_name failed: {}", e)))
 }
 
+/// Find the next unoccupied pending id, starting at `start` and wrapping
+/// on overflow. Returns None only if every u32 slot is occupied.
+fn find_available_pending_id<V>(occupied: &HashMap<u32, V>, start: u32) -> Option<u32> {
+    let mut pid = start;
+    loop {
+        if !occupied.contains_key(&pid) {
+            return Some(pid);
+        }
+        pid = pid.wrapping_add(1);
+        if pid == start {
+            return None;
+        }
+    }
+}
+
 /// Shared body for the async host trampoline. On entry:
 ///   1. Create a JS Promise + resolver pair via `ctx.promise()`.
 ///   2. If we're inside a sync eval, set the sync_hit flag and
@@ -140,8 +155,24 @@ fn dispatch_async_host_fn<'js>(
         return Ok(promise.into_value());
     }
 
-    // Allocate pending_id and stash the resolver pair.
-    let pid = next_id.get();
+    // Allocate pending_id and stash the resolver pair. Use collision-safe
+    // allocation so long-lived processes can't overwrite unresolved entries
+    // when the u32 counter wraps.
+    let pid = {
+        let pending_ref = pending.borrow();
+        match find_available_pending_id(&pending_ref, next_id.get()) {
+            Some(pid) => pid,
+            None => {
+                let exc = rquickjs::Exception::from_message(
+                    ctx.clone(),
+                    "too many pending async host calls",
+                )?;
+                let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
+                let _: Value<'_> = reject.call((exc.into_value(),))?;
+                return Ok(promise.into_value());
+            }
+        }
+    };
     next_id.set(pid.wrapping_add(1));
     let entry = PendingResolver {
         resolve: Persistent::save(ctx, resolve),
@@ -197,7 +228,7 @@ fn dispatch_async_host_fn<'js>(
             let _ = resolve; // drop to free
             let exc = rquickjs::Exception::from_message(
                 ctx.clone(),
-                "async host dispatcher rejected",
+                "Host function failed",
             )?;
             let _ = exc.as_object().set(PredefinedAtom::Name, "HostError");
             let _: Value<'_> = reject_fn.call((exc.into_value(),))?;
@@ -288,4 +319,32 @@ fn extract_jserror_fields(err: &PyErr, py: Python<'_>) -> Option<(String, String
     let name: String = tup.get_item(0).ok()?.extract().ok()?;
     let message: String = tup.get_item(1).ok()?.extract().ok()?;
     Some((name, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_available_pending_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn pending_id_allocator_returns_start_when_free() {
+        let occupied: HashMap<u32, ()> = HashMap::new();
+        assert_eq!(find_available_pending_id(&occupied, 42), Some(42));
+    }
+
+    #[test]
+    fn pending_id_allocator_skips_occupied_slots() {
+        let mut occupied: HashMap<u32, ()> = HashMap::new();
+        occupied.insert(7, ());
+        occupied.insert(8, ());
+        assert_eq!(find_available_pending_id(&occupied, 7), Some(9));
+    }
+
+    #[test]
+    fn pending_id_allocator_wraps_after_u32_max() {
+        let mut occupied: HashMap<u32, ()> = HashMap::new();
+        occupied.insert(u32::MAX, ());
+        occupied.insert(0, ());
+        assert_eq!(find_available_pending_id(&occupied, u32::MAX), Some(1));
+    }
 }

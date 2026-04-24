@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-import traceback
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any
@@ -25,6 +24,8 @@ from quickjs_rs.errors import (
 from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
+
+_HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
@@ -893,10 +894,10 @@ class Context:
             except BaseException as exc:
                 resolve_ok = False
                 self._last_host_exception = exc
-                err_message = str(exc)
-                err_stack = "".join(
-                    traceback.format_exception(type(exc), exc, exc.__traceback__)
-                )
+                # Preserve internals in Python (__cause__), but expose
+                # only a stable sanitized message over the JS boundary.
+                err_message = _HOST_ERROR_SANITIZED_MESSAGE
+                err_stack = None
 
             try:
                 if resolve_ok:
@@ -931,17 +932,15 @@ class Context:
         if fn is None:
             raise _engine.JSError(
                 "HostError",
-                f"no host function registered for fn_id={fn_id}",
+                _HOST_ERROR_SANITIZED_MESSAGE,
                 None,
             )
         try:
             return fn(*args)
         except BaseException as exc:
             self._last_host_exception = exc
-            # Match v0.2: message is str(exc), not the ExcType: str(exc)
-            # prefix. The Python type is preserved through __cause__ on
-            # the HostError the user actually catches.
-            stack = "".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
-            )
-            raise _engine.JSError("HostError", str(exc), stack) from None
+            # Preserve original exception in __cause__, while
+            # sanitizing the JS-visible HostError payload.
+            raise _engine.JSError(
+                "HostError", _HOST_ERROR_SANITIZED_MESSAGE, None
+            ) from None

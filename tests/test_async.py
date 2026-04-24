@@ -172,7 +172,7 @@ async def test_eval_async_propagates_js_rejection() -> None:
 
             with pytest.raises(HostError) as excinfo:
                 await ctx.eval_async("await fail()")
-            assert "from async host" in excinfo.value.message
+            assert excinfo.value.message == "Host function failed"
             assert isinstance(excinfo.value.__cause__, ValueError)
 
 
