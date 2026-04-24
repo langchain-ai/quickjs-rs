@@ -113,7 +113,7 @@ TypeScript syntax errors surface at `install()` time (oxidase parses during stri
 
 - Registered host callbacks are capability boundaries. Any callback exposed to JS should be treated as privileged if this runtime is being used to run untrusted code
 
-See [`.github/THREAT_MODEL.md`](.github/THREAT_MODEL.md) for more information on the threat boundaries and supply-chain poster of `quickjs-rs`
+See [`.github/THREAT_MODEL.md`](.github/THREAT_MODEL.md) for more information on the threat boundaries and supply-chain posture of `quickjs-rs`
 
 
 ## Development
