@@ -2,7 +2,10 @@
 
 Sandboxed JavaScript execution for Python.
 
-Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [QuickJS](https://bellard.org/quickjs/). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+
+> [!WARNING]
+> `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
 
 ## Install
 
@@ -101,6 +104,19 @@ rt.install(ModuleScope({
 ```
 
 TypeScript syntax errors surface at `install()` time (oxidase parses during stripping) rather than at eval.
+
+## Security
+
+- This library is not a host-memory isolation boundary. The JS engine (`quickjs-ng` via `rquickjs`/`rquickjs-sys`) runs in the same process/address space as Python.
+
+  - When running untrusted or semi-trusted JS, run execution in isolated worker processes/containers with restricted network/filesystem access and recycle workers on timeout/OOM/failure.
+
+- Registered host callbacks are capability boundaries. Any callback exposed to JS should be treated as privileged if this runtime is being used to run untrusted code
+
+- Do not share a single `Runtime` across different trust domains/tenants. Use one runtime per trust domain to avoid cross-context module contamination.
+
+See [`.github/THREAT_MODEL.md`](.github/THREAT_MODEL.md) for more information on the threat boundaries and supply-chain posture of `quickjs-rs`
+
 
 ## Development
 
