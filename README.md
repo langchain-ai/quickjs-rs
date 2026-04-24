@@ -115,7 +115,6 @@ TypeScript syntax errors surface at `install()` time (oxidase parses during stri
 
 - Do not share a single `Runtime` across different trust domains/tenants. Use one runtime per trust domain to avoid cross-context module contamination.
 
-- Supply-chain guardrails are enforced in CI via RustSec advisory scanning (`cargo audit`) and a Cargo.lock git-source allowlist check.
 See [`.github/THREAT_MODEL.md`](.github/THREAT_MODEL.md) for more information on the threat boundaries and supply-chain posture of `quickjs-rs`
 
 
