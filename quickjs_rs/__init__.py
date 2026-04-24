@@ -22,6 +22,7 @@ from quickjs_rs.errors import (
 from quickjs_rs.handle import Handle
 from quickjs_rs.modules import ModuleScope
 from quickjs_rs.runtime import Runtime
+from quickjs_rs.threading import ThreadWorker
 
 __version__ = "0.4.0.dev0"
 
@@ -34,6 +35,7 @@ __all__ = [
     "Context",
     "Handle",
     "ModuleScope",
+    "ThreadWorker",
     "Undefined",
     "UNDEFINED",
     "QuickJSError",
