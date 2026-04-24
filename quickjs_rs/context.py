@@ -24,7 +24,6 @@ from quickjs_rs.errors import (
 )
 from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
-from quickjs_rs.modules import ModuleScope
 from quickjs_rs.runtime import Runtime
 
 
@@ -176,7 +175,10 @@ class Context:
         inner: _engine.QjsHandle
         try:
             inner = self._engine_ctx.eval_handle(
-                code, module=module, strict=strict, filename=filename
+                code,
+                module=module,
+                strict=strict,
+                filename=filename,
             )
         except _engine.JSError as e:
             name, message, stack = e.args
@@ -239,7 +241,10 @@ class Context:
         result: Any
         try:
             result = self._engine_ctx.eval(
-                code, module=module, strict=strict, filename=filename
+                code,
+                module=module,
+                strict=strict,
+                filename=filename,
             )
         except _engine.JSError as e:
             name, message, stack = e.args
@@ -400,60 +405,6 @@ class Context:
             return self.register(js_name, f, is_async=is_async)
 
         return decorator
-
-    # ---- Module installation -----------------------------------------
-
-    def install(self, scope: ModuleScope) -> None:
-        """Register modules in the runtime's module store so that
-        ``module=True`` eval can ``import`` from them. See
-        spec/module-loading.md §5.3.
-
-        Walks ``scope`` recursively. str-valued entries become JS
-        source files; ModuleScope-valued entries become nested
-        scopes with bare-specifier names. The backing store is
-        per-runtime (rquickjs's ``set_loader`` is a runtime-level
-        API), so all contexts on the same runtime see the same
-        module set.
-
-        Additive: multiple calls insert into the same store. A name
-        that hasn't been imported yet can be overwritten; a name
-        that has already been imported is a silent no-op (QuickJS
-        caches module records per canonical path).
-
-        No-op on an empty scope — valid as a base for composition.
-        """
-        if self._closed:
-            raise QuickJSError("context is closed")
-        self._install_recursive(scope, scope_path="")
-
-    def _install_recursive(self, scope: ModuleScope, scope_path: str) -> None:
-        engine_rt = self._runtime._engine_rt
-        for key, value in scope.modules.items():
-            if isinstance(value, str):
-                canonical = key if scope_path == "" else f"{scope_path}/{key}"
-                try:
-                    engine_rt.add_module_source(
-                        scope_path, key, canonical, value
-                    )
-                except _engine.QuickJSError as e:
-                    # §5.5: TypeScript parse errors surface here
-                    # (install time), not at eval. Rebrand the raw
-                    # engine error as the public QuickJSError with
-                    # the same message + __cause__ for traceback.
-                    raise QuickJSError(str(e)) from e
-            elif isinstance(value, ModuleScope):
-                engine_rt.register_subscope(scope_path, key)
-                child_path = key if scope_path == "" else f"{scope_path}/{key}"
-                self._install_recursive(value, scope_path=child_path)
-            else:
-                # ModuleScope.__post_init__ already forbids other
-                # types — this branch is unreachable for a validated
-                # scope. Defensive guard for anyone constructing a
-                # ModuleScope via object.__setattr__ shenanigans.
-                raise TypeError(
-                    f"ModuleScope entry {key!r}: expected str | ModuleScope, "
-                    f"got {type(value).__name__}"
-                )
 
     # ---- Async eval --------------------------------------------------
 
@@ -638,7 +589,8 @@ class Context:
         try:
             if module:
                 inner = self._engine_ctx.eval_module_async(
-                    code, filename=filename
+                    code,
+                    filename=filename,
                 )
             else:
                 inner = self._engine_ctx.eval_handle(

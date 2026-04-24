@@ -74,7 +74,7 @@ class ModuleScope:
 
         # Pure-dependency container (only ModuleScope values, no str
         # entries, no index.js required). Common shape for the root
-        # scope passed to ctx.install.
+        # scope passed to rt.install.
         ModuleScope({
             "@agent/utils": ModuleScope({"index.js": "..."}),
             "@agent/fs": ModuleScope({"index.js": "..."}),
