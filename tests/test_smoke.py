@@ -104,7 +104,7 @@ def test_smoke_primitives() -> None:
                     "try { boom(); 'unreachable'; }"
                     " catch (e) { e.name + ': ' + e.message }"
                 )
-                == "HostError: from python"
+                == "HostError: Host function failed"
             )
 
             # JS-thrown TypeError (not a host error) surfaces as JSError
@@ -238,7 +238,7 @@ def test_acceptance() -> None:
                 catch (e) { e.name + ': ' + e.message }
             """
                 )
-                == "HostError: from python"
+                == "HostError: Host function failed"
             )
 
             # Memory limit: see the note in test_smoke_primitives for
@@ -693,5 +693,4 @@ async def test_module_acceptance() -> None:
                         """,
                         module=True,
                     )
-
 
