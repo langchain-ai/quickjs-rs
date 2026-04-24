@@ -240,7 +240,7 @@ flowchart TD
 | T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted (architectural) | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
 | T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (`oxidase` transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
 | T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Unmitigated | Likely | `src/host_fn.rs:dispatch_async_host_fn`, `src/context.rs:QjsContext::resolve_pending` |
-| T7 | DF2, DF3, DF5 | DC2 | Runtime-level shared module store can allow cross-tenant module poisoning if one runtime serves multiple trust domains. | TB1, TB4 | High | Unmitigated | Likely | `quickjs_rs/runtime.py:Runtime.install`, `quickjs_rs/runtime.py:Runtime._install_recursive`, `src/runtime.rs:QjsRuntime::ensure_module_store` |
+| T7 | DF2, DF3, DF5 | DC2 | Runtime-level shared module store can allow cross-tenant module poisoning if one runtime serves multiple trust domains (multi-tenant pooled-runtime pattern). | TB1, TB4 | High (conditional) | Accepted (documented constraint) | Likely | `quickjs_rs/runtime.py:Runtime.install`, `quickjs_rs/runtime.py:Runtime._install_recursive`, `src/runtime.rs:QjsRuntime::ensure_module_store` |
 
 ### Threat Details
 
@@ -281,7 +281,7 @@ flowchart TD
 - **Flow**: DF11.
 - **Description**: compromised dependency artifacts or malicious upstream commits affect transpile/runtime behavior.
 - **Preconditions**: dependency source compromised before/at build.
-- **Mitigations**: commit pinning for `oxidase` (non-floating branch); explicit dependency declarations.
+- **Mitigations**: commit pinning for `oxidase` (non-floating branch), explicit dependency declarations, RustSec advisory scanning in CI (`.github/workflows/dependency-security.yml`), and Cargo.lock git-source allowlist enforcement (`.github/scripts/check_cargo_lock_git_sources.py`).
 - **Residual risk**: high; pinning alone does not guarantee artifact integrity.
 
 #### T6: Async pending ID collision
@@ -295,14 +295,14 @@ flowchart TD
 #### T7: Shared runtime module poisoning
 
 - **Flow**: DF2/DF3/DF5.
-- **Description**: modules installed on one runtime become importable by any context on that runtime, enabling trust-domain cross-contamination if runtime reuse is multi-tenant.
+- **Description**: modules installed on one runtime become importable by any context on that runtime, enabling trust-domain cross-contamination in pooled-runtime multi-tenant designs.
 - **Preconditions**: runtime shared across tenants/users with differing trust.
-- **Mitigations**: none in library beyond caller creating separate runtimes.
-- **Residual risk**: high in pooled-runtime designs.
+- **Mitigations**: documented deployment constraint: use one `Runtime` per trust domain (no cross-tenant shared runtime).
+- **Residual risk**: high in pooled-runtime multi-tenant designs; not applicable when deployments enforce runtime-per-trust-domain.
 
 ### Threat Chain Analysis
 
-- **TC1 (T7 + T1)**: cross-tenant module poisoning seeds hostile helper code, then invokes privileged callback path, producing a critical lateral movement path across tenants.
+- **TC1 (T7 + T1)**: in pooled-runtime multi-tenant deployments, cross-tenant module poisoning can seed hostile helper code, then invoke privileged callback paths for lateral movement.
 - **TC2 (T3 + T1)**: callback abuse triggers targeted exceptions whose stack payload leaks additional sensitive data, amplifying exfiltration impact.
 
 ---
@@ -396,9 +396,9 @@ Evidence:
 | Native engine memory-safety risk | JS is executed by embedded native engine (quickjs-ng via `rquickjs-sys`) in-process. | Runtime limits and interrupt handler in project code (`src/runtime.rs:QjsRuntime::new`, `QjsRuntime::set_interrupt_handler`) | High |
 | Compromised upstream release (crates.io) | `pyo3`/`rquickjs`/`rquickjs-sys` come from registry artifacts. | `Cargo.lock` pinning by version + checksum | Medium |
 | Compromised quickjs-ng upstream import path | quickjs-ng source is vendored inside the `rquickjs-sys` supply path; an upstream compromise or malicious import/update can enter runtime engine code. | Version pinning of `rquickjs-sys` crate and lockfile review | Medium-High |
-| Compromised git dependency | `oxidase` comes from git commit; transitive `oxc*` sources are git-based in lockfile. | Explicit commit pin for `oxidase` | Medium-High |
-| Silent transitive drift on lock update | Lock refresh can pull new transitive versions/commits. | Commit review process (manual) | Medium |
-| Vulnerability lag | No in-repo evidence of an always-on Rust advisory gate in CI. | Dependabot/GitHub alerts can catch subset | Medium |
+| Compromised git dependency | `oxidase` comes from git commit; transitive `oxc*` sources are git-based in lockfile. | Explicit commit pin for `oxidase` plus git-source allowlist checks in CI (`.github/scripts/check_cargo_lock_git_sources.py`) | Medium |
+| Silent transitive drift on lock update | Lock refresh can pull new transitive versions/commits. | CI gate fails on unexpected git-source introductions outside allowlist | Medium |
+| Vulnerability lag | New advisories can emerge for shipped versions after lockfile updates. | Always-on RustSec scan in CI (`cargo audit`) plus Dependabot/GitHub alerts | Medium |
 
 ### Upstream Maintenance Status (Snapshot: 2026-04-23)
 
@@ -455,7 +455,7 @@ For untrusted or semi-trusted JS in internal deployments:
 2. Apply OS isolation controls (seccomp/AppArmor/SELinux, restricted egress, no metadata service access, read-only filesystem where feasible).
 3. Enforce callback capability policy (least privilege; no direct shell/network/fs callbacks unless explicitly required).
 4. Kill and recycle workers on timeout/OOM/suspicious failures.
-5. Add dependency policy gates in CI (`cargo audit`/OSV scan, lockfile diff review, dependency review policy for git sources).
+5. Keep dependency policy gates in CI current (`cargo audit`, Cargo.lock git-source allowlist checks, lockfile review discipline).
 6. Add immutable provenance checks for git dependencies (commit allowlist/signature verification where feasible).
 
 ### Acceptability and Policy Position
@@ -490,3 +490,5 @@ Policy phrasing:
 |------|--------|---------|
 | 2026-04-23 | generated by langster-threat-model | Initial deep internal threat model for quickjs-rs with data classification, trust boundaries, input source coverage, validated threats, and dismissed hypotheses. |
 | 2026-04-24 | updated by langster-threat-model | Clarified T1/T2/T4 acceptance rationale: callback bridge is by-design capability boundary, T2 is configuration-dependent with guardrail expectations, and T4 is accepted architectural native-engine risk with explicit compensating controls. |
+| 2026-04-24 | updated by langster-threat-model | Reframed T7 as a documented deployment constraint (runtime-per-trust-domain) with conditional severity for pooled multi-tenant runtime patterns. |
+| 2026-04-24 | updated by langster-threat-model | Added T5 compensating controls: CI RustSec advisory scanning and Cargo.lock git-source allowlist policy gate, and updated residual-risk language accordingly. |
