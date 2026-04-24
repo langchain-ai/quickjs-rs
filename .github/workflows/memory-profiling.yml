@@ -6,9 +6,6 @@ name: memory-profiling
 
 on:
   workflow_dispatch:
-  schedule:
-    # Weekly refresh for capacity-envelope artifacts.
-    - cron: "0 9 * * 1"
 
 permissions:
   contents: read
