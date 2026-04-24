@@ -234,10 +234,10 @@ flowchart TD
 
 | ID | Data Flow | Classification | Threat | Boundary | Severity | Status | Validation | Code Reference |
 |----|-----------|----------------|--------|----------|----------|--------|------------|----------------|
-| T1 | DF7, DF8 | DC1 | Untrusted JS can invoke privileged registered callbacks, enabling Python-side side effects (file/network/process access) equivalent to code execution through callback capabilities. | TB3 | Critical | Accepted | Verified | `quickjs_rs/context.py:Context.register`, `src/context.rs:QjsContext::register_host_function`, `src/host_fn.rs:call_host_fn` |
-| T2 | DF1, DF4 | DC2, DC4 | CPU/memory denial-of-service when callers disable/raise limits (`memory_limit=None`, permissive timeout) while executing attacker-influenced scripts. | TB1 | High | Accepted | Verified | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context._eval_and_drive` |
+| T1 | DF7, DF8 | DC1 | Untrusted JS can invoke privileged registered callbacks, enabling Python-side side effects (file/network/process access) equivalent to code execution through callback capabilities. | TB3 | Critical | Accepted (by design) | Verified | `quickjs_rs/context.py:Context.register`, `src/context.rs:QjsContext::register_host_function`, `src/host_fn.rs:call_host_fn` |
+| T2 | DF1, DF4 | DC2, DC4 | CPU/memory denial-of-service when callers disable/raise limits (`memory_limit=None`, permissive timeout) while executing attacker-influenced scripts. | TB1 | High | Accepted with guardrails | Verified | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context._eval_and_drive` |
 | T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Unmitigated | Verified | `quickjs_rs/context.py:Context._run_async_host_call`, `src/context.rs:QjsContext::reject_pending`, `src/host_fn.rs:throw_host_error` |
-| T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
+| T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted (architectural) | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
 | T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (`oxidase` transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
 | T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Unmitigated | Likely | `src/host_fn.rs:dispatch_async_host_fn`, `src/context.rs:QjsContext::resolve_pending` |
 | T7 | DF2, DF3, DF5 | DC2 | Runtime-level shared module store can allow cross-tenant module poisoning if one runtime serves multiple trust domains. | TB1, TB4 | High | Unmitigated | Likely | `quickjs_rs/runtime.py:Runtime.install`, `quickjs_rs/runtime.py:Runtime._install_recursive`, `src/runtime.rs:QjsRuntime::ensure_module_store` |
@@ -249,16 +249,16 @@ flowchart TD
 - **Flow**: DF7/DF8 (C8 -> C9 through C3).
 - **Description**: any callback registered into `globalThis` is callable by JS; if callback exposes sensitive capabilities, attacker-controlled JS can invoke them.
 - **Preconditions**: untrusted JS reaches `Context.eval*`; at least one privileged callback is registered.
-- **Mitigations**: explicit callback registration only (`quickjs_rs/context.py:Context.register`), no implicit host APIs.
-- **Residual risk**: high unless callers enforce callback allowlisting/capability separation externally.
+- **Mitigations**: explicit callback registration only (`quickjs_rs/context.py:Context.register`), no implicit host APIs; recommended least-privilege callback design and allowlisting.
+- **Residual risk**: high by design when callbacks intentionally bridge to host resources; acceptable only with explicit capability policy and isolation for untrusted code.
 
 #### T2: Resource exhaustion under permissive limits
 
 - **Flow**: DF1/DF4.
 - **Description**: attacker script loops/allocates aggressively; if limits are relaxed, execution can starve worker capacity.
-- **Preconditions**: caller overrides default limits/timeout or sets unbounded values.
-- **Mitigations**: default runtime caps (`quickjs_rs/runtime.py:Runtime.__init__`), interrupt deadline checks (`quickjs_rs/runtime.py:Runtime.__init__` interrupt closure, `quickjs_rs/context.py:Context.eval`).
-- **Residual risk**: medium-to-high for services that disable defaults.
+- **Preconditions**: caller deliberately overrides default limits/timeout or sets unbounded values (`memory_limit=None`, permissive timeout).
+- **Mitigations**: default runtime caps (`quickjs_rs/runtime.py:Runtime.__init__`), interrupt deadline checks (`quickjs_rs/runtime.py:Runtime.__init__` interrupt closure, `quickjs_rs/context.py:Context.eval`), and deployment guardrails that disallow unbounded settings for untrusted execution.
+- **Residual risk**: medium when guardrails are enforced; high if operators permit unbounded/relaxed limits.
 
 #### T3: Error-channel information disclosure
 
@@ -273,8 +273,14 @@ flowchart TD
 - **Flow**: DF1/DF4/DF11.
 - **Description**: attacker input is parsed/executed by embedded native quickjs-ng engine (through `rquickjs`); unknown upstream flaws may be exploitable.
 - **Preconditions**: attacker-controlled script reaches eval, and an exploitable upstream bug exists.
-- **Mitigations**: memory/stack/timeout controls reduce DoS blast radius but not memory-corruption class vulnerabilities.
-- **Residual risk**: critical dependency risk until continuously patched and monitored.
+- **Mitigations**: dependency pinning/review plus memory/stack/timeout controls reduce DoS blast radius; they do not remove memory-corruption class vulnerability potential.
+- **Residual risk**: critical architectural dependency risk; accepted with compensating controls (isolated execution mode for untrusted code, patch cadence, and dependency monitoring).
+
+### Acceptance Notes (T1, T2, T4)
+
+- **T1 is accepted by design**: callback bridging is a required feature for harness/resource access. The security requirement is capability minimization, not callback removal.
+- **T2 is configuration dependent**: the risk materially increases only when operators relax/disable limits; policy for untrusted execution should prohibit unbounded limits.
+- **T4 is an architectural/native embedding risk**: documenting it in the threat model is expected and correct; it does not imply a known active exploit in this repository.
 
 #### T5: Supply-chain compromise in dependency path
 
@@ -468,6 +474,7 @@ Current architecture is acceptable only under one of these modes:
 Policy phrasing:
 - Allowed claim: "Resource-constrained embedded JS runtime with timeout/memory guards."
 - Disallowed claim: "Memory sandbox" or "host-memory isolation from quickjs-ng runtime."
+- Threat-model convention: an "Accepted" threat indicates explicit risk ownership and compensating controls, not a defect omission.
 
 ### Sources
 
@@ -488,3 +495,4 @@ Policy phrasing:
 | Date | Author | Changes |
 |------|--------|---------|
 | 2026-04-23 | generated by langster-threat-model | Initial deep internal threat model for quickjs-rs with data classification, trust boundaries, input source coverage, validated threats, and dismissed hypotheses. |
+| 2026-04-24 | updated by langster-threat-model | Clarified T1/T2/T4 acceptance rationale: callback bridge is by-design capability boundary, T2 is configuration-dependent with guardrail expectations, and T4 is accepted architectural native-engine risk with explicit compensating controls. |
