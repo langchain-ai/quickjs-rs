@@ -15,6 +15,9 @@ on:
       - .github/scripts/check_cargo_lock_git_sources.py
       - .github/workflows/dependency-security.yml
 
+permissions:
+  contents: read
+
 jobs:
   git-source-policy:
     runs-on: ubuntu-latest
