@@ -88,8 +88,8 @@ class Context:
         self._globals: Globals | None = None
 
         # Host function registry. fn_id -> Python callable.
-        # Monotonically-increasing ints, never reused (cheap and
-        # matches previous implementation). The dispatcher looks up fn_id here.
+        # Monotonically-increasing ints, never reused. The
+        # dispatcher looks up fn_id here.
         self._host_registry: dict[int, Callable[..., Any]] = {}
         self._next_fn_id: int = 1
         # Host-exception side channel: when a host fn raises,
@@ -220,7 +220,7 @@ class Context:
         # Clear the side channel at each sync-eval entry so a
         # swallowed raise from an earlier eval can't attach itself as
         # __cause__ on an unrelated later HostError. Preserves the
-        # previous implementation tripwire test_swallowed_host_raise_does_not_leak_cause.
+        # implementation tripwire test_swallowed_host_raise_does_not_leak_cause.
         self._last_host_exception = None
         # Clear any stale sync-eval-hit-async-call flag left
         # from a prior eval that itself raised before consuming it.
@@ -400,18 +400,12 @@ class Context:
           JS_EVAL_FLAG_ASYNC. Top-level ``await`` works; the return
           value is the last expression of the script (wrapped as
           ``{value, done}`` under the hood and unwrapped here).
-        * ``module=True`` (previous implementation): real ES-module eval. ``import`` /
+        * ``module=True``: real ES-module eval. ``import`` /
           ``export`` work. Module-scoped bindings (``let``,
           ``const``, ``var``, functions) do NOT leak to global.
           Returns ``None`` — ES modules complete with ``undefined``.
           To surface a value, set ``globalThis.result = ...`` in the
           module and read it with a sync ``ctx.eval("result")``.
-
-        Breaking change from previous implementation: the default used to be
-        ``module=True``. Under previous implementation, ``module=True`` means real ES
-        modules with different scoping — silently flipping the
-        behavior of existing code would be worse than requiring the
-        explicit opt-in.
 
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
@@ -463,9 +457,6 @@ class Context:
         modules complete with undefined). The module's exports are
         not directly exposed — to access them, use bare imports
         from another module or read globals the module set.
-
-        Breaking change from previous implementation: the default used to be
-        ``module=True``. See ``eval_async`` for the rationale.
         """
         settled_handle = await self._eval_and_drive(
             code,
@@ -517,8 +508,8 @@ class Context:
             # Pre-check: the interrupt handler only fires during
             # bytecode execution; a near-instant eval that completes
             # before the next interrupt check would silently succeed
-            # past an expired budget. Raising up front matches previous implementation
-            # and the tripwire test_sync_eval_does_not_decrement_
+            # past an expired budget. Raising up front matches
+            # the tripwire test_sync_eval_does_not_decrement_
             # cumulative_budget's companion on the async side.
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -552,13 +543,12 @@ class Context:
         children of the group.
 
         Two eval paths:
-        * ``module=True`` (previous implementation): ``eval_module_async`` uses
+        * ``module=True``: ``eval_module_async`` uses
           ``Module::evaluate`` — imports + exports work, module
           scoping applies, result is a Promise that resolves to
           undefined.
         * ``module=False``: script-mode eval with
-          JS_EVAL_FLAG_ASYNC (``promise=True``) — the previous implementation TLA
-          path. Result is a Promise that resolves to the
+          JS_EVAL_FLAG_ASYNC (``promise=True``). Result is a Promise that resolves to the
           ``{value, done}`` envelope.
         """
         try:
@@ -597,8 +587,7 @@ class Context:
         The TaskGroup must wrap the initial eval so host-call tasks
         scheduled *during* the initial synchronous phase become
         children of the group. Otherwise cancellation doesn't
-        cascade to them and they leak — same seam as previous implementation's fix
-        that caught the cancel-leak bug.
+        cascade to them and they leak.
 
         Cancellation flow:
 
@@ -772,8 +761,7 @@ class Context:
     def _reject_pending_with_cancellation(self) -> None:
         """Cancellation step 2: reject every in-flight async
         host-call Promise with a HostCancellationError record.
-        Matches the previous implementation pattern — the error's JS-side name is the
-        literal "HostCancellationError"."""
+        """
         for pid in list(self._pending_tasks):
             try:
                 self._engine_ctx.reject_pending(

@@ -13,8 +13,7 @@
 //! `with_active_ctx` — the slot is set on entry and cleared on exit
 //! via an RAII guard, so no `Ctx` handed out from it ever outlives
 //! its real `'js` scope. Removing or refactoring this machinery
-//! will break `test_reentrant_eval_from_host_function` — the previous implementation
-//! tripwire that pinned it.
+//! will break `test_reentrant_eval_from_host_function`.
 //!
 //! Requires `panic = "unwind"` (enforced in Cargo.toml).
 //! PyO3 wraps #[pymethods] calls in catch_unwind. Under panic=unwind, a

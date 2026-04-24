@@ -91,7 +91,7 @@ variables in an IIFE:
 **Reading the results table.** Use `Run time / Iters` for the per-call
 time. pytest-codspeed 4.4.0 appears to double-divide "Time (best)" by
 `iter_per_round`, so that column is off by a factor of ~`iter_per_round`
-for fast benchmarks. Flagged as a previous implementation investigation item.
+for fast benchmarks.
 
 ## CI
 

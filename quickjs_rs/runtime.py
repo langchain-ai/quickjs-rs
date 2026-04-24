@@ -19,9 +19,7 @@ class Runtime:
     Per-eval deadlines are written into ``self._deadline`` by the
     ``Context`` layer before each eval and cleared after; the handler
     reads that slot on every QuickJS interrupt poll and returns True
-    once the deadline has elapsed. This is the same design as previous implementation's
-    bridge — single shared deadline per runtime — now without the
-    wasmtime epoch backup.
+    once the deadline has elapsed.
     """
 
     def __init__(

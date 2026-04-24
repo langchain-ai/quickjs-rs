@@ -1614,12 +1614,11 @@ async def test_dynamic_import_basic() -> None:
 async def test_dynamic_import_from_script_mode() -> None:
     """Dynamic import from ``module=False`` eval. Script-mode eval
     doesn't declare a "current module" — referrer is ``<eval>`` or
-    similar. previous implementation's resolver treats ``<eval>``'s containing scope
-    as the root, so bare-specifier dynamic imports from script
+    similar. Bare-specifier dynamic imports from script
     mode should resolve the same as from module mode.
 
     The body uses top-level ``await`` directly (not wrapped in an
-    async IIFE) because previous implementation's script-mode eval with
+    async IIFE) because script-mode eval with
     JS_EVAL_FLAG_ASYNC drives the SCRIPT's top-level promise to
     completion — an async IIFE at the top level returns a Promise
     value that the script-mode envelope considers "done," leaving

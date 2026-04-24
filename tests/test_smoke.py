@@ -113,8 +113,6 @@ def test_smoke_primitives() -> None:
             # 8 MB reproduces OOM cleanly everywhere we've tested. The
             # behavioral guarantee (runaway allocation → MemoryLimitError)
             # is identical; only the smoke-test's memory budget changes.
-            # The previous implementation tripwire test_memory_limit_trips_with_runaway_
-            # allocation lives in test_limits.py at the same 8 MB.
             with Runtime(memory_limit=8 * 1024 * 1024) as mem_rt:
                 with mem_rt.new_context() as mem_ctx:
                     with pytest.raises(MemoryLimitError):
@@ -374,8 +372,7 @@ async def test_async_acceptance() -> None:
                     # valid implementation of cancellation.
                     pass
 
-            # DeadlockError: pending promise with no async work
-            # previous implementation: module=False enables JS_EVAL_FLAG_ASYNC, so
+            # DeadlockError: module=False enables JS_EVAL_FLAG_ASYNC, so
             # returning a pending promise as the body's last
             # expression gets wrapped as {value: <pending>, done:
             # false} — wrapper is fulfilled, driving loop returns.

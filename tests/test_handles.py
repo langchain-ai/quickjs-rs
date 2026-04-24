@@ -210,7 +210,7 @@ def test_to_python_allow_opaque_arrays_recurse() -> None:
 def test_to_python_allow_opaque_cycle_raises_marshalerror() -> None:
     """Cycles raise MarshalError even under allow_opaque — documented
     behavior. Detection is indirect (via depth cap) rather than via a
-    same-value check, which is fine for previous implementation since the depth cap of 128
+    same-value check, which is fine since the depth cap of 128
     fails fast long before the walk does anything harmful."""
     from quickjs_rs import MarshalError
 

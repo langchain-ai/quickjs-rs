@@ -29,8 +29,7 @@ use rquickjs::{
 use crate::errors::{InvalidHandleError, MarshalError, QuickJSError};
 use crate::handle::QjsHandle;
 
-/// invariant: depth cap for recursive marshaling. Matches previous implementation's
-/// bridge (cycle detection via depth limit, no ref tracking). Cycles
+/// invariant: depth cap for recursive marshaling. Cycles
 /// go around the guard only by being genuinely deeper than 128 — at
 /// which point the MarshalError is the right signal regardless.
 pub(crate) const MAX_MARSHAL_DEPTH: u32 = 128;
@@ -352,10 +351,9 @@ pub(crate) fn py_to_js_value<'js>(
 }
 
 /// Map an rquickjs Type to the string the Python API exposes via
-/// Handle.type_of. Matches the previous implementation test cases exactly — "boolean"
-/// not "bool", "number" for both Int/Float, "bigint" for big_int,
-/// "object" for plain (Array/Function/Promise etc get their own
-/// strings where meaningful).
+/// Handle.type_of. "boolean" not "bool", "number" for both Int/Float,
+/// "bigint" for big_int, "object" for plain (Array/Function/Promise
+/// etc get their own strings where meaningful).
 pub(crate) fn type_name_of(t: Type) -> String {
     match t {
         Type::Null => "null",
