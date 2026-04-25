@@ -116,12 +116,10 @@ jobs:
             <div class="plot"><h2>Overhead Breakdown</h2><img src="overhead_stacked_top.png" alt="Overhead stacked bar chart" /></div>
             <div class="plot"><h2>Phase RSS Lines</h2><img src="phase_rss_lines_top.png" alt="Phase RSS line chart" /></div>
             <div class="plot"><h2>RSS Heatmap Slice</h2><img src="rss_heatmap_slice.png" alt="RSS heatmap slice" /></div>
-            <div class="plot"><h2>Capacity Frontier</h2><img src="capacity_frontier.png" alt="Capacity frontier chart" /></div>
-            <div class="plot"><h2>GC Reclamation Heatmap</h2><img src="gc_reclamation_heatmap.png" alt="GC reclamation heatmap" /></div>
-            <div class="plot"><h2>Residual Ratio Heatmap</h2><img src="residual_ratio_heatmap.png" alt="Residual ratio heatmap" /></div>
-            <div class="plot"><h2>Phase Waterfall</h2><img src="phase_waterfall_top.png" alt="Phase waterfall chart" /></div>
-            <div class="plot"><h2>Sweep Matrix Small Multiples</h2><img src="sweep_matrix_small_multiples.png" alt="Sweep matrix small multiples chart" /></div>
-            <div class="plot"><h2>Failure Overlay Map</h2><img src="failure_overlay_map.png" alt="Failure overlay map" /></div>
+            <div class="plot"><h2>Hypothesis: Total Contexts Linearity</h2><img src="hypothesis_total_contexts_linearity.png" alt="Total contexts linearity chart" /></div>
+            <div class="plot"><h2>Hypothesis: Runtime Effect</h2><img src="hypothesis_runtime_lines.png" alt="Runtime effect linearity chart" /></div>
+            <div class="plot"><h2>Hypothesis: Context Effect</h2><img src="hypothesis_context_lines.png" alt="Context effect linearity chart" /></div>
+            <div class="plot"><h2>Hypothesis: Observed vs Predicted</h2><img src="hypothesis_observed_vs_predicted.png" alt="Observed vs predicted linear model chart" /></div>
           </body>
           </html>
           HTML
@@ -168,12 +166,10 @@ jobs:
             "overhead_stacked_top.png|Overhead stacked"
             "phase_rss_lines_top.png|Phase RSS lines"
             "rss_heatmap_slice.png|RSS heatmap slice"
-            "capacity_frontier.png|Capacity frontier"
-            "gc_reclamation_heatmap.png|GC reclamation heatmap"
-            "residual_ratio_heatmap.png|Residual ratio heatmap"
-            "phase_waterfall_top.png|Phase waterfall"
-            "sweep_matrix_small_multiples.png|Sweep matrix small multiples"
-            "failure_overlay_map.png|Failure overlay map"
+            "hypothesis_total_contexts_linearity.png|Hypothesis total-context linearity"
+            "hypothesis_runtime_lines.png|Hypothesis runtime effect"
+            "hypothesis_context_lines.png|Hypothesis context effect"
+            "hypothesis_observed_vs_predicted.png|Hypothesis observed vs predicted"
           )
           echo "### Memory Plot Preview" >> "$GITHUB_STEP_SUMMARY"
           echo "- [Published plot bundle](${PLOT_BASE}/index.html)" >> "$GITHUB_STEP_SUMMARY"
@@ -187,13 +183,13 @@ jobs:
               echo "- [${label} PNG](${PLOT_BASE}/${file})" >> "$GITHUB_STEP_SUMMARY"
             done
           else
-            echo "![RSS vs QuickJS malloc](${PLOT_BASE}/rss_vs_qjs_scatter.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![Hypothesis total-context linearity](${PLOT_BASE}/hypothesis_total_contexts_linearity.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "![Overhead stacked chart](${PLOT_BASE}/overhead_stacked_top.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![Hypothesis runtime effect](${PLOT_BASE}/hypothesis_runtime_lines.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "![GC reclamation heatmap](${PLOT_BASE}/gc_reclamation_heatmap.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![Hypothesis context effect](${PLOT_BASE}/hypothesis_context_lines.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
-            echo "![Capacity frontier](${PLOT_BASE}/capacity_frontier.png)" >> "$GITHUB_STEP_SUMMARY"
+            echo "![Hypothesis observed vs predicted](${PLOT_BASE}/hypothesis_observed_vs_predicted.png)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
             echo "Additional plots:" >> "$GITHUB_STEP_SUMMARY"
             for plot in "${PLOTS[@]}"; do

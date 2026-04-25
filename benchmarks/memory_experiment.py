@@ -363,6 +363,24 @@ def _annotate_heatmap(ax: Any, mat: list[list[float]], *, suffix: str = "") -> N
             ax.text(j, i, text, ha="center", va="center", color="white", fontsize=8)
 
 
+def _fit_line(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
+    if len(xs) < 2:
+        intercept = ys[0] if ys else 0.0
+        return 0.0, intercept, 0.0
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    denom = sum((x - mx) * (x - mx) for x in xs)
+    if denom <= 0.0:
+        return 0.0, my, 0.0
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom
+    intercept = my - slope * mx
+    preds = [intercept + slope * x for x in xs]
+    ss_res = sum((y - p) * (y - p) for y, p in zip(ys, preds, strict=True))
+    ss_tot = sum((y - my) * (y - my) for y in ys)
+    r2 = 0.0 if ss_tot <= 0.0 else 1.0 - (ss_res / ss_tot)
+    return slope, intercept, r2
+
+
 def _plot_scatter(rows: list[ExperimentResult], out_path: Path, plt: Any) -> None:
     valid = [r for r in rows if not r.error]
     if not valid:
@@ -504,262 +522,63 @@ def _plot_heatmap(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str
     )
 
 
-def _plot_capacity_frontier(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+def _plot_hypothesis_total_contexts_linearity(
+    rows: list[ExperimentResult],
+    out_path: Path,
+    plt: Any,
+) -> str:
     valid = [r for r in rows if not r.error]
     if not valid:
-        _plot_note(out_path, plt, "Capacity frontier", "No valid rows available.")
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: total contexts vs memory pressure",
+            "No valid rows available.",
+        )
         return "no valid rows"
-    process_cap_mb = _mb(valid[0].process_cap_bytes)
-    contexts = sorted({r.contexts_per_runtime for r in valid})
     combos = sorted({(r.memory_limit_mb, r.payload_mb_per_context) for r in valid})
-    fig, ax = plt.subplots(figsize=(9, 5))
-    total_points = 0
+    fig, ax = plt.subplots(figsize=(9, 6))
     for memory_limit_mb, payload_mb in combos:
-        y: list[float] = []
-        for ctx in contexts:
-            safe = [
-                r.runtimes
-                for r in valid
-                if r.contexts_per_runtime == ctx
-                and r.memory_limit_mb == memory_limit_mb
-                and r.payload_mb_per_context == payload_mb
-                and not r.over_cap_after_payload
-            ]
-            if safe:
-                y.append(float(max(safe)))
-                total_points += 1
-            else:
-                y.append(float("nan"))
-        ax.plot(
-            contexts,
-            y,
-            marker="o",
-            label=f"limit={memory_limit_mb}MB payload={payload_mb}MB/ctx",
-        )
-    ax.set_title(f"Capacity frontier under process cap ({process_cap_mb:.0f} MB)")
-    ax.set_xlabel("contexts_per_runtime")
-    ax.set_ylabel("max safe runtimes")
-    ax.grid(alpha=0.25, linestyle="--")
-    ax.legend(fontsize=8, ncol=2, loc="upper left")
-    _save_plot(fig, out_path)
-    plt.close(fig)
-    return f"{len(combos)} lines, {total_points} safe points"
-
-
-def _plot_gc_reclamation_heatmap(
-    rows: list[ExperimentResult],
-    out_path: Path,
-    plt: Any,
-) -> str:
-    valid = [r for r in rows if not r.error]
-    params = _select_slice_params(rows)
-    if not valid or params is None:
-        _plot_note(out_path, plt, "GC reclamation heatmap", "No valid rows available.")
-        return "no valid rows"
-    target_limit, target_payload = params
-    subset = [
-        r
-        for r in valid
-        if r.memory_limit_mb == target_limit
-        and r.payload_mb_per_context == target_payload
-    ]
-    if not subset:
-        _plot_note(
-            out_path,
-            plt,
-            "GC reclamation heatmap",
-            "No rows in selected memory_limit/payload slice.",
-        )
-        return "subset empty"
-    runtimes, contexts, mat = _heatmap_grid(
-        subset,
-        value_fn=lambda hit: _mb(max(hit.after_payload_rss_bytes - hit.after_gc_rss_bytes, 0)),
-    )
-    fig, ax = plt.subplots(figsize=(8, 5))
-    im = ax.imshow(mat, cmap="Greens", aspect="auto")
-    ax.set_xticks(range(len(runtimes)))
-    ax.set_xticklabels([str(x) for x in runtimes])
-    ax.set_yticks(range(len(contexts)))
-    ax.set_yticklabels([str(x) for x in contexts])
-    ax.set_xlabel("runtimes")
-    ax.set_ylabel("contexts_per_runtime")
-    ax.set_title(
-        "GC RSS reclamation heatmap (MB)\n"
-        f"memory_limit={target_limit}MB payload={target_payload}MB/context"
-    )
-    _annotate_heatmap(ax, mat)
-    fig.colorbar(im, ax=ax, label="after_payload_rss - after_gc_rss (MB)")
-    _save_plot(fig, out_path)
-    plt.close(fig)
-    return (
-        f"memory_limit={target_limit}MB,payload={target_payload}MB/context,"
-        f"grid={len(contexts)}x{len(runtimes)}"
-    )
-
-
-def _plot_residual_ratio_heatmap(
-    rows: list[ExperimentResult],
-    out_path: Path,
-    plt: Any,
-) -> str:
-    valid = [r for r in rows if not r.error]
-    params = _select_slice_params(rows)
-    if not valid or params is None:
-        _plot_note(out_path, plt, "Residual ratio heatmap", "No valid rows available.")
-        return "no valid rows"
-    target_limit, target_payload = params
-    subset = [
-        r
-        for r in valid
-        if r.memory_limit_mb == target_limit
-        and r.payload_mb_per_context == target_payload
-    ]
-    if not subset:
-        _plot_note(
-            out_path,
-            plt,
-            "Residual ratio heatmap",
-            "No rows in selected memory_limit/payload slice.",
-        )
-        return "subset empty"
-    runtimes, contexts, mat = _heatmap_grid(
-        subset,
-        value_fn=lambda hit: (
-            max(hit.after_payload_rss_bytes - hit.quickjs_malloc_size_after_payload, 0)
-            / max(hit.after_payload_rss_bytes, 1)
-            * 100.0
-        ),
-    )
-    fig, ax = plt.subplots(figsize=(8, 5))
-    im = ax.imshow(mat, cmap="cividis", aspect="auto", vmin=0, vmax=100)
-    ax.set_xticks(range(len(runtimes)))
-    ax.set_xticklabels([str(x) for x in runtimes])
-    ax.set_yticks(range(len(contexts)))
-    ax.set_yticklabels([str(x) for x in contexts])
-    ax.set_xlabel("runtimes")
-    ax.set_ylabel("contexts_per_runtime")
-    ax.set_title(
-        "Residual ratio heatmap (% of RSS)\n"
-        f"memory_limit={target_limit}MB payload={target_payload}MB/context"
-    )
-    _annotate_heatmap(ax, mat, suffix="%")
-    fig.colorbar(im, ax=ax, label="(rss - quickjs_malloc) / rss (%)")
-    _save_plot(fig, out_path)
-    plt.close(fig)
-    return (
-        f"memory_limit={target_limit}MB,payload={target_payload}MB/context,"
-        f"grid={len(contexts)}x{len(runtimes)}"
-    )
-
-
-def _plot_phase_waterfall_top(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
-    valid = [r for r in rows if not r.error]
-    if not valid:
-        _plot_note(out_path, plt, "Phase waterfall", "No valid rows available.")
-        return "no valid rows"
-    top = sorted(valid, key=lambda r: r.after_payload_rss_bytes, reverse=True)[:4]
-    n = len(top)
-    ncols = 2 if n > 1 else 1
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6 * ncols, 4 * nrows))
-    axes_list = axes.flatten() if hasattr(axes, "flatten") else [axes]
-    phase_labels = ["baseline", "spawn", "payload", "gc", "close"]
-    for idx, row in enumerate(top):
-        ax = axes_list[idx]
-        points = [
-            _mb(row.baseline_rss_bytes),
-            _mb(row.after_spawn_rss_bytes),
-            _mb(row.after_payload_rss_bytes),
-            _mb(row.after_gc_rss_bytes),
-            _mb(row.after_close_rss_bytes),
-        ]
-        x = list(range(len(points)))
-        ax.plot(x, points, marker="o", linewidth=1.0, color="#1f77b4")
-        for pos in range(1, len(points)):
-            start = points[pos - 1]
-            end = points[pos]
-            delta = end - start
-            bottom = min(start, end)
-            height = abs(delta)
-            color = "#d62728" if delta >= 0 else "#2ca02c"
-            ax.bar(pos, height, bottom=bottom, width=0.55, color=color, alpha=0.65)
-        cap_mb = _mb(row.process_cap_bytes)
-        ax.axhline(cap_mb, color="black", linestyle="--", linewidth=0.9, alpha=0.6)
-        ax.set_xticks(x)
-        ax.set_xticklabels(phase_labels, rotation=20, ha="right")
-        ax.set_ylabel("RSS (MB)")
-        ax.set_title(
-            f"r={row.runtimes} c={row.contexts_per_runtime} "
-            f"m={row.memory_limit_mb} p={row.payload_mb_per_context}"
-        )
-        ax.grid(axis="y", alpha=0.2, linestyle="--")
-    for idx in range(n, len(axes_list)):
-        axes_list[idx].axis("off")
-    fig.suptitle("Phase waterfall for highest-pressure configurations")
-    _save_plot(fig, out_path)
-    plt.close(fig)
-    return f"{n} configs"
-
-
-def _plot_sweep_matrix_small_multiples(
-    rows: list[ExperimentResult],
-    out_path: Path,
-    plt: Any,
-) -> str:
-    valid = [r for r in rows if not r.error]
-    if not valid:
-        _plot_note(out_path, plt, "Sweep matrix", "No valid rows available.")
-        return "no valid rows"
-    combos = sorted({(r.memory_limit_mb, r.payload_mb_per_context) for r in valid})
-    contexts = sorted({r.contexts_per_runtime for r in valid})
-    n_panels = len(combos)
-    ncols = min(3, n_panels)
-    nrows = math.ceil(n_panels / ncols)
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5 * ncols, 3.8 * nrows))
-    axes_list = axes.flatten() if hasattr(axes, "flatten") else [axes]
-    cap_mb = _mb(valid[0].process_cap_bytes)
-    for idx, (memory_limit_mb, payload_mb) in enumerate(combos):
-        ax = axes_list[idx]
         subset = [
             r
             for r in valid
             if r.memory_limit_mb == memory_limit_mb
             and r.payload_mb_per_context == payload_mb
         ]
-        for ctx in contexts:
-            by_runtime = sorted(
-                [r for r in subset if r.contexts_per_runtime == ctx],
-                key=lambda r: r.runtimes,
-            )
-            if not by_runtime:
-                continue
-            x = [r.runtimes for r in by_runtime]
-            y = [_mb(r.after_payload_rss_bytes) for r in by_runtime]
-            ax.plot(x, y, marker="o", linewidth=1.2, label=f"c={ctx}")
-        ax.axhline(cap_mb, linestyle="--", linewidth=0.9, color="black", alpha=0.6)
-        ax.set_title(f"m={memory_limit_mb}MB p={payload_mb}MB/ctx")
-        ax.set_xlabel("runtimes")
-        ax.set_ylabel("after_payload_rss (MB)")
-        ax.grid(alpha=0.2, linestyle="--")
-        if idx == 0:
-            ax.legend(fontsize=8, ncol=2, loc="upper left")
-    for idx in range(n_panels, len(axes_list)):
-        axes_list[idx].axis("off")
-    fig.suptitle("Sweep matrix: RSS vs runtimes (small multiples)")
+        xs = [float(r.total_contexts) for r in subset]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in subset]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.scatter(xs, ys, alpha=0.55, s=32)
+        x_min = min(xs)
+        x_max = max(xs)
+        ax.plot(
+            [x_min, x_max],
+            [intercept + slope * x_min, intercept + slope * x_max],
+            linewidth=1.2,
+            label=f"m={memory_limit_mb} p={payload_mb} (R2={r2:.2f})",
+        )
+    ax.set_xlabel("total_contexts (runtimes * contexts_per_runtime)")
+    ax.set_ylabel("memory pressure (after_payload_rss - baseline_rss, MB)")
+    ax.set_title("Linearity check: memory pressure vs total contexts")
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
     _save_plot(fig, out_path)
     plt.close(fig)
-    return f"{n_panels} panels"
+    return f"{len(combos)} slices"
 
 
-def _plot_failure_overlay_map(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+def _plot_hypothesis_runtime_lines(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+    valid = [r for r in rows if not r.error]
     params = _select_slice_params(rows)
-    if params is None:
-        _plot_note(out_path, plt, "Failure overlay", "No valid rows available.")
+    if not valid or params is None:
+        _plot_note(out_path, plt, "Hypothesis: runtime effect", "No valid rows available.")
         return "no valid rows"
     target_limit, target_payload = params
     subset = [
         r
-        for r in rows
+        for r in valid
         if r.memory_limit_mb == target_limit
         and r.payload_mb_per_context == target_payload
     ]
@@ -767,50 +586,181 @@ def _plot_failure_overlay_map(rows: list[ExperimentResult], out_path: Path, plt:
         _plot_note(
             out_path,
             plt,
-            "Failure overlay",
+            "Hypothesis: runtime effect",
             "No rows in selected memory_limit/payload slice.",
         )
         return "subset empty"
-    successes = [r for r in subset if not r.error]
-    failures = [r for r in subset if r.error]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    if successes:
-        sc = ax.scatter(
-            [r.runtimes for r in successes],
-            [r.contexts_per_runtime for r in successes],
-            c=[_mb(r.after_payload_rss_bytes) for r in successes],
-            cmap="magma",
-            s=170,
-            marker="o",
-            edgecolors="black",
-            linewidths=0.4,
-            label="success",
+    contexts = sorted({r.contexts_per_runtime for r in subset})
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for ctx in contexts:
+        series = sorted(
+            [r for r in subset if r.contexts_per_runtime == ctx],
+            key=lambda r: r.runtimes,
         )
-        fig.colorbar(sc, ax=ax, label="after_payload_rss (MB)")
-    if failures:
-        ax.scatter(
-            [r.runtimes for r in failures],
-            [r.contexts_per_runtime for r in failures],
-            s=180,
-            marker="x",
-            color="#d62728",
-            linewidths=2.0,
-            label="failure",
+        xs = [float(r.runtimes) for r in series]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in series]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.plot(xs, ys, marker="o", linewidth=1.4, label=f"ctx={ctx} (R2={r2:.2f})")
+        ax.plot(
+            [min(xs), max(xs)],
+            [intercept + slope * min(xs), intercept + slope * max(xs)],
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.7,
         )
-    ax.set_xticks(sorted({r.runtimes for r in subset}))
-    ax.set_yticks(sorted({r.contexts_per_runtime for r in subset}))
     ax.set_xlabel("runtimes")
-    ax.set_ylabel("contexts_per_runtime")
+    ax.set_ylabel("memory pressure (MB)")
     ax.set_title(
-        "Failure overlay map\n"
+        "Linearity check: runtime effect at fixed context counts\n"
         f"memory_limit={target_limit}MB payload={target_payload}MB/context"
     )
     ax.grid(alpha=0.2, linestyle="--")
-    if successes or failures:
-        ax.legend(loc="upper left")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
     _save_plot(fig, out_path)
     plt.close(fig)
-    return f"{len(failures)} failures in slice"
+    return f"slice memory_limit={target_limit}, payload={target_payload}"
+
+
+def _plot_hypothesis_context_lines(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+    valid = [r for r in rows if not r.error]
+    params = _select_slice_params(rows)
+    if not valid or params is None:
+        _plot_note(out_path, plt, "Hypothesis: context effect", "No valid rows available.")
+        return "no valid rows"
+    target_limit, target_payload = params
+    subset = [
+        r
+        for r in valid
+        if r.memory_limit_mb == target_limit
+        and r.payload_mb_per_context == target_payload
+    ]
+    if not subset:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: context effect",
+            "No rows in selected memory_limit/payload slice.",
+        )
+        return "subset empty"
+    runtimes = sorted({r.runtimes for r in subset})
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for runtime in runtimes:
+        series = sorted(
+            [r for r in subset if r.runtimes == runtime],
+            key=lambda r: r.contexts_per_runtime,
+        )
+        xs = [float(r.contexts_per_runtime) for r in series]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in series]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.plot(xs, ys, marker="o", linewidth=1.4, label=f"r={runtime} (R2={r2:.2f})")
+        ax.plot(
+            [min(xs), max(xs)],
+            [intercept + slope * min(xs), intercept + slope * max(xs)],
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.7,
+        )
+    ax.set_xlabel("contexts_per_runtime")
+    ax.set_ylabel("memory pressure (MB)")
+    ax.set_title(
+        "Linearity check: context effect at fixed runtime counts\n"
+        f"memory_limit={target_limit}MB payload={target_payload}MB/context"
+    )
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"slice memory_limit={target_limit}, payload={target_payload}"
+
+
+def _plot_hypothesis_observed_vs_predicted(
+    rows: list[ExperimentResult],
+    out_path: Path,
+    plt: Any,
+) -> str:
+    valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: observed vs linear model",
+            "No valid rows available.",
+        )
+        return "no valid rows"
+    try:
+        import numpy as np
+    except ImportError:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: observed vs linear model",
+            "NumPy unavailable; cannot fit linear model.",
+        )
+        return "numpy unavailable"
+
+    x = np.array(
+        [
+            [
+                1.0,
+                float(r.runtimes),
+                float(r.contexts_per_runtime),
+                float(r.total_contexts),
+                float(r.payload_mb_per_context),
+                float(r.memory_limit_mb),
+            ]
+            for r in valid
+        ],
+        dtype=float,
+    )
+    y = np.array(
+        [_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0)) for r in valid],
+        dtype=float,
+    )
+    coeffs, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+    y_hat = x @ coeffs
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 0.0 if ss_tot <= 0.0 else 1.0 - (ss_res / ss_tot)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(
+        y_hat,
+        y,
+        c=[r.total_contexts for r in valid],
+        cmap="viridis",
+        alpha=0.8,
+        edgecolors="black",
+        linewidths=0.4,
+    )
+    low = min(float(np.min(y_hat)), float(np.min(y)))
+    high = max(float(np.max(y_hat)), float(np.max(y)))
+    ax.plot([low, high], [low, high], linestyle="--", linewidth=1.0, color="black")
+    ax.set_xlabel("predicted memory pressure (MB)")
+    ax.set_ylabel("observed memory pressure (MB)")
+    ax.set_title("Linearity check: observed vs linear model prediction")
+    cb = fig.colorbar(sc, ax=ax)
+    cb.set_label("total_contexts")
+    coeff_text = (
+        "y = b0 + b1*runtimes + b2*contexts + b3*total_contexts + "
+        "b4*payload + b5*memory_limit\n"
+        f"R2={r2:.3f}, b1={coeffs[1]:.3f}, b2={coeffs[2]:.3f}, b3={coeffs[3]:.3f}"
+    )
+    ax.text(
+        0.02,
+        0.98,
+        coeff_text,
+        transform=ax.transAxes,
+        va="top",
+        fontsize=8,
+        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+    )
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"R2={r2:.3f}"
 
 
 def build_visual_markdown(
@@ -850,24 +800,20 @@ def build_visual_markdown(
             f"contexts_per_runtime={peak_residual.contexts_per_runtime}`"
         ),
         f"- RSS heatmap slice: `{plot_meta['rss_heatmap_slice']}`",
-        f"- Capacity frontier: `{plot_meta['capacity_frontier']}`",
-        f"- GC reclamation heatmap: `{plot_meta['gc_reclamation_heatmap']}`",
-        f"- Residual ratio heatmap: `{plot_meta['residual_ratio_heatmap']}`",
-        f"- Phase waterfall: `{plot_meta['phase_waterfall_top']}`",
-        f"- Sweep matrix: `{plot_meta['sweep_matrix_small_multiples']}`",
-        f"- Failure overlay: `{plot_meta['failure_overlay_map']}`",
+        f"- Total-context linearity: `{plot_meta['hypothesis_total_contexts_linearity']}`",
+        f"- Runtime linearity slice: `{plot_meta['hypothesis_runtime_lines']}`",
+        f"- Context linearity slice: `{plot_meta['hypothesis_context_lines']}`",
+        f"- Observed vs linear model: `{plot_meta['hypothesis_observed_vs_predicted']}`",
         "",
         "Generated plots (saved as workflow artifacts):",
         f"- `{out_dir / 'rss_vs_qjs_scatter.png'}`",
         f"- `{out_dir / 'overhead_stacked_top.png'}`",
         f"- `{out_dir / 'phase_rss_lines_top.png'}`",
         f"- `{out_dir / 'rss_heatmap_slice.png'}`",
-        f"- `{out_dir / 'capacity_frontier.png'}`",
-        f"- `{out_dir / 'gc_reclamation_heatmap.png'}`",
-        f"- `{out_dir / 'residual_ratio_heatmap.png'}`",
-        f"- `{out_dir / 'phase_waterfall_top.png'}`",
-        f"- `{out_dir / 'sweep_matrix_small_multiples.png'}`",
-        f"- `{out_dir / 'failure_overlay_map.png'}`",
+        f"- `{out_dir / 'hypothesis_total_contexts_linearity.png'}`",
+        f"- `{out_dir / 'hypothesis_runtime_lines.png'}`",
+        f"- `{out_dir / 'hypothesis_context_lines.png'}`",
+        f"- `{out_dir / 'hypothesis_observed_vs_predicted.png'}`",
         "",
     ]
     return "\n".join(lines)
@@ -897,34 +843,24 @@ def generate_visual_report(
     _plot_phase_deltas(rows, output_plots_dir / "phase_rss_lines_top.png", plt)
     plot_meta = {
         "rss_heatmap_slice": _plot_heatmap(rows, output_plots_dir / "rss_heatmap_slice.png", plt),
-        "capacity_frontier": _plot_capacity_frontier(
+        "hypothesis_total_contexts_linearity": _plot_hypothesis_total_contexts_linearity(
             rows,
-            output_plots_dir / "capacity_frontier.png",
+            output_plots_dir / "hypothesis_total_contexts_linearity.png",
             plt,
         ),
-        "gc_reclamation_heatmap": _plot_gc_reclamation_heatmap(
+        "hypothesis_runtime_lines": _plot_hypothesis_runtime_lines(
             rows,
-            output_plots_dir / "gc_reclamation_heatmap.png",
+            output_plots_dir / "hypothesis_runtime_lines.png",
             plt,
         ),
-        "residual_ratio_heatmap": _plot_residual_ratio_heatmap(
+        "hypothesis_context_lines": _plot_hypothesis_context_lines(
             rows,
-            output_plots_dir / "residual_ratio_heatmap.png",
+            output_plots_dir / "hypothesis_context_lines.png",
             plt,
         ),
-        "phase_waterfall_top": _plot_phase_waterfall_top(
+        "hypothesis_observed_vs_predicted": _plot_hypothesis_observed_vs_predicted(
             rows,
-            output_plots_dir / "phase_waterfall_top.png",
-            plt,
-        ),
-        "sweep_matrix_small_multiples": _plot_sweep_matrix_small_multiples(
-            rows,
-            output_plots_dir / "sweep_matrix_small_multiples.png",
-            plt,
-        ),
-        "failure_overlay_map": _plot_failure_overlay_map(
-            rows,
-            output_plots_dir / "failure_overlay_map.png",
+            output_plots_dir / "hypothesis_observed_vs_predicted.png",
             plt,
         ),
     }
