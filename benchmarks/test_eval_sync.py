@@ -1,7 +1,7 @@
 """Sync eval benchmarks. See benchmarks/README.md.
 
 Measure JS execution overhead for representative workloads, isolating
-quickjs-wasm's cost from the cost of the JS computation itself.
+quickjs-rs's cost from the cost of the JS computation itself.
 Setup (runtime, context, code strings) happens outside the
 ``benchmark(...)`` call.
 """
