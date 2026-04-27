@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quickjs-rs"
-version = "0.3.0.dev0"
+version = "0.1.0"
 description = "Sandboxed JavaScript execution for Python, via PyO3 + rquickjs."
 readme = "README.md"
 license = { text = "MIT" }

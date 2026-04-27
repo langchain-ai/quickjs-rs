@@ -1,27 +1,123 @@
 name: release
 
-# On tag push (v*), build platform-specific wheels + sdist via
-# maturin-action, then publish to PyPI via trusted publishing.
-# Platform matrix matches what pydantic / polars / ruff ship:
-# Linux manylinux x86_64 + aarch64, macOS x86_64 + arm64, Windows
-# x86_64. Each job builds with the Python versions in its
-# `python-version` matrix; maturin produces cp3X-abi3 wheels or
-# cp3X-cp3X wheels depending on the extension's ABI stability
-# (we don't set abi3 so each Python minor gets its own wheel).
+# Manually-triggered release for the quickjs-rs Python package.
+#
+# Flow: read version from pyproject.toml (the source of truth — no
+# version input) → smoke test → build platform wheels + sdist via
+# maturin-action → publish to PyPI via trusted publishing → tag the
+# release commit `v<version>`.
+#
+# The git tag is created AFTER PyPI publish succeeds, so a failed
+# publish never leaves a phantom tag. Running again after a
+# successful publish would fail at the tag-existence check in
+# `version-info`.
 
 on:
-  push:
-    tags: ["v*"]
-  # Allow a dry run from the UI that builds wheels but skips the
-  # publish step (controlled by the startsWith(refs/tags/) guard on
-  # the publish job).
   workflow_dispatch:
+    inputs:
+      dangerous-nonmain-release:
+        required: false
+        type: boolean
+        default: false
+        description: "Release from a non-main branch (danger!) - only for hotfixes"
 
 permissions:
   contents: read
 
 jobs:
+  version-info:
+    # Reads the to-be-released version from pyproject.toml and fails fast
+    # if a `v<version>` tag already exists. The branch gate on this job
+    # cascades to every dependent job via `needs:`.
+    if: github.ref == 'refs/heads/main' || inputs.dangerous-nonmain-release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read-version.outputs.version }}
+      tag: ${{ steps.read-version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Need the full tag set for the existence check below.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          # tomllib (used by `shell: python` step below) is stdlib in 3.11+.
+          # Pinning shields us from runner-image default-Python changes.
+          python-version: "3.12"
+
+      - name: Read version from pyproject.toml
+        id: read-version
+        shell: python
+        run: |
+          import os
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+          tag = f"v{version}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\n")
+              f.write(f"tag={tag}\n")
+
+      - name: Fail if tag already exists
+        run: |
+          TAG="${{ steps.read-version.outputs.tag }}"
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists. Bump pyproject.toml before re-running."
+            exit 1
+          fi
+          echo "Tag $TAG does not exist — OK to proceed."
+
+  pre-release-checks:
+    # Release-time smoke test on the exact commit being shipped. The
+    # full 3-OS x 3-Python matrix runs on every PR/main push via
+    # test.yml — this job is the final-mile sanity check, not a CI
+    # re-run, so it covers a single (ubuntu, py3.12) cell.
+    needs: version-info
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: release-prechecks
+
+      - name: Create venv
+        run: python -m venv .venv
+
+      - name: Export venv to subsequent steps (host-native paths)
+        # See test.yml for why this dance is needed (maturin develop
+        # refuses to install into a bare Python; the helper exports
+        # VIRTUAL_ENV + PATH in host-native form so later steps work
+        # under bash on Windows too — irrelevant here, but kept for
+        # parity with test.yml).
+        run: python .github/scripts/activate_venv.py
+
+      - name: Install maturin and dev extras
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin
+          maturin develop --release -E dev
+
+      - name: ruff
+        run: ruff check .
+
+      - name: mypy
+        run: mypy quickjs_rs
+
+      - name: pytest
+        run: pytest -v
+
   linux:
+    needs: version-info
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -75,6 +171,7 @@ jobs:
           path: dist
 
   macos:
+    needs: version-info
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -103,6 +200,7 @@ jobs:
           path: dist
 
   windows:
+    needs: version-info
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -129,6 +227,7 @@ jobs:
           path: dist
 
   sdist:
+    needs: version-info
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -145,8 +244,7 @@ jobs:
           path: dist
 
   publish:
-    needs: [linux, macos, windows, sdist]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [version-info, pre-release-checks, linux, macos, windows, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -162,3 +260,28 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+
+  tag-release:
+    # Create the git tag + GitHub Release only after PyPI publish
+    # succeeds, so a failed publish never leaves a phantom tag.
+    needs: [version-info, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the tag/release
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create tag and GitHub Release
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+        with:
+          tag: ${{ needs.version-info.outputs.tag }}
+          commit: ${{ github.sha }}
+          artifacts: "dist/*"
+          generateReleaseNotes: true
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,6 @@
 # Benchmarks
 
-Performance benchmarks for quickjs-wasm. See `benchmarks/README.md` for the
+Performance benchmarks for quickjs-rs. See `benchmarks/README.md` for the
 full spec — what each benchmark measures, expected order-of-magnitude
 ranges, and the rationale behind the structure.
 
