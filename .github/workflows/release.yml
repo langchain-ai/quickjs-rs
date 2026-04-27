@@ -40,6 +40,12 @@ jobs:
           # Need the full tag set for the existence check below.
           fetch-depth: 0
 
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          # tomllib (used by `shell: python` step below) is stdlib in 3.11+.
+          # Pinning shields us from runner-image default-Python changes.
+          python-version: "3.12"
+
       - name: Read version from pyproject.toml
         id: read-version
         shell: python
