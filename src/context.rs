@@ -10,8 +10,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use rquickjs::{
-    atom::PredefinedAtom, context::EvalOptions, CatchResultExt, CaughtError, Context, Module,
-    Persistent, Value,
+    atom::PredefinedAtom, context::intrinsic, context::EvalOptions, CatchResultExt, CaughtError,
+    Context, Module, Persistent, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -59,13 +59,9 @@ pub(crate) struct QjsContext {
     in_sync_eval: Rc<Cell<bool>>,
 }
 
-#[pymethods]
 impl QjsContext {
-    #[new]
-    fn new(runtime: &QjsRuntime) -> PyResult<Self> {
-        let rt = runtime.runtime()?;
-        let ctx = Context::full(rt).map_err(map_runtime_new_error)?;
-        Ok(Self {
+    fn from_context(ctx: Context) -> Self {
+        Self {
             inner: Some(ctx),
             host_dispatcher: None,
             async_host_dispatcher: None,
@@ -73,7 +69,30 @@ impl QjsContext {
             next_pending_id: Rc::new(Cell::new(1)),
             sync_eval_hit_async_call: Rc::new(Cell::new(false)),
             in_sync_eval: Rc::new(Cell::new(false)),
-        })
+        }
+    }
+}
+
+#[pymethods]
+impl QjsContext {
+    #[new]
+    #[pyo3(signature = (runtime, *, experimental_intrinsics="full"))]
+    fn new(runtime: &QjsRuntime, experimental_intrinsics: &str) -> PyResult<Self> {
+        let rt = runtime.runtime()?;
+        let ctx = match experimental_intrinsics {
+            "full" => Context::full(rt),
+            "base" => Context::base(rt),
+            "custom_eval" => Context::custom::<intrinsic::Eval>(rt),
+            "custom_all" => Context::custom::<intrinsic::All>(rt),
+            other => {
+                return Err(QuickJSError::new_err(format!(
+                    "invalid experimental_intrinsics mode: {:?} (expected one of: \"full\", \"base\", \"custom_eval\", \"custom_all\")",
+                    other
+                )))
+            }
+        }
+        .map_err(map_runtime_new_error)?;
+        Ok(Self::from_context(ctx))
     }
 
     /// Install the Python-side dispatcher. The Context layer calls

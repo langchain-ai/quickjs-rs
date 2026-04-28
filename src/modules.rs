@@ -387,16 +387,19 @@ pub(crate) fn maybe_strip_ts(key: &str, source: &str) -> Result<String, String> 
         let allocator = oxidase::Allocator::default();
         let mut buf = source.to_string();
         let ret = oxidase::transpile(&allocator, source_type, &mut buf);
-        (buf, ret.parser_panicked, ret.parser_errors
-            .iter()
-            .map(|d| d.to_string())
-            .collect::<Vec<_>>())
+        (
+            buf,
+            ret.parser_panicked,
+            ret.parser_errors
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>(),
+        )
     }));
 
-    let (buf, panicked, errors) = outcome.map_err(|_| {
-        format!("oxidase panicked unexpectedly while parsing {}", key)
-    })?;
-    
+    let (buf, panicked, errors) =
+        outcome.map_err(|_| format!("oxidase panicked unexpectedly while parsing {}", key))?;
+
     if panicked {
         let msg = if errors.is_empty() {
             format!("oxidase failed to parse {}", key)

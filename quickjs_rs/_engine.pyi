@@ -40,7 +40,12 @@ class QjsRuntime:
     def is_closed(self) -> bool: ...
 
 class QjsContext:
-    def __new__(cls, runtime: QjsRuntime) -> QjsContext: ...
+    def __new__(
+        cls,
+        runtime: QjsRuntime,
+        *,
+        experimental_intrinsics: str = "full",
+    ) -> QjsContext: ...
     def eval(
         self,
         code: str,

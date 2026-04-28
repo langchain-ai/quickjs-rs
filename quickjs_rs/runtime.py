@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
@@ -82,12 +82,21 @@ class Runtime:
         raw = self._engine_rt.memory_usage()
         return {str(k): int(v) for k, v in raw.items()}
 
-    def new_context(self, *, timeout: float = 5.0) -> Any:
+    def new_context(
+        self,
+        *,
+        timeout: float = 5.0,
+        experimental_intrinsics: Literal["full", "base", "custom_eval", "custom_all"] = "full",
+    ) -> Any:
         if self._closed:
             raise QuickJSError("runtime is closed")
         from quickjs_rs.context import Context
 
-        ctx = Context(self, timeout=timeout)
+        ctx = Context(
+            self,
+            timeout=timeout,
+            experimental_intrinsics=experimental_intrinsics,
+        )
         self._contexts.append(ctx)
         return ctx
 

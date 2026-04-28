@@ -7,7 +7,7 @@ import inspect
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
@@ -28,6 +28,7 @@ from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
+ExperimentalIntrinsicsMode = Literal["full", "base", "custom_eval", "custom_all"]
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
@@ -72,12 +73,21 @@ class Context:
     but shares the runtime's heap and interrupt handler.
     """
 
-    def __init__(self, runtime: Runtime, *, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        *,
+        timeout: float = 5.0,
+        experimental_intrinsics: ExperimentalIntrinsicsMode = "full",
+    ) -> None:
         if runtime._closed:
             raise QuickJSError("runtime is closed")
         self._runtime = runtime
         try:
-            self._engine_ctx = _engine.QjsContext(runtime._engine_rt)
+            self._engine_ctx = _engine.QjsContext(
+                runtime._engine_rt,
+                experimental_intrinsics=experimental_intrinsics,
+            )
         except _engine.QuickJSError as e:
             raise QuickJSError(str(e)) from e
         self._timeout = timeout

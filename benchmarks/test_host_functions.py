@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pytest_codspeed import BenchmarkFixture
 
-from quickjs_rs import Context
+from quickjs_rs import Context, Runtime
 
 
 def bench_host_call_noop(benchmark: BenchmarkFixture, ctx: Context) -> None:
@@ -63,6 +63,31 @@ def bench_host_call_100x_loop(benchmark: BenchmarkFixture, ctx: Context) -> None
         })()
     """
     benchmark(ctx.eval, code)
+
+
+def bench_host_call_end_to_end_cold(benchmark: BenchmarkFixture) -> None:
+    """End-to-end cold path: Runtime + Context + host attach + one eval.
+
+    Captures the full one-shot lifecycle cost paid by callers that create
+    a fresh runtime/context for each invocation.
+    """
+
+    def run_once() -> int:
+        rt = Runtime()
+        ctx = rt.new_context()
+
+        @ctx.function
+        def ident(n: int) -> int:
+            return n
+
+        try:
+            return int(ctx.eval("ident(1)"))
+        finally:
+            ctx.close()
+            rt.close()
+
+    assert run_once() == 1
+    benchmark(run_once)
 
 
 @pytest.mark.benchmark
