@@ -7,7 +7,7 @@ import inspect
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any
+from typing import Any, TypeAlias
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
@@ -28,6 +28,18 @@ from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
+
+#: Optional callback for surfacing select host-fn exceptions to JS verbatim.
+#:
+#: A handler receives the raised exception and returns either:
+#: - ``None``: keep the default sanitized ``"Host function failed"`` message.
+#: - a ``str``: use this as the JS-visible message. The error name stays
+#:   ``"HostError"`` so existing cause-threading (``HostError.__cause__``
+#:   pointing at the original Python exception) is preserved.
+#:
+#: Handlers must not raise; an exception inside the handler is treated as
+#: ``None`` so a buggy handler cannot crash the dispatcher.
+HostErrorHandler: TypeAlias = Callable[[BaseException], str | None]
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
@@ -72,7 +84,13 @@ class Context:
     but shares the runtime's heap and interrupt handler.
     """
 
-    def __init__(self, runtime: Runtime, *, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        *,
+        timeout: float = 5.0,
+        host_error_handler: HostErrorHandler | None = None,
+    ) -> None:
         if runtime._closed:
             raise QuickJSError("runtime is closed")
         self._runtime = runtime
@@ -81,6 +99,7 @@ class Context:
         except _engine.QuickJSError as e:
             raise QuickJSError(str(e)) from e
         self._timeout = timeout
+        self._host_error_handler = host_error_handler
         self._closed = False
         # The globals proxy holds a QjsHandle to globalThis. Built
         # lazily so a context created solely for eval() with no
@@ -775,6 +794,23 @@ class Context:
                 # our list() snapshot and the call. Swallow.
                 pass
 
+    def _classify_host_exception_message(self, exc: BaseException) -> str:
+        """Pick the JS-visible message for a host-fn exception.
+
+        Returns the sanitized default unless ``host_error_handler`` opts in
+        with a real string. Handler crashes are swallowed so a buggy handler
+        can't break the dispatcher.
+        """
+        if self._host_error_handler is None:
+            return _HOST_ERROR_SANITIZED_MESSAGE
+        try:
+            surfaced = self._host_error_handler(exc)
+        except Exception:  # noqa: BLE001 — handler must not break dispatch
+            surfaced = None
+        if surfaced is None:
+            return _HOST_ERROR_SANITIZED_MESSAGE
+        return surfaced
+
     def _dispatch_async_host_call(self, fn_id: int, args: tuple[Any, ...], pending_id: int) -> int:
         """Async fn_id → coroutine lookup and scheduling.
         Invoked from the Rust async trampoline. Returns 0 on
@@ -845,9 +881,12 @@ class Context:
             except BaseException as exc:
                 resolve_ok = False
                 self._last_host_exception = exc
-                # Preserve internals in Python (__cause__), but expose
-                # only a stable sanitized message over the JS boundary.
-                err_message = _HOST_ERROR_SANITIZED_MESSAGE
+                # Preserve internals in Python (__cause__); the classifier
+                # decides whether to expose a real message over the JS
+                # boundary or fall back to the sanitized default. Name
+                # stays "HostError" so HostError.__cause__ threading keeps
+                # working.
+                err_message = self._classify_host_exception_message(exc)
                 err_stack = None
 
             try:
@@ -888,6 +927,8 @@ class Context:
             return fn(*args)
         except BaseException as exc:
             self._last_host_exception = exc
-            # Preserve original exception in __cause__, while
-            # sanitizing the JS-visible HostError payload.
-            raise _engine.JSError("HostError", _HOST_ERROR_SANITIZED_MESSAGE, None) from None
+            # Preserve original exception in __cause__; the classifier
+            # decides whether to surface a real message or use the
+            # sanitized default. Name stays "HostError".
+            message = self._classify_host_exception_message(exc)
+            raise _engine.JSError("HostError", message, None) from None

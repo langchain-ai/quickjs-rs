@@ -100,6 +100,115 @@ def test_js_catches_hosterror_and_reads_name_and_message() -> None:
             )
 
 
+class _SurfaceMe(Exception):
+    """Marker exception for host_error_handler tests."""
+
+
+def test_host_error_handler_surfaces_message_for_matching_exception() -> None:
+    """Handler returning a string replaces the sanitized JS-visible message."""
+
+    def handler(exc: BaseException) -> str | None:
+        if isinstance(exc, _SurfaceMe):
+            return f"surfaced: {exc.args[0]}"
+        return None
+
+    with Runtime() as rt:
+        with rt.new_context(host_error_handler=handler) as ctx:
+
+            @ctx.function
+            def fail() -> None:
+                raise _SurfaceMe("boom")
+
+            assert (
+                ctx.eval("try { fail(); 'no' } catch (e) { e.message }")
+                == "surfaced: boom"
+            )
+
+
+def test_host_error_handler_falls_back_to_sanitized_for_other_exceptions() -> None:
+    """Handler returning None keeps the sanitized default."""
+
+    def handler(exc: BaseException) -> str | None:
+        if isinstance(exc, _SurfaceMe):
+            return "surfaced"
+        return None
+
+    with Runtime() as rt:
+        with rt.new_context(host_error_handler=handler) as ctx:
+
+            @ctx.function
+            def fail() -> None:
+                raise RuntimeError("internal")
+
+            assert (
+                ctx.eval("try { fail(); 'no' } catch (e) { e.message }")
+                == "Host function failed"
+            )
+
+
+def test_host_error_handler_crash_falls_back_to_sanitized() -> None:
+    """A buggy handler that itself raises does not break dispatch."""
+
+    def handler(exc: BaseException) -> str | None:
+        raise ValueError("handler bug")
+
+    with Runtime() as rt:
+        with rt.new_context(host_error_handler=handler) as ctx:
+
+            @ctx.function
+            def fail() -> None:
+                raise RuntimeError("inner")
+
+            assert (
+                ctx.eval("try { fail(); 'no' } catch (e) { e.message }")
+                == "Host function failed"
+            )
+
+
+def test_host_error_handler_preserves_cause_threading() -> None:
+    """Even with a custom message, HostError.__cause__ still points at
+    the original Python exception when the rejection bubbles to Python.
+    """
+
+    def handler(exc: BaseException) -> str | None:
+        return "custom message"
+
+    with Runtime() as rt:
+        with rt.new_context(host_error_handler=handler) as ctx:
+
+            @ctx.function
+            def fail() -> None:
+                raise _SurfaceMe("inner")
+
+            with pytest.raises(HostError) as excinfo:
+                ctx.eval("fail()")
+            assert excinfo.value.message == "custom message"
+            assert isinstance(excinfo.value.__cause__, _SurfaceMe)
+
+
+async def test_host_error_handler_works_for_async_host_fns() -> None:
+    """Async host fns route through the same handler. Verifies the
+    rejection's message reaches JS catch with the surfaced text.
+    """
+
+    def handler(exc: BaseException) -> str | None:
+        if isinstance(exc, _SurfaceMe):
+            return f"async-surfaced: {exc.args[0]}"
+        return None
+
+    with Runtime() as rt:
+        with rt.new_context(host_error_handler=handler) as ctx:
+
+            @ctx.function(is_async=True)
+            async def fail() -> None:
+                raise _SurfaceMe("async-boom")
+
+            result = await ctx.eval_async(
+                "try { await fail(); 'no' } catch (e) { e.message }"
+            )
+            assert result == "async-surfaced: async-boom"
+
+
 def test_non_error_throw_coerces_to_jserror() -> None:
     """`throw 'x'` / `throw 42` surface as JSError(name='Error',
     message=<coerced string>, stack=None). The shim coerces via ToString."""

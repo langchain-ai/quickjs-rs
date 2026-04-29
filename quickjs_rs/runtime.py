@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import time
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
 from quickjs_rs.modules import ModuleScope
+
+if TYPE_CHECKING:
+    from quickjs_rs.context import HostErrorHandler
 
 
 class Runtime:
@@ -82,12 +85,17 @@ class Runtime:
         raw = self._engine_rt.memory_usage()
         return {str(k): int(v) for k, v in raw.items()}
 
-    def new_context(self, *, timeout: float = 5.0) -> Any:
+    def new_context(
+        self,
+        *,
+        timeout: float = 5.0,
+        host_error_handler: HostErrorHandler | None = None,
+    ) -> Any:
         if self._closed:
             raise QuickJSError("runtime is closed")
         from quickjs_rs.context import Context
 
-        ctx = Context(self, timeout=timeout)
+        ctx = Context(self, timeout=timeout, host_error_handler=host_error_handler)
         self._contexts.append(ctx)
         return ctx
 

@@ -1,7 +1,7 @@
 """quickjs-rs: JavaScript execution for Python."""
 
 from quickjs_rs._engine import UNDEFINED, Undefined
-from quickjs_rs.context import Context
+from quickjs_rs.context import Context, HostErrorHandler
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
@@ -26,6 +26,7 @@ __all__ = [
     "Runtime",
     "Context",
     "Handle",
+    "HostErrorHandler",
     "ModuleScope",
     "ThreadWorker",
     "Undefined",
