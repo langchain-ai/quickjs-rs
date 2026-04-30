@@ -227,6 +227,7 @@ executed module=True eval; module-mode snapshotting is not implemented",
         }
 
         let injected_names = ctx.snapshot_inject_active_globals(&loaded, &decoded.records)?;
+        ctx.snapshot_install_tombstones(&decoded.records)?;
         state.merge_registry_names(&injected_names);
         Ok(())
     }

@@ -721,6 +721,46 @@ impl QjsContext {
         })
     }
 
+    pub(crate) fn snapshot_install_tombstones(
+        &self,
+        records: &[SnapshotNameRecord],
+    ) -> PyResult<()> {
+        let context = self.context()?;
+        with_active_ctx(context, |ctx| {
+            for record in records {
+                if record.record_kind == SnapshotRecordKind::Active {
+                    continue;
+                }
+                let hint = record
+                    .hint
+                    .clone()
+                    .unwrap_or_else(|| "Value is unavailable after snapshot restore.".to_string());
+                let name_json = serde_json::to_string(&record.name).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "failed to encode tombstone name {:?}: {}",
+                        record.name, e
+                    ))
+                })?;
+                let hint_json = serde_json::to_string(&hint).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "failed to encode tombstone hint for {:?}: {}",
+                        record.name, e
+                    ))
+                })?;
+                let code = format!(
+                    "Object.defineProperty(globalThis, {name_json}, {{ \
+configurable: true, enumerable: true, get() {{ throw new Error({hint_json}); }} \
+}});"
+                );
+                let res: Result<(), CaughtError<'_>> = ctx.eval::<(), _>(code).catch(ctx);
+                if let Err(caught) = res {
+                    return Err(js_error_from_caught(ctx, caught));
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn context(&self) -> PyResult<&Context> {
         self.inner
             .as_ref()

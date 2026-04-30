@@ -117,6 +117,15 @@ def test_snapshot_missing_name_policies() -> None:
             with pytest.raises(JSError):
                 ctx.create_snapshot(on_missing_name="error")
 
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            rt2.restore_snapshot(tomb_snap, ctx2)
+            with pytest.raises(
+                JSError,
+                match="Value for 'late' was not captured because the identifier was not resolvable",
+            ):
+                ctx2.eval("late")
+
 
 def test_snapshot_unserializable_policies() -> None:
     with Runtime() as rt:
@@ -129,7 +138,10 @@ def test_snapshot_unserializable_policies() -> None:
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
             rt2.restore_snapshot(snap, ctx2)
-            with pytest.raises(JSError):
+            with pytest.raises(
+                JSError,
+                match="Value for 'fn' was not restored because it is not serializable",
+            ):
                 ctx2.eval("fn")
 
 
