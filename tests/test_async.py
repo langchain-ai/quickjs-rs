@@ -294,23 +294,23 @@ async def test_handle_await_promise_concurrent_eval_raises() -> None:
                 p.dispose()
 
 
-async def test_eval_async_per_call_timeout_override() -> None:
-    """timeout= kwarg on eval_async overrides the cumulative
-    budget for that call. With the override set short, a slow async
-    host call should abort with TimeoutError."""
-    from quickjs_rs import TimeoutError as _TimeoutError
-
+async def test_per_call_timeout_excludes_host_call_time() -> None:
+    """``timeout`` on eval_async governs JS-execution wall time only.
+    A host whose ``await asyncio.sleep`` runs longer than the
+    per-call timeout does NOT trip the deadline — the driving loop
+    reclaims the wait time. Hosts are responsible for bounding their
+    own work."""
     with Runtime() as rt:
         with rt.new_context(timeout=60.0) as ctx:
 
-            async def very_slow() -> str:
-                await asyncio.sleep(5.0)  # way longer than override
+            async def slow() -> str:
+                # Comfortably longer than the per-call timeout below.
+                await asyncio.sleep(0.2)
                 return "done"
 
-            ctx.register("very_slow", very_slow)
+            ctx.register("slow", slow)
 
-            with pytest.raises(_TimeoutError):
-                await ctx.eval_async("await very_slow()", timeout=0.05)
+            assert await ctx.eval_async("await slow()", timeout=0.05) == "done"
 
 
 async def test_promise_chain_resolves_synchronously() -> None:
@@ -345,51 +345,54 @@ async def test_throw_in_then_callback_propagates_as_js_error() -> None:
             assert "boom" in exc_info.value.message
 
 
-async def test_cumulative_timeout_two_calls_within_budget() -> None:
-    """the cumulative budget is shared across eval_async calls
-    on the same context. Two short calls whose combined wall-clock
-    stays under the budget should both succeed."""
+async def test_cumulative_budget_excludes_host_call_time() -> None:
+    """The cumulative budget tracks JS-execution wall time only.
+    Two eval_async calls whose host awaits each individually exceed
+    the budget should both succeed, because host wait time is
+    reclaimed from the cumulative deadline as well as the per-call
+    one."""
     with Runtime() as rt:
-        with rt.new_context(timeout=1.0) as ctx:
-
-            async def tiny() -> str:
-                await asyncio.sleep(0.01)
-                return "ok"
-
-            ctx.register("tiny", tiny)
-
-            assert await ctx.eval_async("await tiny()") == "ok"
-            assert await ctx.eval_async("await tiny()") == "ok"
-
-
-async def test_cumulative_timeout_exceeded_on_later_call() -> None:
-    """once the cumulative budget is exhausted, subsequent
-    eval_async calls on the context raise TimeoutError — even a
-    trivial 1+1 that would otherwise be instant, because the
-    deadline check fires at interrupt-poll time regardless of what
-    the call is doing.
-
-    This is the shape that makes "long-running agent loop with a
-    total time budget" work cleanly: turn 1-5 consume their time,
-    turn 6 bounces with TimeoutError so the caller knows the
-    budget is done."""
-    from quickjs_rs import TimeoutError as _TimeoutError
-
-    # Short budget so the test wall-clock is short.
-    with Runtime() as rt:
+        # Tight budget; both host sleeps below comfortably exceed it.
         with rt.new_context(timeout=0.05) as ctx:
 
-            async def consumer() -> None:
-                await asyncio.sleep(0.1)  # eat the whole budget
+            async def slow() -> str:
+                await asyncio.sleep(0.1)
+                return "ok"
 
-            ctx.register("consumer", consumer)
+            ctx.register("slow", slow)
 
-            # First call exceeds the budget on its own.
+            assert await ctx.eval_async("await slow()") == "ok"
+            assert await ctx.eval_async("await slow()") == "ok"
+
+
+async def test_cumulative_budget_still_trips_on_js_time() -> None:
+    """Host time is reclaimed, but pure JS execution still counts.
+    A tight JS loop dispatched via eval_async with no host calls
+    must trip the cumulative budget via the interrupt handler."""
+    from quickjs_rs import TimeoutError as _TimeoutError
+
+    with Runtime() as rt:
+        with rt.new_context(timeout=0.1) as ctx:
             with pytest.raises(_TimeoutError):
-                await ctx.eval_async("await consumer()")
+                await ctx.eval_async("while (true) {}", module=False)
 
-            # Second call — even 1+1 — should still raise because the
-            # budget counter is past the deadline.
+
+async def test_cumulative_budget_drained_by_wall_time_outside_eval() -> None:
+    """Host-wait reclamation only fires inside the driving loop.
+    Wall-clock that elapses outside any eval still drains the
+    cumulative budget; the next eval bounces with TimeoutError.
+
+    Pinned because the natural read of "JS-only timeout" might
+    suggest the cumulative deadline never advances when no JS is
+    running. It does — the budget is set at context construction
+    and is monotonic-time absolute. Only async-host-await time
+    *during* an eval is reclaimed."""
+    from quickjs_rs import TimeoutError as _TimeoutError
+
+    with Runtime() as rt:
+        with rt.new_context(timeout=0.05) as ctx:
+            # Idle past the cumulative deadline outside any eval.
+            await asyncio.sleep(0.1)
             with pytest.raises(_TimeoutError):
                 await ctx.eval_async("1 + 1", module=False)
 
