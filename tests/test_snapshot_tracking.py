@@ -247,12 +247,89 @@ async def test_create_snapshot_async_missing_name_tombstone() -> None:
                 ctx2.eval("late")
 
 
+async def test_create_snapshot_async_missing_name_error() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError):
+                await ctx.eval_async("throw new Error('boom'); const late = 1;")
+            with pytest.raises(JSError, match="late is not initialized"):
+                await ctx.create_snapshot_async(on_missing_name="error")
+
+
+async def test_create_snapshot_async_unserializable_policies() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            await ctx.eval_async("const fnAsync = () => 1;")
+            snap = await ctx.create_snapshot_async(on_unserializable="tombstone")
+            with pytest.raises(QuickJSError, match="not serializable"):
+                await ctx.create_snapshot_async(on_unserializable="error")
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            rt2.restore_snapshot(snap, ctx2)
+            with pytest.raises(
+                JSError,
+                match="Value for 'fnAsync' was not restored because it is not serializable",
+            ):
+                ctx2.eval("fnAsync")
+
+
 async def test_create_snapshot_async_module_guard() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
             await ctx.eval_async("globalThis.modTouched = 1", module=True)
             with pytest.raises(NotImplementedError, match="module=True"):
                 await ctx.create_snapshot_async()
+
+
+def test_runtime_create_snapshot_sync() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const viaRuntime = 10;")
+            snap = rt.create_snapshot(ctx)
+            assert isinstance(snap, Snapshot)
+
+
+async def test_runtime_create_snapshot_async() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            await ctx.eval_async("const viaRuntimeAsync = 20;")
+            snap = await rt.create_snapshot_async(ctx)
+            assert isinstance(snap, Snapshot)
+
+
+def test_restore_snapshot_no_inject_globals() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const noInject = 77;")
+            snap = ctx.create_snapshot()
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            rt2.restore_snapshot(snap, ctx2, inject_globals=False)
+            assert (
+                ctx2.eval("Object.prototype.hasOwnProperty.call(globalThis, 'noInject')") is False
+            )
+            with pytest.raises(JSError, match="noInject is not defined"):
+                ctx2.eval("noInject")
+
+
+def test_create_snapshot_invalid_options_sync() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(ValueError, match="on_unserializable"):
+                ctx.create_snapshot(on_unserializable="bad")  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="on_missing_name"):
+                ctx.create_snapshot(on_missing_name="bad")  # type: ignore[arg-type]
+
+
+async def test_create_snapshot_invalid_options_async() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(ValueError, match="on_unserializable"):
+                await ctx.create_snapshot_async(on_unserializable="bad")  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="on_missing_name"):
+                await ctx.create_snapshot_async(on_missing_name="bad")  # type: ignore[arg-type]
 
 
 def test_engine_dump_load_handle_roundtrip() -> None:
