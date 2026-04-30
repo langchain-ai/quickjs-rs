@@ -81,6 +81,30 @@ def test_swallowed_host_raise_does_not_leak_cause_into_later_eval() -> None:
             assert excinfo.value.__cause__ is None
 
 
+def test_within_eval_synthesized_hosterror_not_misattributed_to_swallowed_raise() -> None:
+    """Same eval: host A raises and JS catches it; JS then hand-throws an
+    error with name='HostError'. The synthesized throw must surface as
+    HostError (not as the swallowed Python exception). The bridge's
+    re-raise unwrap is keyed on the (name, message, stack) shape that
+    only the bridge produces, so a JS-synthesized HostError-named throw
+    with a custom message and a JS stack does not consume the side
+    channel.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            @ctx.function
+            def swallowed() -> None:
+                raise RuntimeError("never see this")
+
+            with pytest.raises(HostError) as excinfo:
+                ctx.eval(
+                    "try { swallowed(); } catch (e) {}"
+                    " const fake = new Error('synth'); fake.name = 'HostError'; throw fake;"
+                )
+            assert excinfo.value.message == "synth"
+            assert not isinstance(excinfo.value, RuntimeError)
+
+
 def test_js_catches_hosterror_and_reads_name_and_message() -> None:
     """The HostError the host throws must be catchable from JS with its
     name and message intact. ."""

@@ -281,10 +281,21 @@ class Context:
         JS-visible behavior is unaffected: this only runs when a
         rejection has bubbled past JS try/catch to the eval boundary.
         """
-        if name == "HostError" and self._last_host_exception is not None:
+        if (
+            name == "HostError"
+            and message == _HOST_ERROR_SANITIZED_MESSAGE
+            and self._last_host_exception is not None
+        ):
+            # The (name, message) shape matches what the bridge
+            # produces, so this rejection is from a host raise rather
+            # than a JS hand-thrown HostError-named error with a
+            # different message. ``from None`` so the caught
+            # _engine.JSError doesn't show up as ``__context__``
+            # ("During handling of the above exception") and leak
+            # QuickJS internals into the user's traceback.
             original = self._last_host_exception
             self._last_host_exception = None
-            raise original
+            raise original from None
         classified = self._classify_jserror(name, message, stack, deadline)
         raise classified from classified.__cause__
 

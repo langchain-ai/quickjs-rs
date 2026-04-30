@@ -266,7 +266,7 @@ flowchart TD
 - **Flow**: DF9.
 - **Description**: callback exceptions include message/traceback that can surface to JS error objects and upstream service logs.
 - **Preconditions**: callback throws with sensitive content in message/stack; caller exposes error payload.
-- **Mitigations**: JS-visible host callback failures are sanitized to a stable `JSError` (name `"HostError"`, message `"Host function failed"`, no stack) for both sync and async dispatch paths. JS `try/catch` and the eval result therefore never carry host exception content, so a model reading the eval tool's output never sees raw exception messages.
+- **Mitigations**: JS-visible host callback failures are sanitized to a stable JS `Error` instance (`name = "HostError"`, `message = "Host function failed"`, no stack) for both sync and async dispatch paths. JS `try/catch` and the eval result therefore never carry host exception content, so a model reading the eval tool's output never sees raw exception messages.
 - **Residual risk**: medium. When JS does not catch the rejection, the original host exception bubbles out of `eval`/`eval_async` as the underlying Python exception (`ValueError`, `RuntimeError`, etc.) — matching the leak surface of any non-quickjs Python tool that raises. The original message reaches caller-frame `try/except` and any default `log.exception()` in user code; caller-side log discipline (avoid logging exception messages verbatim from untrusted-callback code paths) is the residual control.
 
 #### T4: Native engine exploitability path
