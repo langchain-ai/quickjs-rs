@@ -103,13 +103,15 @@ class Context:
         # concurrent-eval guard — only one eval_async / await_promise
         # at a time per context. _cumulative_deadline is the rolling
         # budget shared across eval_async calls; per-call timeout=
-        # overrides for one call only. _pending_tasks tracks the
-        # asyncio tasks we've spawned for async host calls so the
-        # driving loop knows when to wait vs raise DeadlockError.
-        # _pending_completed is the wake-up event the driving loop
-        # waits on between tasks. _active_task_group is set during
-        # _run_inside_task_group so the async host dispatcher schedules
-        # into it instead of loop.create_task.
+        # overrides for one call only. The cumulative budget tracks
+        # JS-execution wall time only — time spent awaiting async
+        # host calls is reclaimed by the driving loop. _pending_tasks
+        # tracks the asyncio tasks we've spawned for async host calls
+        # so the driving loop knows when to wait vs raise
+        # DeadlockError. _pending_completed is the wake-up event the
+        # driving loop waits on between tasks. _active_task_group is
+        # set during _run_inside_task_group so the async host
+        # dispatcher schedules into it instead of loop.create_task.
         self._cumulative_deadline = time.monotonic() + timeout
         self._eval_async_in_flight = False
         self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -443,6 +445,15 @@ class Context:
           To surface a value, set ``globalThis.result = ...`` in the
           module and read it with a sync ``ctx.eval("result")``.
 
+        Timeout semantics: ``timeout`` (and the context's cumulative
+        budget when ``timeout`` is omitted) governs JS-execution wall
+        time only. Time the driving loop spends awaiting an
+        asynchronous host call to settle is reclaimed from both
+        budgets, so a host that runs longer than ``timeout`` does
+        not by itself trip the deadline. Hosts are responsible for
+        bounding their own work; runaway JS bytecode between host
+        calls still trips the interrupt handler at ``timeout``.
+
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
         HostCancellationError and runs one final pending-jobs drain
@@ -488,6 +499,11 @@ class Context:
     ) -> Handle:
         """Same driving flow as :meth:`eval_async`, but return the
         settled value as a :class:`Handle` rather than marshaling.
+
+        Timeout semantics match :meth:`eval_async`: ``timeout``
+        covers JS-execution wall time only; time spent awaiting
+        async host calls is reclaimed from both the per-call
+        deadline and the context's cumulative budget.
 
         ``module=True``: returns a Handle to ``undefined`` (ES
         modules complete with undefined). The module's exports are
@@ -714,8 +730,18 @@ class Context:
                             assert event is not None, (
                                 "pending task present but completion event is None"
                             )
+                            # timeout covers JS-execution time only —
+                            # reclaim the host-await wall-clock from both
+                            # the per-call deadline (interrupt handler
+                            # re-reads when JS resumes) and the cumulative
+                            # budget.
+                            wait_start = time.monotonic()
                             await event.wait()
                             event.clear()
+                            elapsed_wait = time.monotonic() - wait_start
+                            deadline += elapsed_wait
+                            self._cumulative_deadline += elapsed_wait
+                            self._runtime._deadline = deadline
 
                             if time.monotonic() >= deadline:
                                 raise TimeoutError("eval_async exceeded its deadline")
