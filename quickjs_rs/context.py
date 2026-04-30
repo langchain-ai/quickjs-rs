@@ -652,9 +652,14 @@ class Context:
                     # Initial eval happens INSIDE the TaskGroup scope
                     # so dispatched host-call tasks become children.
                     handle = get_handle()
-                    inner = handle._require_live()
                     # Fast path: non-promise result — no driving.
-                    if not inner.is_promise():
+                    # Must not bind the raw _engine.QjsHandle to a
+                    # local: the engine class is `unsendable`, so any
+                    # exception raised below would capture the local
+                    # in the traceback and trip the cross-thread drop
+                    # check when cyclic GC eventually collects the
+                    # exception on a different thread.
+                    if not handle._require_live().is_promise():
                         fast = handle
                         handle = None  # transferred to caller
                         return fast
@@ -664,20 +669,30 @@ class Context:
                             self._engine_ctx.run_pending_jobs()
 
                             # Step 2: check promise state.
-                            state = self._engine_ctx.promise_state(inner)
+                            state = self._engine_ctx.promise_state(
+                                handle._require_live()
+                            )
 
                             # Step 3: fulfilled → return result.
                             if state == 1:
-                                result_inner = self._engine_ctx.promise_result(inner)
-                                result_handle = Handle(self, result_inner)
+                                result_handle = Handle(
+                                    self,
+                                    self._engine_ctx.promise_result(
+                                        handle._require_live()
+                                    ),
+                                )
                                 handle.dispose()
                                 handle = None
                                 return result_handle
 
                             # Step 4: rejected → raise from reason.
                             if state == 2:
-                                reason_inner = self._engine_ctx.promise_result(inner)
-                                reason_handle = Handle(self, reason_inner)
+                                reason_handle = Handle(
+                                    self,
+                                    self._engine_ctx.promise_result(
+                                        handle._require_live()
+                                    ),
+                                )
                                 try:
                                     self._raise_from_reason_handle(reason_handle, deadline)
                                 finally:
@@ -713,17 +728,30 @@ class Context:
                 self._runtime._deadline = None
                 self._active_task_group = None
                 assert handle is not None
-                inner = handle._require_live()
+                # See note above on the main loop: do not bind raw
+                # _engine.QjsHandle values to locals; pass them inline
+                # so a raise here cannot capture them in the
+                # traceback and trip the cross-thread drop check.
                 try:
                     self._engine_ctx.run_pending_jobs()
-                    state = self._engine_ctx.promise_state(inner)
+                    state = self._engine_ctx.promise_state(
+                        handle._require_live()
+                    )
                     if state == 1:
-                        result_inner = self._engine_ctx.promise_result(inner)
-                        absorbed_handle = Handle(self, result_inner)
+                        absorbed_handle = Handle(
+                            self,
+                            self._engine_ctx.promise_result(
+                                handle._require_live()
+                            ),
+                        )
                         handle.dispose()
                     elif state == 2:
-                        reason_inner = self._engine_ctx.promise_result(inner)
-                        reason_handle = Handle(self, reason_inner)
+                        reason_handle = Handle(
+                            self,
+                            self._engine_ctx.promise_result(
+                                handle._require_live()
+                            ),
+                        )
                         try:
                             is_our_cancel = self._handle_name_is(
                                 reason_handle, "HostCancellationError"
