@@ -23,6 +23,8 @@ mod marshal;
 mod modules;
 mod reentrance;
 mod runtime;
+mod ast;
+mod snapshot;
 
 use crate::context::QjsContext;
 use crate::errors::{InvalidHandleError, JSError, MarshalError, QuickJSError};

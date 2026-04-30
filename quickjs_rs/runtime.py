@@ -9,6 +9,7 @@ from typing import Any
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
 from quickjs_rs.modules import ModuleScope
+from quickjs_rs.snapshot import Snapshot
 
 
 class Runtime:
@@ -125,3 +126,29 @@ class Runtime:
                     f"ModuleScope entry {key!r}: expected str | ModuleScope, "
                     f"got {type(value).__name__}"
                 )
+
+    def restore_snapshot(
+        self,
+        snapshot: Snapshot,
+        ctx: Any,
+        *,
+        inject_globals: bool = True,
+    ) -> None:
+        """Restore a serialized snapshot into `ctx`."""
+        if self._closed:
+            raise QuickJSError("runtime is closed")
+        if not hasattr(ctx, "_engine_ctx"):
+            raise TypeError("ctx must be a quickjs_rs.Context")
+        if ctx._closed:
+            raise QuickJSError("context is closed")
+        if ctx._runtime is not self:
+            raise QuickJSError("context belongs to a different runtime")
+        if not isinstance(snapshot, Snapshot):
+            raise TypeError("snapshot must be quickjs_rs.Snapshot")
+        try:
+            ctx._engine_ctx.restore_snapshot_bytes(
+                snapshot.to_bytes(),
+                inject_globals=inject_globals,
+            )
+        except _engine.QuickJSError as e:
+            raise QuickJSError(str(e)) from None

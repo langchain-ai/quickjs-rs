@@ -9,12 +9,15 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
+use pyo3::exceptions::PyValueError;
+use rquickjs::qjs;
 use rquickjs::{
     atom::PredefinedAtom, context::EvalOptions, CatchResultExt, CaughtError, Context, Module,
-    Persistent, Value,
+    Object, Persistent, Value,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 use crate::errors::{
@@ -22,9 +25,12 @@ use crate::errors::{
 };
 use crate::handle::QjsHandle;
 use crate::host_fn::{build_async_host_trampoline, build_host_trampoline, PendingResolver};
-use crate::marshal::{js_value_to_py, py_to_js_value};
+use crate::marshal::{js_value_to_py, py_to_js_value, type_name_of};
 use crate::reentrance::with_active_ctx;
 use crate::runtime::QjsRuntime;
+use crate::snapshot::{
+    SnapshotFlags, SnapshotManager, SnapshotNameRecord, SnapshotRecordKind, SnapshotState,
+};
 
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 pub(crate) struct QjsContext {
@@ -57,6 +63,8 @@ pub(crate) struct QjsContext {
     /// sync-eval-with-async-hostfn regardless of whether an
     /// asyncio loop is ambient.
     in_sync_eval: Rc<Cell<bool>>,
+    /// Snapshot tracking + stateful serializer helpers.
+    snapshot_state: SnapshotState,
 }
 
 #[pymethods]
@@ -73,6 +81,7 @@ impl QjsContext {
             next_pending_id: Rc::new(Cell::new(1)),
             sync_eval_hit_async_call: Rc::new(Cell::new(false)),
             in_sync_eval: Rc::new(Cell::new(false)),
+            snapshot_state: SnapshotState::new(),
         })
     }
 
@@ -137,6 +146,102 @@ impl QjsContext {
         self.inner.is_none()
     }
 
+    /// Test/debug helper exposing the tracked declaration registry.
+    fn debug_snapshot_registry_names(&self) -> PyResult<Vec<String>> {
+        let _ = self.context()?;
+        Ok(self.snapshot_state.debug_registry_names())
+    }
+
+    #[pyo3(signature = (*, on_unserializable="tombstone", on_missing_name="skip", allow_bytecode=false, allow_reference=true, allow_sab=false))]
+    fn create_snapshot(
+        &self,
+        on_unserializable: &str,
+        on_missing_name: &str,
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+    ) -> PyResult<Vec<u8>> {
+        let _ = self.context()?;
+        let flags = SnapshotFlags {
+            allow_bytecode,
+            allow_reference,
+            allow_sab,
+        };
+        SnapshotManager::create_snapshot(
+            self,
+            &self.snapshot_state,
+            on_unserializable,
+            on_missing_name,
+            flags,
+        )
+    }
+
+    #[pyo3(signature = (handle, *, allow_bytecode=false, allow_reference=true, allow_sab=false))]
+    fn dump_handle(
+        &self,
+        handle: &QjsHandle,
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+    ) -> PyResult<Vec<u8>> {
+        if handle.context_ptr != self.context()?.as_raw().as_ptr() as usize {
+            return Err(InvalidHandleError::new_err(
+                "handle belongs to a different context",
+            ));
+        }
+        let persistent = handle.persistent_clone()?;
+        let context = self.context()?;
+        let ctx_ptr = context.as_raw().as_ptr();
+        with_active_ctx(context, |ctx| {
+            let val = persistent.restore(ctx).map_err(map_handle_error)?;
+            let mut out = MaybeUninit::<u64>::uninit();
+            let flags = Self::write_object_flags(allow_bytecode, allow_reference, allow_sab);
+            let buf = unsafe { qjs::JS_WriteObject(ctx_ptr, out.as_mut_ptr(), val.as_raw(), flags) };
+            if buf.is_null() {
+                return Err(Self::ctx_exception_pyerr(ctx));
+            }
+
+            let len = unsafe { out.assume_init() };
+            let bytes = unsafe { std::slice::from_raw_parts(buf, len as usize) }.to_vec();
+            unsafe { qjs::js_free(ctx_ptr, buf as *mut _) };
+            Ok(bytes)
+        })
+    }
+
+    #[pyo3(signature = (data, *, allow_bytecode=false, allow_reference=true, allow_sab=false))]
+    fn load_handle(
+        &self,
+        data: &[u8],
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+    ) -> PyResult<QjsHandle> {
+        let context = self.context()?.clone();
+        let context_ptr = context.as_raw().as_ptr() as usize;
+        let ctx_ptr = context.as_raw().as_ptr();
+        let persistent = with_active_ctx(&context, |ctx| {
+            let flags = Self::read_object_flags(allow_bytecode, allow_reference, allow_sab);
+            let raw_val =
+                unsafe { qjs::JS_ReadObject(ctx_ptr, data.as_ptr(), data.len() as u64, flags) };
+            if unsafe { qjs::JS_IsException(raw_val) } {
+                return Err(Self::ctx_exception_pyerr(ctx));
+            }
+            let restored = unsafe { Value::from_raw(ctx.clone(), raw_val) };
+            Ok(Persistent::save(ctx, restored))
+        })?;
+
+        Ok(QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(persistent),
+        })
+    }
+
+    #[pyo3(signature = (data, *, inject_globals=true))]
+    fn restore_snapshot_bytes(&self, data: &[u8], inject_globals: bool) -> PyResult<()> {
+        SnapshotManager::restore_snapshot_bytes(self, &self.snapshot_state, data, inject_globals)
+    }
+
     #[pyo3(signature = (code, *, module=false, strict=false, filename="<eval>"))]
     fn eval(
         &self,
@@ -147,6 +252,7 @@ impl QjsContext {
         filename: &str,
     ) -> PyResult<Py<PyAny>> {
         let context = self.context()?;
+        self.snapshot_state.track_eval(code, module);
         with_active_ctx(context, |ctx| {
             let mut options = EvalOptions::default();
             options.global = !module;
@@ -178,6 +284,7 @@ impl QjsContext {
         promise: bool,
         filename: &str,
     ) -> PyResult<QjsHandle> {
+        self.snapshot_state.track_eval(code, module);
         let context = self.context()?.clone();
         let context_ptr = context.as_raw().as_ptr() as usize;
         let persistent = with_active_ctx(&context, |ctx| {
@@ -220,6 +327,7 @@ impl QjsContext {
     /// surface through `promise_result` + _classify_jserror.
     #[pyo3(signature = (code, *, filename="<eval>"))]
     fn eval_module_async(&self, code: &str, filename: &str) -> PyResult<QjsHandle> {
+        self.snapshot_state.track_eval(code, true);
         let context = self.context()?.clone();
         let context_ptr = context.as_raw().as_ptr() as usize;
         let persistent = with_active_ctx(&context, |ctx| {
@@ -461,7 +569,159 @@ impl QjsContext {
 }
 
 impl QjsContext {
-    fn context(&self) -> PyResult<&Context> {
+    fn ctx_exception_pyerr<'js>(ctx: &rquickjs::Ctx<'js>) -> PyErr {
+        let caught = ctx.catch();
+        js_error_from_caught(ctx, rquickjs::CaughtError::Value(caught))
+    }
+
+    fn write_object_flags(allow_bytecode: bool, allow_reference: bool, allow_sab: bool) -> i32 {
+        let mut flags = 0;
+        if allow_bytecode {
+            flags |= qjs::JS_WRITE_OBJ_BYTECODE;
+        }
+        if allow_reference {
+            flags |= qjs::JS_WRITE_OBJ_REFERENCE;
+        }
+        if allow_sab {
+            flags |= qjs::JS_WRITE_OBJ_SAB;
+        }
+        flags as i32
+    }
+
+    fn read_object_flags(allow_bytecode: bool, allow_reference: bool, allow_sab: bool) -> i32 {
+        let mut flags = 0;
+        if allow_bytecode {
+            flags |= qjs::JS_READ_OBJ_BYTECODE;
+        }
+        if allow_reference {
+            flags |= qjs::JS_READ_OBJ_REFERENCE;
+        }
+        if allow_sab {
+            flags |= qjs::JS_READ_OBJ_SAB;
+        }
+        flags as i32
+    }
+
+    pub(crate) fn has_pending_snapshot_resolvers(&self) -> bool {
+        !self.pending_resolvers.borrow().is_empty()
+    }
+
+    pub(crate) fn snapshot_resolve_name_handle(&self, name: &str) -> PyResult<QjsHandle> {
+        self.eval_handle(name, false, false, false, "<snapshot:resolve-name>")
+    }
+
+    pub(crate) fn snapshot_handle_type(&self, handle: &QjsHandle) -> PyResult<String> {
+        let persistent = handle.persistent_clone()?;
+        let context = self.context()?;
+        with_active_ctx(context, |ctx| {
+            let value = persistent.restore(ctx).map_err(map_handle_error)?;
+            Ok(type_name_of(value.type_of()))
+        })
+    }
+
+    pub(crate) fn snapshot_dump_handle_bytes(
+        &self,
+        handle: &QjsHandle,
+        flags: SnapshotFlags,
+    ) -> PyResult<Vec<u8>> {
+        self.dump_handle(
+            handle,
+            flags.allow_bytecode,
+            flags.allow_reference,
+            flags.allow_sab,
+        )
+    }
+
+    pub(crate) fn snapshot_load_handle_bytes(
+        &self,
+        data: &[u8],
+        flags: SnapshotFlags,
+    ) -> PyResult<QjsHandle> {
+        self.load_handle(
+            data,
+            flags.allow_bytecode,
+            flags.allow_reference,
+            flags.allow_sab,
+        )
+    }
+
+    pub(crate) fn snapshot_dump_active_values_blob(
+        &self,
+        active_values: &[(String, Persistent<Value<'static>>)],
+        flags: SnapshotFlags,
+    ) -> PyResult<Vec<u8>> {
+        let context = self.context()?.clone();
+        let context_ptr = context.as_raw().as_ptr() as usize;
+        let aggregate = with_active_ctx(&context, |ctx| {
+            let obj = Object::new(ctx.clone())
+                .map_err(|e| QuickJSError::new_err(format!("snapshot object alloc failed: {}", e)))?;
+            for (name, persistent) in active_values {
+                let value = persistent.clone().restore(ctx).map_err(map_handle_error)?;
+                obj.set(name.as_str(), value).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "snapshot aggregate set failed for {:?}: {}",
+                        name, e
+                    ))
+                })?;
+            }
+            Ok(Persistent::save(ctx, obj.into_value()))
+        })?;
+        let aggregate_handle = QjsHandle {
+            context: Some(context),
+            context_ptr,
+            persistent: Some(aggregate),
+        };
+        self.snapshot_dump_handle_bytes(&aggregate_handle, flags)
+    }
+
+    pub(crate) fn snapshot_inject_active_globals(
+        &self,
+        loaded: &QjsHandle,
+        records: &[SnapshotNameRecord],
+    ) -> PyResult<Vec<String>> {
+        let context = self.context()?;
+        let aggregate = loaded.persistent_clone()?;
+        with_active_ctx(context, |ctx| {
+            let value = aggregate.restore(ctx).map_err(map_handle_error)?;
+            let obj: Object<'_> = value.try_into_object().map_err(|_| {
+                PyValueError::new_err("snapshot values blob did not decode into an object")
+            })?;
+            let globals = ctx.globals();
+            let mut names = Vec::new();
+            for record in records {
+                if record.record_kind != SnapshotRecordKind::Active {
+                    continue;
+                }
+                if !obj.contains_key(record.name.as_str()).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "snapshot aggregate lookup failed for {:?}: {}",
+                        record.name, e
+                    ))
+                })? {
+                    return Err(PyValueError::new_err(format!(
+                        "snapshot is missing active key {:?} in values blob",
+                        record.name
+                    )));
+                }
+                let restored: Value<'_> = obj.get(record.name.as_str()).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "snapshot aggregate get failed for {:?}: {}",
+                        record.name, e
+                    ))
+                })?;
+                globals.set(record.name.as_str(), restored).map_err(|e| {
+                    QuickJSError::new_err(format!(
+                        "failed to inject restored global {:?}: {}",
+                        record.name, e
+                    ))
+                })?;
+                names.push(record.name.clone());
+            }
+            Ok(names)
+        })
+    }
+
+    pub(crate) fn context(&self) -> PyResult<&Context> {
         self.inner
             .as_ref()
             .ok_or_else(|| QuickJSError::new_err("context is closed"))

@@ -26,6 +26,7 @@ from quickjs_rs.errors import (
 from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
+from quickjs_rs.snapshot import Snapshot
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
@@ -157,6 +158,10 @@ class Context:
         self._runtime._unregister_context(self)
         self._closed = True
 
+    def _debug_snapshot_registry_names(self) -> tuple[str, ...]:
+        """Test-only helper exposing the ordered snapshot registry."""
+        return tuple(self._engine_ctx.debug_snapshot_registry_names())
+
     def eval_handle(
         self,
         code: str,
@@ -264,6 +269,47 @@ class Context:
         if self._engine_ctx.take_sync_eval_hit_async_call():
             raise sync_eval_async_call_error()
         return result
+
+    def create_snapshot(
+        self,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> Snapshot:
+        """Create a context snapshot.
+
+        V1 captures top-level registry names, resolves them by identifier,
+        serializes active names as one aggregate graph blob, and records
+        tombstones for missing/unserializable names per policy.
+        """
+        if self._closed:
+            raise QuickJSError("context is closed")
+        if self._eval_async_in_flight:
+            raise ConcurrentEvalError("create_snapshot() cannot run while eval_async is in flight")
+        if self._pending_tasks:
+            raise QuickJSError("create_snapshot() cannot run while async host tasks are pending")
+        if on_unserializable not in {"tombstone", "error"}:
+            raise ValueError("on_unserializable must be 'tombstone' or 'error'")
+        if on_missing_name not in {"skip", "tombstone", "error"}:
+            raise ValueError("on_missing_name must be 'skip', 'tombstone', or 'error'")
+        try:
+            blob = self._engine_ctx.create_snapshot(
+                on_unserializable=on_unserializable,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+        except _engine.JSError as e:
+            name, message, stack = e.args
+            classified = self._classify_jserror(name, message, stack, None)
+            raise classified from classified.__cause__
+        except _engine.QuickJSError as e:
+            raise QuickJSError(str(e)) from None
+        return Snapshot(blob)
 
     def _raise_classified(
         self,
@@ -685,17 +731,13 @@ class Context:
                             self._engine_ctx.run_pending_jobs()
 
                             # Step 2: check promise state.
-                            state = self._engine_ctx.promise_state(
-                                handle._require_live()
-                            )
+                            state = self._engine_ctx.promise_state(handle._require_live())
 
                             # Step 3: fulfilled → return result.
                             if state == 1:
                                 result_handle = Handle(
                                     self,
-                                    self._engine_ctx.promise_result(
-                                        handle._require_live()
-                                    ),
+                                    self._engine_ctx.promise_result(handle._require_live()),
                                 )
                                 handle.dispose()
                                 handle = None
@@ -705,9 +747,7 @@ class Context:
                             if state == 2:
                                 reason_handle = Handle(
                                     self,
-                                    self._engine_ctx.promise_result(
-                                        handle._require_live()
-                                    ),
+                                    self._engine_ctx.promise_result(handle._require_live()),
                                 )
                                 try:
                                     self._raise_from_reason_handle(reason_handle, deadline)
@@ -763,23 +803,17 @@ class Context:
                 # traceback and trip the cross-thread drop check.
                 try:
                     self._engine_ctx.run_pending_jobs()
-                    state = self._engine_ctx.promise_state(
-                        handle._require_live()
-                    )
+                    state = self._engine_ctx.promise_state(handle._require_live())
                     if state == 1:
                         absorbed_handle = Handle(
                             self,
-                            self._engine_ctx.promise_result(
-                                handle._require_live()
-                            ),
+                            self._engine_ctx.promise_result(handle._require_live()),
                         )
                         handle.dispose()
                     elif state == 2:
                         reason_handle = Handle(
                             self,
-                            self._engine_ctx.promise_result(
-                                handle._require_live()
-                            ),
+                            self._engine_ctx.promise_result(handle._require_live()),
                         )
                         try:
                             is_our_cancel = self._handle_name_is(
