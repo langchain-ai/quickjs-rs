@@ -14,7 +14,6 @@ import pytest
 from quickjs_rs import (
     ConcurrentEvalError,
     DeadlockError,
-    HostError,
     InvalidHandleError,  # noqa: F401 — exercised once handles land
     JSError,
     MarshalError,  # noqa: F401 — exercised when handle marshaling lands
@@ -79,18 +78,18 @@ def test_smoke_primitives() -> None:
             ctx.register("say_hi", lambda who: f"hi {who}")
             assert ctx.eval("say_hi('world')") == "hi world"
 
-            # Host exception propagates out as HostError with __cause__
-            # threaded back to the original Python exception.
+            # Uncaught host exception bubbles out of ctx.eval as the
+            # original Python exception.
             @ctx.function
             def boom() -> None:
                 raise ValueError("from python")
 
-            with pytest.raises(HostError) as excinfo:
+            with pytest.raises(ValueError, match="from python"):
                 ctx.eval("boom()")
-            assert isinstance(excinfo.value.__cause__, ValueError)
 
-            # JS-side visibility: a try/catch inside JS sees the error's
-            # name and message and can round-trip them back as a string.
+            # JS-side visibility: a try/catch inside JS sees only the
+            # sanitized HostError name/message — the T3 mitigation
+            # surface, unaffected by Python-side propagation.
             assert (
                 ctx.eval("try { boom(); 'unreachable'; } catch (e) { e.name + ': ' + e.message }")
                 == "HostError: Host function failed"
@@ -204,16 +203,16 @@ def test_acceptance() -> None:
             assert excinfo.value.message == "bad thing"
             assert excinfo.value.stack is not None
 
-            # Host exception → JS → Python
+            # Host exception → original Python exception bubbles out of eval
             @ctx.function
             def boom() -> None:
                 raise ValueError("from python")
 
-            with pytest.raises(HostError) as excinfo_h:
+            with pytest.raises(ValueError, match="from python"):
                 ctx.eval("boom()")
-            assert isinstance(excinfo_h.value.__cause__, ValueError)
 
-            # JS catching host error
+            # JS catching host error: only the sanitized name/message
+            # are visible to JS.
             assert (
                 ctx.eval(
                     """

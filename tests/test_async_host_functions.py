@@ -367,16 +367,15 @@ async def test_sync_eval_js_try_catch_still_raises_concurrent_eval_error() -> No
                 ctx.eval("try { slow(); 'unreachable' } catch (e) { e.name }")
 
 
-async def test_async_host_function_raises_surfaces_hosterror() -> None:
+async def test_async_host_function_raises_propagates_original() -> None:
     """async path: a non-cancellation exception in an async host
-    function surfaces as HostError on the eval_async caller with the
-    original Python exception threaded via __cause__.
+    function bubbles out of eval_async as the original Python
+    exception when JS doesn't catch.
 
-    Distinct from the cancellation path — this is the
-    ordinary raise, not a CancelledError. Exercises the dispatcher's
-    encode-as-HostError-record branch in _run_async_host_call."""
-    from quickjs_rs import HostError
-
+    Distinct from the cancellation path — this is the ordinary raise,
+    not a CancelledError. Exercises the dispatcher's encode-as-
+    HostError-record branch in _run_async_host_call together with
+    Context._raise_classified's original-exception promotion."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -389,10 +388,8 @@ async def test_async_host_function_raises_surfaces_hosterror() -> None:
 
             ctx.register("broken", broken)
 
-            with pytest.raises(HostError) as excinfo:
+            with pytest.raises(CustomError, match="specific failure mode"):
                 await ctx.eval_async("await broken()")
-            assert excinfo.value.message == "Host function failed"
-            assert isinstance(excinfo.value.__cause__, CustomError)
 
 
 async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
