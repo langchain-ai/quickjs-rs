@@ -311,8 +311,81 @@ def _save_plot(fig: Any, path: Path) -> None:
     fig.clf()
 
 
+def _plot_note(out_path: Path, plt: Any, title: str, note: str) -> None:
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.axis("off")
+    ax.set_title(title)
+    ax.text(0.5, 0.5, note, ha="center", va="center", fontsize=11, wrap=True)
+    _save_plot(fig, out_path)
+    plt.close(fig)
+
+
+def _select_slice_params(rows: list[ExperimentResult]) -> tuple[int, int] | None:
+    valid = [r for r in rows if not r.error]
+    if not valid:
+        return None
+    target_limit = max(r.memory_limit_mb for r in valid)
+    target_payload = max(r.payload_mb_per_context for r in valid)
+    return target_limit, target_payload
+
+
+def _heatmap_grid(
+    subset: list[ExperimentResult],
+    *,
+    value_fn: Any,
+) -> tuple[list[int], list[int], list[list[float]]]:
+    runtimes = sorted({r.runtimes for r in subset})
+    contexts = sorted({r.contexts_per_runtime for r in subset})
+    mat: list[list[float]] = []
+    for c in contexts:
+        row_vals: list[float] = []
+        for r in runtimes:
+            hit = next(
+                (
+                    x
+                    for x in subset
+                    if x.runtimes == r and x.contexts_per_runtime == c
+                ),
+                None,
+            )
+            row_vals.append(value_fn(hit) if hit else float("nan"))
+        mat.append(row_vals)
+    return runtimes, contexts, mat
+
+
+def _annotate_heatmap(ax: Any, mat: list[list[float]], *, suffix: str = "") -> None:
+    for i, row_vals in enumerate(mat):
+        for j, value in enumerate(row_vals):
+            if math.isnan(value):
+                text = "-"
+            else:
+                text = f"{value:.1f}{suffix}"
+            ax.text(j, i, text, ha="center", va="center", color="white", fontsize=8)
+
+
+def _fit_line(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
+    if len(xs) < 2:
+        intercept = ys[0] if ys else 0.0
+        return 0.0, intercept, 0.0
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    denom = sum((x - mx) * (x - mx) for x in xs)
+    if denom <= 0.0:
+        return 0.0, my, 0.0
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom
+    intercept = my - slope * mx
+    preds = [intercept + slope * x for x in xs]
+    ss_res = sum((y - p) * (y - p) for y, p in zip(ys, preds, strict=True))
+    ss_tot = sum((y - my) * (y - my) for y in ys)
+    r2 = 0.0 if ss_tot <= 0.0 else 1.0 - (ss_res / ss_tot)
+    return slope, intercept, r2
+
+
 def _plot_scatter(rows: list[ExperimentResult], out_path: Path, plt: Any) -> None:
     valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(out_path, plt, "RSS vs QuickJS malloc", "No valid rows available.")
+        return
     fig, ax = plt.subplots(figsize=(8, 5))
     x = [_mb(r.quickjs_malloc_size_after_payload) for r in valid]
     y = [_mb(r.after_payload_rss_bytes) for r in valid]
@@ -339,6 +412,9 @@ def _plot_scatter(rows: list[ExperimentResult], out_path: Path, plt: Any) -> Non
 
 def _plot_overhead_stack(rows: list[ExperimentResult], out_path: Path, plt: Any) -> None:
     valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(out_path, plt, "Overhead breakdown", "No valid rows available.")
+        return
     top = sorted(valid, key=lambda r: r.after_payload_rss_bytes, reverse=True)[:10]
     labels = [
         (
@@ -373,6 +449,9 @@ def _plot_overhead_stack(rows: list[ExperimentResult], out_path: Path, plt: Any)
 
 def _plot_phase_deltas(rows: list[ExperimentResult], out_path: Path, plt: Any) -> None:
     valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(out_path, plt, "Phase RSS lines", "No valid rows available.")
+        return
     top = sorted(valid, key=lambda r: r.after_payload_rss_bytes, reverse=True)[:6]
     labels = [f"r{r.runtimes}-c{r.contexts_per_runtime}" for r in top]
     payload = [_mb(r.after_payload_rss_bytes) for r in top]
@@ -395,9 +474,13 @@ def _plot_phase_deltas(rows: list[ExperimentResult], out_path: Path, plt: Any) -
 def _plot_heatmap(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
     valid = [r for r in rows if not r.error]
     if not valid:
+        _plot_note(out_path, plt, "RSS heatmap", "No valid rows available.")
         return "no valid rows"
-    target_limit = max(r.memory_limit_mb for r in valid)
-    target_payload = max(r.payload_mb_per_context for r in valid)
+    params = _select_slice_params(rows)
+    if params is None:
+        _plot_note(out_path, plt, "RSS heatmap", "No valid rows available.")
+        return "no valid rows"
+    target_limit, target_payload = params
     subset = [
         r
         for r in valid
@@ -405,23 +488,17 @@ def _plot_heatmap(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str
         and r.payload_mb_per_context == target_payload
     ]
     if not subset:
+        _plot_note(
+            out_path,
+            plt,
+            "RSS heatmap",
+            "No rows in selected memory_limit/payload slice.",
+        )
         return "subset empty"
-    runtimes = sorted({r.runtimes for r in subset})
-    contexts = sorted({r.contexts_per_runtime for r in subset})
-    mat: list[list[float]] = []
-    for c in contexts:
-        row_vals: list[float] = []
-        for r in runtimes:
-            hit = next(
-                (
-                    x
-                    for x in subset
-                    if x.runtimes == r and x.contexts_per_runtime == c
-                ),
-                None,
-            )
-            row_vals.append(_mb(hit.after_payload_rss_bytes) if hit else float("nan"))
-        mat.append(row_vals)
+    runtimes, contexts, mat = _heatmap_grid(
+        subset,
+        value_fn=lambda hit: _mb(hit.after_payload_rss_bytes),
+    )
 
     fig, ax = plt.subplots(figsize=(8, 5))
     im = ax.imshow(mat, cmap="magma", aspect="auto")
@@ -435,13 +512,7 @@ def _plot_heatmap(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str
         "RSS heatmap (MB)\n"
         f"memory_limit={target_limit}MB payload={target_payload}MB/context"
     )
-    for i, row_vals in enumerate(mat):
-        for j, value in enumerate(row_vals):
-            if math.isnan(value):
-                text = "-"
-            else:
-                text = f"{value:.1f}"
-            ax.text(j, i, text, ha="center", va="center", color="white", fontsize=8)
+    _annotate_heatmap(ax, mat)
     fig.colorbar(im, ax=ax, label="after_payload_rss (MB)")
     _save_plot(fig, out_path)
     plt.close(fig)
@@ -451,9 +522,250 @@ def _plot_heatmap(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str
     )
 
 
+def _plot_hypothesis_total_contexts_linearity(
+    rows: list[ExperimentResult],
+    out_path: Path,
+    plt: Any,
+) -> str:
+    valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: total contexts vs memory pressure",
+            "No valid rows available.",
+        )
+        return "no valid rows"
+    combos = sorted({(r.memory_limit_mb, r.payload_mb_per_context) for r in valid})
+    fig, ax = plt.subplots(figsize=(9, 6))
+    for memory_limit_mb, payload_mb in combos:
+        subset = [
+            r
+            for r in valid
+            if r.memory_limit_mb == memory_limit_mb
+            and r.payload_mb_per_context == payload_mb
+        ]
+        xs = [float(r.total_contexts) for r in subset]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in subset]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.scatter(xs, ys, alpha=0.55, s=32)
+        x_min = min(xs)
+        x_max = max(xs)
+        ax.plot(
+            [x_min, x_max],
+            [intercept + slope * x_min, intercept + slope * x_max],
+            linewidth=1.2,
+            label=f"m={memory_limit_mb} p={payload_mb} (R2={r2:.2f})",
+        )
+    ax.set_xlabel("total_contexts (runtimes * contexts_per_runtime)")
+    ax.set_ylabel("memory pressure (after_payload_rss - baseline_rss, MB)")
+    ax.set_title("Linearity check: memory pressure vs total contexts")
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"{len(combos)} slices"
+
+
+def _plot_hypothesis_runtime_lines(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+    valid = [r for r in rows if not r.error]
+    params = _select_slice_params(rows)
+    if not valid or params is None:
+        _plot_note(out_path, plt, "Hypothesis: runtime effect", "No valid rows available.")
+        return "no valid rows"
+    target_limit, target_payload = params
+    subset = [
+        r
+        for r in valid
+        if r.memory_limit_mb == target_limit
+        and r.payload_mb_per_context == target_payload
+    ]
+    if not subset:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: runtime effect",
+            "No rows in selected memory_limit/payload slice.",
+        )
+        return "subset empty"
+    contexts = sorted({r.contexts_per_runtime for r in subset})
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for ctx in contexts:
+        series = sorted(
+            [r for r in subset if r.contexts_per_runtime == ctx],
+            key=lambda r: r.runtimes,
+        )
+        xs = [float(r.runtimes) for r in series]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in series]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.plot(xs, ys, marker="o", linewidth=1.4, label=f"ctx={ctx} (R2={r2:.2f})")
+        ax.plot(
+            [min(xs), max(xs)],
+            [intercept + slope * min(xs), intercept + slope * max(xs)],
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.7,
+        )
+    ax.set_xlabel("runtimes")
+    ax.set_ylabel("memory pressure (MB)")
+    ax.set_title(
+        "Linearity check: runtime effect at fixed context counts\n"
+        f"memory_limit={target_limit}MB payload={target_payload}MB/context"
+    )
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"slice memory_limit={target_limit}, payload={target_payload}"
+
+
+def _plot_hypothesis_context_lines(rows: list[ExperimentResult], out_path: Path, plt: Any) -> str:
+    valid = [r for r in rows if not r.error]
+    params = _select_slice_params(rows)
+    if not valid or params is None:
+        _plot_note(out_path, plt, "Hypothesis: context effect", "No valid rows available.")
+        return "no valid rows"
+    target_limit, target_payload = params
+    subset = [
+        r
+        for r in valid
+        if r.memory_limit_mb == target_limit
+        and r.payload_mb_per_context == target_payload
+    ]
+    if not subset:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: context effect",
+            "No rows in selected memory_limit/payload slice.",
+        )
+        return "subset empty"
+    runtimes = sorted({r.runtimes for r in subset})
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for runtime in runtimes:
+        series = sorted(
+            [r for r in subset if r.runtimes == runtime],
+            key=lambda r: r.contexts_per_runtime,
+        )
+        xs = [float(r.contexts_per_runtime) for r in series]
+        ys = [float(_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0))) for r in series]
+        if not xs:
+            continue
+        slope, intercept, r2 = _fit_line(xs, ys)
+        ax.plot(xs, ys, marker="o", linewidth=1.4, label=f"r={runtime} (R2={r2:.2f})")
+        ax.plot(
+            [min(xs), max(xs)],
+            [intercept + slope * min(xs), intercept + slope * max(xs)],
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.7,
+        )
+    ax.set_xlabel("contexts_per_runtime")
+    ax.set_ylabel("memory pressure (MB)")
+    ax.set_title(
+        "Linearity check: context effect at fixed runtime counts\n"
+        f"memory_limit={target_limit}MB payload={target_payload}MB/context"
+    )
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(fontsize=8, ncol=2, loc="upper left")
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"slice memory_limit={target_limit}, payload={target_payload}"
+
+
+def _plot_hypothesis_observed_vs_predicted(
+    rows: list[ExperimentResult],
+    out_path: Path,
+    plt: Any,
+) -> str:
+    valid = [r for r in rows if not r.error]
+    if not valid:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: observed vs linear model",
+            "No valid rows available.",
+        )
+        return "no valid rows"
+    try:
+        import numpy as np
+    except ImportError:
+        _plot_note(
+            out_path,
+            plt,
+            "Hypothesis: observed vs linear model",
+            "NumPy unavailable; cannot fit linear model.",
+        )
+        return "numpy unavailable"
+
+    x = np.array(
+        [
+            [
+                1.0,
+                float(r.runtimes),
+                float(r.contexts_per_runtime),
+                float(r.total_contexts),
+                float(r.payload_mb_per_context),
+                float(r.memory_limit_mb),
+            ]
+            for r in valid
+        ],
+        dtype=float,
+    )
+    y = np.array(
+        [_mb(max(r.after_payload_rss_bytes - r.baseline_rss_bytes, 0)) for r in valid],
+        dtype=float,
+    )
+    coeffs, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+    y_hat = x @ coeffs
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 0.0 if ss_tot <= 0.0 else 1.0 - (ss_res / ss_tot)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(
+        y_hat,
+        y,
+        c=[r.total_contexts for r in valid],
+        cmap="viridis",
+        alpha=0.8,
+        edgecolors="black",
+        linewidths=0.4,
+    )
+    low = min(float(np.min(y_hat)), float(np.min(y)))
+    high = max(float(np.max(y_hat)), float(np.max(y)))
+    ax.plot([low, high], [low, high], linestyle="--", linewidth=1.0, color="black")
+    ax.set_xlabel("predicted memory pressure (MB)")
+    ax.set_ylabel("observed memory pressure (MB)")
+    ax.set_title("Linearity check: observed vs linear model prediction")
+    cb = fig.colorbar(sc, ax=ax)
+    cb.set_label("total_contexts")
+    coeff_text = (
+        "y = b0 + b1*runtimes + b2*contexts + b3*total_contexts + "
+        "b4*payload + b5*memory_limit\n"
+        f"R2={r2:.3f}, b1={coeffs[1]:.3f}, b2={coeffs[2]:.3f}, b3={coeffs[3]:.3f}"
+    )
+    ax.text(
+        0.02,
+        0.98,
+        coeff_text,
+        transform=ax.transAxes,
+        va="top",
+        fontsize=8,
+        bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
+    )
+    _save_plot(fig, out_path)
+    plt.close(fig)
+    return f"R2={r2:.3f}"
+
+
 def build_visual_markdown(
     rows: list[ExperimentResult],
-    heatmap_meta: str,
+    plot_meta: dict[str, str],
     out_dir: Path,
 ) -> str:
     valid = [r for r in rows if not r.error]
@@ -487,13 +799,21 @@ def build_visual_markdown(
             f"at `runtimes={peak_residual.runtimes}, "
             f"contexts_per_runtime={peak_residual.contexts_per_runtime}`"
         ),
-        f"- Heatmap slice: `{heatmap_meta}`",
+        f"- RSS heatmap slice: `{plot_meta['rss_heatmap_slice']}`",
+        f"- Total-context linearity: `{plot_meta['hypothesis_total_contexts_linearity']}`",
+        f"- Runtime linearity slice: `{plot_meta['hypothesis_runtime_lines']}`",
+        f"- Context linearity slice: `{plot_meta['hypothesis_context_lines']}`",
+        f"- Observed vs linear model: `{plot_meta['hypothesis_observed_vs_predicted']}`",
         "",
         "Generated plots (saved as workflow artifacts):",
         f"- `{out_dir / 'rss_vs_qjs_scatter.png'}`",
         f"- `{out_dir / 'overhead_stacked_top.png'}`",
         f"- `{out_dir / 'phase_rss_lines_top.png'}`",
         f"- `{out_dir / 'rss_heatmap_slice.png'}`",
+        f"- `{out_dir / 'hypothesis_total_contexts_linearity.png'}`",
+        f"- `{out_dir / 'hypothesis_runtime_lines.png'}`",
+        f"- `{out_dir / 'hypothesis_context_lines.png'}`",
+        f"- `{out_dir / 'hypothesis_observed_vs_predicted.png'}`",
         "",
     ]
     return "\n".join(lines)
@@ -521,9 +841,31 @@ def generate_visual_report(
     _plot_scatter(rows, output_plots_dir / "rss_vs_qjs_scatter.png", plt)
     _plot_overhead_stack(rows, output_plots_dir / "overhead_stacked_top.png", plt)
     _plot_phase_deltas(rows, output_plots_dir / "phase_rss_lines_top.png", plt)
-    heatmap_meta = _plot_heatmap(rows, output_plots_dir / "rss_heatmap_slice.png", plt)
+    plot_meta = {
+        "rss_heatmap_slice": _plot_heatmap(rows, output_plots_dir / "rss_heatmap_slice.png", plt),
+        "hypothesis_total_contexts_linearity": _plot_hypothesis_total_contexts_linearity(
+            rows,
+            output_plots_dir / "hypothesis_total_contexts_linearity.png",
+            plt,
+        ),
+        "hypothesis_runtime_lines": _plot_hypothesis_runtime_lines(
+            rows,
+            output_plots_dir / "hypothesis_runtime_lines.png",
+            plt,
+        ),
+        "hypothesis_context_lines": _plot_hypothesis_context_lines(
+            rows,
+            output_plots_dir / "hypothesis_context_lines.png",
+            plt,
+        ),
+        "hypothesis_observed_vs_predicted": _plot_hypothesis_observed_vs_predicted(
+            rows,
+            output_plots_dir / "hypothesis_observed_vs_predicted.png",
+            plt,
+        ),
+    }
 
-    report = build_visual_markdown(rows, heatmap_meta, output_plots_dir)
+    report = build_visual_markdown(rows, plot_meta, output_plots_dir)
     output_visual_markdown.parent.mkdir(parents=True, exist_ok=True)
     output_visual_markdown.write_text(report, encoding="utf-8")
     return report
