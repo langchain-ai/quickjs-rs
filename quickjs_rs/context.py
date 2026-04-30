@@ -734,14 +734,17 @@ class Context:
                             # reclaim the host-await wall-clock from both
                             # the per-call deadline (interrupt handler
                             # re-reads when JS resumes) and the cumulative
-                            # budget.
+                            # budget. try/finally so a CancelledError
+                            # mid-wait still reclaims its share.
                             wait_start = time.monotonic()
-                            await event.wait()
+                            try:
+                                await event.wait()
+                            finally:
+                                elapsed_wait = time.monotonic() - wait_start
+                                deadline += elapsed_wait
+                                self._cumulative_deadline += elapsed_wait
+                                self._runtime._deadline = deadline
                             event.clear()
-                            elapsed_wait = time.monotonic() - wait_start
-                            deadline += elapsed_wait
-                            self._cumulative_deadline += elapsed_wait
-                            self._runtime._deadline = deadline
 
                             if time.monotonic() >= deadline:
                                 raise TimeoutError("eval_async exceeded its deadline")
