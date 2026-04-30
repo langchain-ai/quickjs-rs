@@ -126,7 +126,7 @@ flowchart TD
 
 - **Fields**: `err_message`, `err_stack` in `quickjs_rs/context.py:Context._run_async_host_call`; rejection fields in `src/context.rs:QjsContext::reject_pending`.
 - **Storage**: Python exception objects and JS exception objects (`src/host_fn.rs:throw_host_error`).
-- **Access**: JS caller reading rejection reason through `src/context.rs:QjsContext::promise_result`; Python caller catching `quickjs_rs/errors.py:HostError`.
+- **Access**: JS caller reading rejection reason through `src/context.rs:QjsContext::promise_result` (sees only the sanitized payload); Python caller catching the original host exception when it bubbles out of `eval`/`eval_async` uncaught (re-raised by `quickjs_rs/context.py:Context._raise_classified`).
 - **Encryption**: none by default.
 - **Retention**: depends on caller log/error handling pipelines.
 - **Logging exposure**: high likelihood if caller logs JS/Python exceptions verbatim.
@@ -236,7 +236,7 @@ flowchart TD
 |----|-----------|----------------|--------|----------|----------|--------|------------|----------------|
 | T1 | DF7, DF8 | DC1 | Untrusted JS can invoke privileged registered callbacks, enabling Python-side side effects (file/network/process access) equivalent to code execution through callback capabilities. | TB3 | Critical | Accepted (by design) | Verified | `quickjs_rs/context.py:Context.register`, `src/context.rs:QjsContext::register_host_function`, `src/host_fn.rs:call_host_fn` |
 | T2 | DF1, DF4 | DC2, DC4 | CPU/memory denial-of-service when callers disable/raise limits (`memory_limit=None`, permissive timeout) while executing attacker-influenced scripts. | TB1 | High | Accepted with guardrails | Verified | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context._eval_and_drive` |
-| T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Mitigated (sanitized JS HostError payload) | Verified | `quickjs_rs/context.py:Context._dispatch_host_call`, `quickjs_rs/context.py:Context._run_async_host_call`, `src/host_fn.rs:dispatch_async_host_fn` |
+| T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Mitigated for JS-visible surface (sanitized HostError payload); residual on Python-uncaught path | Verified | `quickjs_rs/context.py:Context._dispatch_host_call`, `quickjs_rs/context.py:Context._run_async_host_call`, `quickjs_rs/context.py:Context._raise_classified`, `src/host_fn.rs:dispatch_async_host_fn` |
 | T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted (architectural) | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
 | T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (`oxidase` transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
 | T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Mitigated (collision-safe allocator) | Verified | `src/host_fn.rs:dispatch_async_host_fn`, `src/host_fn.rs:find_available_pending_id`, `src/context.rs:QjsContext::resolve_pending` |
@@ -266,8 +266,8 @@ flowchart TD
 - **Flow**: DF9.
 - **Description**: callback exceptions include message/traceback that can surface to JS error objects and upstream service logs.
 - **Preconditions**: callback throws with sensitive content in message/stack; caller exposes error payload.
-- **Mitigations**: JS-visible host callback failures are sanitized to a stable `HostError` message (`"Host function failed"`) for both sync and async dispatch paths.
-- **Residual risk**: medium; original Python exception details remain available in Python (`HostError.__cause__`) and can still leak if callers log them verbatim.
+- **Mitigations**: JS-visible host callback failures are sanitized to a stable `JSError` (name `"HostError"`, message `"Host function failed"`, no stack) for both sync and async dispatch paths. JS `try/catch` and the eval result therefore never carry host exception content, so a model reading the eval tool's output never sees raw exception messages.
+- **Residual risk**: medium. When JS does not catch the rejection, the original host exception bubbles out of `eval`/`eval_async` as the underlying Python exception (`ValueError`, `RuntimeError`, etc.) — matching the leak surface of any non-quickjs Python tool that raises. The original message reaches caller-frame `try/except` and any default `log.exception()` in user code; caller-side log discipline (avoid logging exception messages verbatim from untrusted-callback code paths) is the residual control.
 
 #### T4: Native engine exploitability path
 
@@ -312,7 +312,7 @@ flowchart TD
 ### Threat Chain Analysis
 
 - **TC1 (T7 + T1)**: in pooled-runtime multi-tenant deployments, cross-tenant module poisoning can seed hostile helper code, then invoke privileged callback paths for lateral movement.
-- **TC2 (T3 + T1)**: callback abuse can still trigger sensitive failures; JS payloads are sanitized, but Python-side logging of underlying causes can still amplify exposure if not controlled.
+- **TC2 (T3 + T1)**: callback abuse can still trigger sensitive failures; JS-visible payloads are sanitized, but Python-side logging of the original exception (which bubbles out of `eval` on the uncaught path) can still amplify exposure if caller-side log discipline is not enforced.
 - **TC3 (T8 + T1)**: if reentrant context identity were to regress, callback-assisted cross-context eval could become a tenant-isolation bypass path on shared-runtime deployments.
 
 ---
