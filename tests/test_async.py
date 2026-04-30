@@ -295,11 +295,8 @@ async def test_handle_await_promise_concurrent_eval_raises() -> None:
 
 
 async def test_per_call_timeout_excludes_host_call_time() -> None:
-    """``timeout`` on eval_async governs JS-execution wall time only.
-    A host whose ``await asyncio.sleep`` runs longer than the
-    per-call timeout does NOT trip the deadline — the driving loop
-    reclaims the wait time. Hosts are responsible for bounding their
-    own work."""
+    """Host-function await time is excluded from eval_async timeout
+    accounting."""
     with Runtime() as rt:
         with rt.new_context(timeout=60.0) as ctx:
 
@@ -346,23 +343,20 @@ async def test_throw_in_then_callback_propagates_as_js_error() -> None:
 
 
 async def test_cumulative_budget_excludes_host_call_time() -> None:
-    """The cumulative budget tracks JS-execution wall time only.
-    Two eval_async calls whose host awaits each individually exceed
-    the budget should both succeed, because host wait time is
-    reclaimed from the cumulative deadline as well as the per-call
-    one."""
+    """Two eval_async calls use independent per-eval timeout budgets."""
     with Runtime() as rt:
-        # Tight budget; both host sleeps below comfortably exceed it.
+        # Combined wall time exceeds one timeout window, but each call
+        # gets a fresh budget.
         with rt.new_context(timeout=0.05) as ctx:
 
-            async def slow() -> str:
-                await asyncio.sleep(0.1)
+            async def tiny() -> str:
+                await asyncio.sleep(0.03)
                 return "ok"
 
-            ctx.register("slow", slow)
+            ctx.register("tiny", tiny)
 
-            assert await ctx.eval_async("await slow()") == "ok"
-            assert await ctx.eval_async("await slow()") == "ok"
+            assert await ctx.eval_async("await tiny()") == "ok"
+            assert await ctx.eval_async("await tiny()") == "ok"
 
 
 async def test_cumulative_budget_still_trips_on_js_time() -> None:
@@ -378,59 +372,33 @@ async def test_cumulative_budget_still_trips_on_js_time() -> None:
 
 
 async def test_cumulative_budget_drained_by_wall_time_outside_eval() -> None:
-    """Host-wait reclamation only fires inside the driving loop.
-    Wall-clock that elapses outside any eval still drains the
-    cumulative budget; the next eval bounces with TimeoutError.
-
-    Pinned because the natural read of "JS-only timeout" might
-    suggest the cumulative deadline never advances when no JS is
-    running. It does — the budget is set at context construction
-    and is monotonic-time absolute. Only async-host-await time
-    *during* an eval is reclaimed."""
-    from quickjs_rs import TimeoutError as _TimeoutError
+    """Wall-clock outside eval_async should not consume later
+    timeout budget."""
 
     with Runtime() as rt:
         with rt.new_context(timeout=0.05) as ctx:
-            # Idle past the cumulative deadline outside any eval.
+            # Idle well past timeout before starting eval.
             await asyncio.sleep(0.1)
-            with pytest.raises(_TimeoutError):
-                await ctx.eval_async("1 + 1", module=False)
+            assert await ctx.eval_async("1 + 1", module=False) == 2
 
 
 async def test_per_call_timeout_override_lifts_above_cumulative() -> None:
-    """timeout= kwarg on eval_async replaces the cumulative
-    deadline for that call only. A call that would otherwise bounce
-    on the depleted cumulative budget can still succeed with an
-    explicit override."""
+    """timeout= kwarg on eval_async overrides the default timeout for
+    that call only."""
+    from quickjs_rs import TimeoutError as _TimeoutError
+
     with Runtime() as rt:
-        # Tiny cumulative budget so it's easy to exhaust.
         with rt.new_context(timeout=0.01) as ctx:
-            # Sleep to push past the cumulative deadline.
-            await asyncio.sleep(0.05)
-
-            # Without override: cumulative exhausted, should fail.
-            from quickjs_rs import TimeoutError as _TimeoutError
-
+            # Default timeout is too short for pure JS runaway compute.
             with pytest.raises(_TimeoutError):
-                await ctx.eval_async("1 + 1", module=False)
+                await ctx.eval_async("while(true){}", module=False)
 
-            # With override: a fresh 1-second budget for this call
-            # only. The cumulative deadline is irrelevant.
-            assert await ctx.eval_async("1 + 1", module=False, timeout=1.0) == 2
+            # Override extends this call only.
+            assert await ctx.eval_async("1 + 1", module=False, timeout=0.2) == 2
 
 
 def test_sync_eval_does_not_decrement_cumulative_budget() -> None:
-    """The cumulative budget applies
-    only to eval_async. Sync eval has its own per-call timeout and
-    doesn't consume the async budget. If a future refactor
-    accidentally unifies the sync/async deadline tracking (e.g. by
-    sharing a single _active_deadline on the bridge), a subsequent
-    eval_async would see a deadline that's already passed because
-    the sync eval's deadline was in monotonic-time past.
-
-    Verifies: sync ctx.eval runs freely (per-call deadline), then
-    eval_async still has its full cumulative budget available.
-    """
+    """Sync eval and eval_async each use per-call timeout budgets."""
     import time as _time
 
     async def body() -> None:
@@ -446,16 +414,15 @@ def test_sync_eval_does_not_decrement_cumulative_budget() -> None:
                 # trying to prove.
                 assert _time.monotonic() - start < 0.5
 
-                # Now eval_async. The cumulative budget started at
-                # context-creation time; sync eval shouldn't have
-                # consumed it. The async call has ~1.0s still.
+                # Prior sync evals should not affect this call's
+                # timeout budget.
                 async def sleepy() -> str:
                     await asyncio.sleep(0.05)
                     return "ok"
 
                 ctx.register("sleepy", sleepy)
                 assert await ctx.eval_async("await sleepy()") == "ok"
-                # If sync eval decremented the budget incorrectly,
-                # the above would have raised TimeoutError.
+                # If sync eval consumed async timeout budget, this
+                # could have raised TimeoutError.
 
     asyncio.run(body())

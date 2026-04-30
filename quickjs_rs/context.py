@@ -101,18 +101,13 @@ class Context:
 
         # Async machinery. _eval_async_in_flight is the
         # concurrent-eval guard — only one eval_async / await_promise
-        # at a time per context. _cumulative_deadline is the rolling
-        # budget shared across eval_async calls; per-call timeout=
-        # overrides for one call only. The cumulative budget tracks
-        # JS-execution wall time only — time spent awaiting async
-        # host calls is reclaimed by the driving loop. _pending_tasks
-        # tracks the asyncio tasks we've spawned for async host calls
-        # so the driving loop knows when to wait vs raise
-        # DeadlockError. _pending_completed is the wake-up event the
-        # driving loop waits on between tasks. _active_task_group is
-        # set during _run_inside_task_group so the async host
-        # dispatcher schedules into it instead of loop.create_task.
-        self._cumulative_deadline = time.monotonic() + timeout
+        # at a time per context. _pending_tasks tracks the asyncio
+        # tasks we've spawned for async host calls so the driving loop
+        # knows when to wait vs raise DeadlockError.
+        # _pending_completed is the wake-up event the driving loop
+        # waits on between tasks. _active_task_group is set during
+        # _run_inside_task_group so the async host dispatcher schedules
+        # into it instead of loop.create_task.
         self._eval_async_in_flight = False
         self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
         self._pending_completed: asyncio.Event | None = None
@@ -445,14 +440,11 @@ class Context:
           To surface a value, set ``globalThis.result = ...`` in the
           module and read it with a sync ``ctx.eval("result")``.
 
-        Timeout semantics: ``timeout`` (and the context's cumulative
-        budget when ``timeout`` is omitted) governs JS-execution wall
-        time only. Time the driving loop spends awaiting an
-        asynchronous host call to settle is reclaimed from both
-        budgets, so a host that runs longer than ``timeout`` does
-        not by itself trip the deadline. Hosts are responsible for
-        bounding their own work; runaway JS bytecode between host
-        calls still trips the interrupt handler at ``timeout``.
+        Timeout accounting excludes wall-clock spent awaiting async
+        host calls; only JS execution time counts against the deadline.
+
+        Timeout semantics: ``timeout`` overrides this call's deadline.
+        If omitted, the context default timeout is used for this call.
 
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
@@ -501,9 +493,8 @@ class Context:
         settled value as a :class:`Handle` rather than marshaling.
 
         Timeout semantics match :meth:`eval_async`: ``timeout``
-        covers JS-execution wall time only; time spent awaiting
-        async host calls is reclaimed from both the per-call
-        deadline and the context's cumulative budget.
+        overrides this call's deadline, and the context default is
+        used when omitted.
 
         ``module=True``: returns a Handle to ``undefined`` (ES
         modules complete with undefined). The module's exports are
@@ -552,23 +543,11 @@ class Context:
                 "workloads"
             )
         self._last_host_exception = None
-        # Timeout semantics: per-call override or cumulative.
+        # Timeout semantics: per-call override or context default.
         if timeout is not None:
             deadline = time.monotonic() + timeout
         else:
-            deadline = self._cumulative_deadline
-            # Pre-check: the interrupt handler only fires during
-            # bytecode execution; a near-instant eval that completes
-            # before the next interrupt check would silently succeed
-            # past an expired budget. Raising up front matches
-            # the tripwire test_sync_eval_does_not_decrement_
-            # cumulative_budget's companion on the async side.
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "eval_async's cumulative timeout budget has "
-                    "elapsed; create a new context or pass timeout= "
-                    "to this call for a fresh budget"
-                )
+            deadline = time.monotonic() + self._timeout
 
         self._eval_async_in_flight = True
         self._runtime._deadline = deadline
@@ -730,19 +709,12 @@ class Context:
                             assert event is not None, (
                                 "pending task present but completion event is None"
                             )
-                            # timeout covers JS-execution time only —
-                            # reclaim the host-await wall-clock from both
-                            # the per-call deadline (interrupt handler
-                            # re-reads when JS resumes) and the cumulative
-                            # budget. try/finally so a CancelledError
-                            # mid-wait still reclaims its share.
                             wait_start = time.monotonic()
+                            self._runtime._deadline = None
                             try:
                                 await event.wait()
                             finally:
-                                elapsed_wait = time.monotonic() - wait_start
-                                deadline += elapsed_wait
-                                self._cumulative_deadline += elapsed_wait
+                                deadline += time.monotonic() - wait_start
                                 self._runtime._deadline = deadline
                             event.clear()
 
