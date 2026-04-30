@@ -3,13 +3,108 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import quickjs_rs._engine as _engine
-from quickjs_rs.errors import QuickJSError
+from quickjs_rs.errors import ConcurrentEvalError, QuickJSError
 from quickjs_rs.modules import ModuleScope
 from quickjs_rs.snapshot import Snapshot
+
+_SnapshotResolveStatus: TypeAlias = Literal["active", "missing", "unserializable"]
+_ResolvedEntry: TypeAlias = tuple[str, _SnapshotResolveStatus, _engine.QjsHandle | None, str | None]
+_ClassifiedResolvedHandle: TypeAlias = tuple[_ResolvedEntry, Any | None]
+
+
+def _validate_runtime_context(runtime: Runtime, ctx: Any) -> None:
+    """Validate runtime/context ownership and lifecycle preconditions."""
+    if runtime._closed:
+        raise QuickJSError("runtime is closed")
+    if not hasattr(ctx, "_engine_ctx"):
+        raise TypeError("ctx must be a quickjs_rs.Context")
+    if ctx._closed:
+        raise QuickJSError("context is closed")
+    if ctx._runtime is not runtime:
+        raise QuickJSError("context belongs to a different runtime")
+
+
+def _validate_snapshot_request(
+    runtime: Runtime,
+    ctx: Any,
+    *,
+    on_unserializable: str,
+    on_missing_name: str,
+) -> None:
+    """Validate snapshot-specific preconditions and policy option values."""
+    _validate_runtime_context(runtime, ctx)
+    if ctx._eval_async_in_flight:
+        raise ConcurrentEvalError("create_snapshot() cannot run while eval_async is in flight")
+    if ctx._pending_tasks:
+        raise QuickJSError("create_snapshot() cannot run while async host tasks are pending")
+    if on_unserializable not in {"tombstone", "error"}:
+        raise ValueError("on_unserializable must be 'tombstone' or 'error'")
+    if on_missing_name not in {"skip", "tombstone", "error"}:
+        raise ValueError("on_missing_name must be 'skip', 'tombstone', or 'error'")
+    if ctx._engine_ctx.snapshot_module_touched():
+        raise NotImplementedError(
+            "create_snapshot() is not implemented for contexts that "
+            "executed module=True eval; module-mode snapshotting is not implemented in V1"
+        )
+
+
+def _classify_resolved_snapshot_handle(
+    ctx: Any,
+    *,
+    name: str,
+    handle: Any,
+    allow_bytecode: bool,
+    allow_reference: bool,
+    allow_sab: bool,
+) -> _ClassifiedResolvedHandle:
+    """Classify a resolved handle as active or unserializable.
+
+    Returns an entry tuple for the engine's resolved-entry contract and,
+    when active, the live handle to retain until snapshot finalization.
+    """
+    type_name = handle.type_of
+    try:
+        ctx._engine_ctx.dump_handle(
+            handle._require_live(),
+            allow_bytecode=allow_bytecode,
+            allow_reference=allow_reference,
+            allow_sab=allow_sab,
+        )
+    except (_engine.JSError, _engine.QuickJSError, _engine.MarshalError):
+        handle.dispose()
+        return (name, "unserializable", None, type_name), None
+
+    return (name, "active", handle._require_live(), None), handle
+
+
+def _record_missing_snapshot_name(
+    *,
+    name: str,
+    on_missing_name: str,
+    error: QuickJSError,
+) -> _ResolvedEntry:
+    """Map missing-name resolution outcome to a resolved-entry tuple."""
+    if on_missing_name == "error":
+        raise error
+    return (name, "missing", None, None)
+
+
+@dataclass
+class _SnapshotResolution:
+    """Container for resolved snapshot entries and live active handles."""
+
+    entries: list[_ResolvedEntry]
+    active_handles: list[Any]
+
+    def dispose(self) -> None:
+        """Dispose all retained active handles after snapshot finalization."""
+        for handle in self.active_handles:
+            handle.dispose()
 
 
 class Runtime:
@@ -135,14 +230,7 @@ class Runtime:
         inject_globals: bool = True,
     ) -> None:
         """Restore a serialized snapshot into `ctx`."""
-        if self._closed:
-            raise QuickJSError("runtime is closed")
-        if not hasattr(ctx, "_engine_ctx"):
-            raise TypeError("ctx must be a quickjs_rs.Context")
-        if ctx._closed:
-            raise QuickJSError("context is closed")
-        if ctx._runtime is not self:
-            raise QuickJSError("context belongs to a different runtime")
+        _validate_runtime_context(self, ctx)
         if not isinstance(snapshot, Snapshot):
             raise TypeError("snapshot must be quickjs_rs.Snapshot")
         try:
@@ -152,3 +240,184 @@ class Runtime:
             )
         except _engine.QuickJSError as e:
             raise QuickJSError(str(e)) from None
+
+    def create_snapshot(
+        self,
+        ctx: Any,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> Snapshot:
+        _validate_snapshot_request(
+            self,
+            ctx,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+        )
+        resolution: _SnapshotResolution | None = None
+        try:
+            resolution = self._resolve_snapshot_entries_sync(
+                ctx,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+            return self._create_snapshot_from_resolved(
+                ctx,
+                resolved_entries=resolution.entries,
+                on_unserializable=on_unserializable,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+        finally:
+            if resolution is not None:
+                resolution.dispose()
+
+    async def create_snapshot_async(
+        self,
+        ctx: Any,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+        timeout: float | None = None,
+    ) -> Snapshot:
+        _validate_snapshot_request(
+            self,
+            ctx,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+        )
+        resolution: _SnapshotResolution | None = None
+        try:
+            resolution = await self._resolve_snapshot_entries_async(
+                ctx,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+                timeout=timeout,
+            )
+            return self._create_snapshot_from_resolved(
+                ctx,
+                resolved_entries=resolution.entries,
+                on_unserializable=on_unserializable,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+        finally:
+            if resolution is not None:
+                resolution.dispose()
+
+    def _resolve_snapshot_entries_sync(
+        self,
+        ctx: Any,
+        *,
+        on_missing_name: str,
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+    ) -> _SnapshotResolution:
+        names = list(ctx._engine_ctx.snapshot_registry_names())
+        resolved_entries: list[_ResolvedEntry] = []
+        active_handles: list[Any] = []
+        for name in names:
+            try:
+                handle = ctx.eval_handle(name)
+            except QuickJSError as e:
+                resolved_entries.append(
+                    _record_missing_snapshot_name(
+                        name=name,
+                        on_missing_name=on_missing_name,
+                        error=e,
+                    )
+                )
+                continue
+            entry, active_handle = _classify_resolved_snapshot_handle(
+                ctx,
+                name=name,
+                handle=handle,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+            resolved_entries.append(entry)
+            if active_handle is not None:
+                active_handles.append(active_handle)
+        return _SnapshotResolution(entries=resolved_entries, active_handles=active_handles)
+
+    async def _resolve_snapshot_entries_async(
+        self,
+        ctx: Any,
+        *,
+        on_missing_name: str,
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+        timeout: float | None,
+    ) -> _SnapshotResolution:
+        names = list(ctx._engine_ctx.snapshot_registry_names())
+        resolved_entries: list[_ResolvedEntry] = []
+        active_handles: list[Any] = []
+        for name in names:
+            try:
+                handle = await ctx.eval_handle_async(name, timeout=timeout)
+            except QuickJSError as e:
+                resolved_entries.append(
+                    _record_missing_snapshot_name(
+                        name=name,
+                        on_missing_name=on_missing_name,
+                        error=e,
+                    )
+                )
+                continue
+            entry, active_handle = _classify_resolved_snapshot_handle(
+                ctx,
+                name=name,
+                handle=handle,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+            resolved_entries.append(entry)
+            if active_handle is not None:
+                active_handles.append(active_handle)
+        return _SnapshotResolution(entries=resolved_entries, active_handles=active_handles)
+
+    def _create_snapshot_from_resolved(
+        self,
+        ctx: Any,
+        *,
+        resolved_entries: list[_ResolvedEntry],
+        on_unserializable: str,
+        on_missing_name: str,
+        allow_bytecode: bool,
+        allow_reference: bool,
+        allow_sab: bool,
+    ) -> Snapshot:
+        try:
+            blob = ctx._engine_ctx.create_snapshot_from_resolved(
+                resolved_entries=resolved_entries,
+                on_unserializable=on_unserializable,
+                on_missing_name=on_missing_name,
+                allow_bytecode=allow_bytecode,
+                allow_reference=allow_reference,
+                allow_sab=allow_sab,
+            )
+        except _engine.JSError as e:
+            name, message, stack = e.args
+            classified = ctx._classify_jserror(name, message, stack, None)
+            raise classified from classified.__cause__
+        except _engine.QuickJSError as e:
+            raise QuickJSError(str(e)) from None
+        return Snapshot(blob)

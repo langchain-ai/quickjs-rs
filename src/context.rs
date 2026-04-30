@@ -25,7 +25,7 @@ use crate::errors::{
 };
 use crate::handle::QjsHandle;
 use crate::host_fn::{build_async_host_trampoline, build_host_trampoline, PendingResolver};
-use crate::marshal::{js_value_to_py, py_to_js_value, type_name_of};
+use crate::marshal::{js_value_to_py, py_to_js_value};
 use crate::reentrance::with_active_ctx;
 use crate::runtime::QjsRuntime;
 use crate::snapshot::{
@@ -146,15 +146,22 @@ impl QjsContext {
         self.inner.is_none()
     }
 
-    /// Test/debug helper exposing the tracked declaration registry.
-    fn debug_snapshot_registry_names(&self) -> PyResult<Vec<String>> {
+    /// Expose the ordered snapshot declaration registry.
+    fn snapshot_registry_names(&self) -> PyResult<Vec<String>> {
         let _ = self.context()?;
-        Ok(self.snapshot_state.debug_registry_names())
+        Ok(self.snapshot_state.registry_names())
     }
 
-    #[pyo3(signature = (*, on_unserializable="tombstone", on_missing_name="skip", allow_bytecode=false, allow_reference=true, allow_sab=false))]
-    fn create_snapshot(
+    fn snapshot_module_touched(&self) -> PyResult<bool> {
+        let _ = self.context()?;
+        Ok(self.snapshot_state.module_touched())
+    }
+
+    #[pyo3(signature = (*, resolved_entries, on_unserializable="tombstone", on_missing_name="skip", allow_bytecode=false, allow_reference=true, allow_sab=false))]
+    fn create_snapshot_from_resolved(
         &self,
+        py: Python<'_>,
+        resolved_entries: Vec<(String, String, Option<Py<PyAny>>, Option<String>)>,
         on_unserializable: &str,
         on_missing_name: &str,
         allow_bytecode: bool,
@@ -167,9 +174,11 @@ impl QjsContext {
             allow_reference,
             allow_sab,
         };
-        SnapshotManager::create_snapshot(
+        SnapshotManager::create_snapshot_from_resolved(
             self,
             &self.snapshot_state,
+            py,
+            resolved_entries,
             on_unserializable,
             on_missing_name,
             flags,
@@ -604,19 +613,6 @@ impl QjsContext {
 
     pub(crate) fn has_pending_snapshot_resolvers(&self) -> bool {
         !self.pending_resolvers.borrow().is_empty()
-    }
-
-    pub(crate) fn snapshot_resolve_name_handle(&self, name: &str) -> PyResult<QjsHandle> {
-        self.eval_handle(name, false, false, false, "<snapshot:resolve-name>")
-    }
-
-    pub(crate) fn snapshot_handle_type(&self, handle: &QjsHandle) -> PyResult<String> {
-        let persistent = handle.persistent_clone()?;
-        let context = self.context()?;
-        with_active_ctx(context, |ctx| {
-            let value = persistent.restore(ctx).map_err(map_handle_error)?;
-            Ok(type_name_of(value.type_of()))
-        })
     }
 
     pub(crate) fn snapshot_dump_handle_bytes(

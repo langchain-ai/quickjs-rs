@@ -49,10 +49,12 @@ class QjsContext:
         strict: bool = False,
         filename: str = "<eval>",
     ) -> Any: ...
-    def debug_snapshot_registry_names(self) -> list[str]: ...
-    def create_snapshot(
+    def snapshot_registry_names(self) -> list[str]: ...
+    def snapshot_module_touched(self) -> bool: ...
+    def create_snapshot_from_resolved(
         self,
         *,
+        resolved_entries: list[tuple[str, str, QjsHandle | None, str | None]],
         on_unserializable: str = "tombstone",
         on_missing_name: str = "skip",
         allow_bytecode: bool = False,

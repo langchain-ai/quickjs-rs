@@ -158,9 +158,13 @@ class Context:
         self._runtime._unregister_context(self)
         self._closed = True
 
-    def _debug_snapshot_registry_names(self) -> tuple[str, ...]:
+    def _snapshot_registry_names(self) -> tuple[str, ...]:
         """Test-only helper exposing the ordered snapshot registry."""
-        return tuple(self._engine_ctx.debug_snapshot_registry_names())
+        return tuple(self._engine_ctx.snapshot_registry_names())
+
+    def _debug_snapshot_registry_names(self) -> tuple[str, ...]:
+        """Backward-compatible alias for older tests/callers."""
+        return self._snapshot_registry_names()
 
     def eval_handle(
         self,
@@ -281,35 +285,43 @@ class Context:
     ) -> Snapshot:
         """Create a context snapshot.
 
-        V1 captures top-level registry names, resolves them by identifier,
-        serializes active names as one aggregate graph blob, and records
-        tombstones for missing/unserializable names per policy.
+        V1 resolves tracked top-level names in Python and delegates
+        policy/record/envelope handling to the engine.
         """
-        if self._closed:
-            raise QuickJSError("context is closed")
-        if self._eval_async_in_flight:
-            raise ConcurrentEvalError("create_snapshot() cannot run while eval_async is in flight")
-        if self._pending_tasks:
-            raise QuickJSError("create_snapshot() cannot run while async host tasks are pending")
-        if on_unserializable not in {"tombstone", "error"}:
-            raise ValueError("on_unserializable must be 'tombstone' or 'error'")
-        if on_missing_name not in {"skip", "tombstone", "error"}:
-            raise ValueError("on_missing_name must be 'skip', 'tombstone', or 'error'")
-        try:
-            blob = self._engine_ctx.create_snapshot(
-                on_unserializable=on_unserializable,
-                on_missing_name=on_missing_name,
-                allow_bytecode=allow_bytecode,
-                allow_reference=allow_reference,
-                allow_sab=allow_sab,
-            )
-        except _engine.JSError as e:
-            name, message, stack = e.args
-            classified = self._classify_jserror(name, message, stack, None)
-            raise classified from classified.__cause__
-        except _engine.QuickJSError as e:
-            raise QuickJSError(str(e)) from None
-        return Snapshot(blob)
+        result = self._runtime.create_snapshot(
+            self,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+            allow_bytecode=allow_bytecode,
+            allow_reference=allow_reference,
+            allow_sab=allow_sab,
+        )
+        return result
+
+    async def create_snapshot_async(
+        self,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+        timeout: float | None = None,
+    ) -> Snapshot:
+        """Create a context snapshot with async identifier resolution.
+
+        Async path resolves each registered name via ``eval_handle_async``
+        and then delegates policy/record/envelope handling to the engine.
+        """
+        return await self._runtime.create_snapshot_async(
+            self,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+            allow_bytecode=allow_bytecode,
+            allow_reference=allow_reference,
+            allow_sab=allow_sab,
+            timeout=timeout,
+        )
 
     def _raise_classified(
         self,

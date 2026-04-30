@@ -22,7 +22,7 @@ def test_registry_tracks_top_level_decls_and_destructuring() -> None:
                 class K {}
                 """
             )
-            assert ctx._debug_snapshot_registry_names() == (
+            assert ctx._snapshot_registry_names() == (
                 "a",
                 "c",
                 "rest",
@@ -39,7 +39,7 @@ def test_registry_dedupes_first_seen_across_evals() -> None:
         with rt.new_context() as ctx:
             ctx.eval("var a = 1; var b = 2;")
             ctx.eval("var b = 3; var c = 4;")
-            assert ctx._debug_snapshot_registry_names() == ("a", "b", "c")
+            assert ctx._snapshot_registry_names() == ("a", "b", "c")
 
 
 def test_registry_ignores_nested_declarations() -> None:
@@ -54,7 +54,7 @@ def test_registry_ignores_nested_declarations() -> None:
                 const top = 1;
                 """
             )
-            assert ctx._debug_snapshot_registry_names() == ("top",)
+            assert ctx._snapshot_registry_names() == ("top",)
 
 
 def test_parser_error_does_not_corrupt_registry() -> None:
@@ -65,7 +65,7 @@ def test_parser_error_does_not_corrupt_registry() -> None:
             ctx.eval("const ok = 1;")
             with pytest.raises(JSError):
                 ctx.eval("const =")
-            assert ctx._debug_snapshot_registry_names() == ("ok",)
+            assert ctx._snapshot_registry_names() == ("ok",)
 
 
 def test_eval_handle_and_eval_handle_async_update_registry() -> None:
@@ -76,7 +76,7 @@ def test_eval_handle_and_eval_handle_async_update_registry() -> None:
                     pass
                 with await ctx.eval_handle_async("const fromHandleAsync = 2; fromHandleAsync;"):
                     pass
-                return ctx._debug_snapshot_registry_names()
+                return ctx._snapshot_registry_names()
 
     import asyncio
 
@@ -213,6 +213,46 @@ async def test_create_snapshot_module_mode_guard_async() -> None:
             await ctx.eval_async("globalThis.modTouched = 1", module=True)
             with pytest.raises(NotImplementedError, match="module=True"):
                 ctx.create_snapshot()
+
+
+async def test_create_snapshot_async_roundtrip() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            await ctx.eval_async(
+                "const value = 42; const shared = {}; const a = shared; const b = shared;"
+            )
+            snap = await ctx.create_snapshot_async()
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            rt2.restore_snapshot(snap, ctx2)
+            assert ctx2.eval("value") == 42
+            assert ctx2.eval("a === b") is True
+
+
+async def test_create_snapshot_async_missing_name_tombstone() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError):
+                await ctx.eval_async("throw new Error('boom'); const late = 1;")
+            snap = await ctx.create_snapshot_async(on_missing_name="tombstone")
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            rt2.restore_snapshot(snap, ctx2)
+            with pytest.raises(
+                JSError,
+                match="Value for 'late' was not captured because the identifier was not resolvable",
+            ):
+                ctx2.eval("late")
+
+
+async def test_create_snapshot_async_module_guard() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            await ctx.eval_async("globalThis.modTouched = 1", module=True)
+            with pytest.raises(NotImplementedError, match="module=True"):
+                await ctx.create_snapshot_async()
 
 
 def test_engine_dump_load_handle_roundtrip() -> None:

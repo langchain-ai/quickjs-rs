@@ -3,9 +3,11 @@
 use crate::ast::extract_top_level_declared_names;
 use crate::context::QjsContext;
 use crate::errors::QuickJSError;
+use crate::handle::QjsHandle;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyAny;
 use rquickjs::qjs;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
@@ -79,10 +81,6 @@ impl SnapshotState {
         }
     }
 
-    pub(crate) fn debug_registry_names(&self) -> Vec<String> {
-        self.name_registry.borrow().clone()
-    }
-
     pub(crate) fn registry_names(&self) -> Vec<String> {
         self.name_registry.borrow().clone()
     }
@@ -117,46 +115,46 @@ impl SnapshotState {
 }
 
 impl SnapshotManager {
-    pub(crate) fn create_snapshot(
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn create_snapshot_from_resolved(
         ctx: &QjsContext,
         state: &SnapshotState,
+        py: Python<'_>,
+        resolved_entries: Vec<(String, String, Option<Py<PyAny>>, Option<String>)>,
         on_unserializable: &str,
         on_missing_name: &str,
         flags: SnapshotFlags,
     ) -> PyResult<Vec<u8>> {
-        if on_unserializable != "tombstone" && on_unserializable != "error" {
-            return Err(PyValueError::new_err(
-                "on_unserializable must be 'tombstone' or 'error'",
-            ));
-        }
-        if on_missing_name != "skip" && on_missing_name != "tombstone" && on_missing_name != "error"
-        {
-            return Err(PyValueError::new_err(
-                "on_missing_name must be 'skip', 'tombstone', or 'error'",
-            ));
-        }
-        if state.module_touched() {
-            return Err(PyNotImplementedError::new_err(
-                "create_snapshot() is not implemented for contexts that \
-executed module=True eval; module-mode snapshotting is not implemented",
-            ));
-        }
-        if ctx.has_pending_snapshot_resolvers() {
-            return Err(QuickJSError::new_err(
-                "create_snapshot() cannot run while async host-call resolvers are pending",
-            ));
-        }
+        Self::validate_snapshot_create(ctx, state, on_unserializable, on_missing_name)?;
 
-        let names = state.registry_names();
-        let mut records: Vec<SnapshotNameRecord> = Vec::with_capacity(names.len());
-        let mut active_values = Vec::with_capacity(names.len());
+        let mut records: Vec<SnapshotNameRecord> = Vec::with_capacity(resolved_entries.len());
+        let mut active_values = Vec::new();
 
-        for name in names {
-            let handle = match ctx.snapshot_resolve_name_handle(name.as_str()) {
-                Ok(h) => h,
-                Err(err) => {
+        for (name, status, maybe_handle, type_name) in resolved_entries {
+            match status.as_str() {
+                "active" => {
+                    let py_handle = maybe_handle.ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "resolved entry for '{}' marked active but missing handle",
+                            name
+                        ))
+                    })?;
+                    let handle_ref = py_handle.bind(py).extract::<PyRef<'_, QjsHandle>>()?;
+                    let persistent = handle_ref.persistent_clone()?;
+                    records.push(SnapshotNameRecord {
+                        name: name.clone(),
+                        record_kind: SnapshotRecordKind::Active,
+                        type_name: None,
+                        hint: None,
+                    });
+                    active_values.push((name, persistent));
+                }
+                "missing" => {
                     if on_missing_name == "error" {
-                        return Err(err);
+                        return Err(QuickJSError::new_err(format!(
+                            "value for '{}' was not captured because the identifier was not resolvable",
+                            name
+                        )));
                     }
                     if on_missing_name == "tombstone" {
                         records.push(SnapshotNameRecord {
@@ -166,35 +164,29 @@ executed module=True eval; module-mode snapshotting is not implemented",
                             hint: Some(missing_name_hint(name.as_str())),
                         });
                     }
-                    continue;
                 }
-            };
-
-            let persistent = handle.persistent_clone()?;
-            let type_name = ctx.snapshot_handle_type(&handle)?;
-            if ctx.snapshot_dump_handle_bytes(&handle, flags).is_err() {
-                if on_unserializable == "error" {
-                    return Err(QuickJSError::new_err(format!(
-                        "value for '{}' is not serializable (type: {})",
-                        name, type_name
+                "unserializable" => {
+                    let type_name = type_name.unwrap_or_else(|| "unknown".to_string());
+                    if on_unserializable == "error" {
+                        return Err(QuickJSError::new_err(format!(
+                            "value for '{}' is not serializable (type: {})",
+                            name, type_name
+                        )));
+                    }
+                    records.push(SnapshotNameRecord {
+                        name: name.clone(),
+                        record_kind: SnapshotRecordKind::TombstoneUnserializable,
+                        type_name: Some(type_name.clone()),
+                        hint: Some(unserializable_hint(name.as_str(), type_name.as_str())),
+                    });
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "invalid resolved entry status {:?} for '{}'",
+                        other, name
                     )));
                 }
-                records.push(SnapshotNameRecord {
-                    name: name.clone(),
-                    record_kind: SnapshotRecordKind::TombstoneUnserializable,
-                    type_name: Some(type_name.clone()),
-                    hint: Some(unserializable_hint(name.as_str(), type_name.as_str())),
-                });
-                continue;
             }
-
-            records.push(SnapshotNameRecord {
-                name: name.clone(),
-                record_kind: SnapshotRecordKind::Active,
-                type_name: None,
-                hint: None,
-            });
-            active_values.push((name, persistent));
         }
 
         let values_blob = ctx.snapshot_dump_active_values_blob(&active_values, flags)?;
@@ -235,6 +227,37 @@ executed module=True eval; module-mode snapshotting is not implemented",
         let injected_names = ctx.snapshot_inject_active_globals(&loaded, &decoded.records)?;
         ctx.snapshot_install_tombstones(&decoded.records)?;
         state.merge_registry_names(&injected_names);
+        Ok(())
+    }
+
+    fn validate_snapshot_create(
+        ctx: &QjsContext,
+        state: &SnapshotState,
+        on_unserializable: &str,
+        on_missing_name: &str,
+    ) -> PyResult<()> {
+        if on_unserializable != "tombstone" && on_unserializable != "error" {
+            return Err(PyValueError::new_err(
+                "on_unserializable must be 'tombstone' or 'error'",
+            ));
+        }
+        if on_missing_name != "skip" && on_missing_name != "tombstone" && on_missing_name != "error"
+        {
+            return Err(PyValueError::new_err(
+                "on_missing_name must be 'skip', 'tombstone', or 'error'",
+            ));
+        }
+        if state.module_touched() {
+            return Err(PyNotImplementedError::new_err(
+                "create_snapshot() is not implemented for contexts that \
+executed module=True eval; module-mode snapshotting is not implemented",
+            ));
+        }
+        if ctx.has_pending_snapshot_resolvers() {
+            return Err(QuickJSError::new_err(
+                "create_snapshot() cannot run while async host-call resolvers are pending",
+            ));
+        }
         Ok(())
     }
 }
