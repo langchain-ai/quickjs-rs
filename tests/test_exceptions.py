@@ -17,23 +17,23 @@ def test_js_thrown_error_surfaces_name_message_stack() -> None:
             assert excinfo.value.stack is not None
 
 
-def test_host_error_cause_points_at_original_python_exception() -> None:
+def test_host_exception_bubbles_out_as_original() -> None:
+    """Uncaught host raise → original Python exception escapes ctx.eval."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             @ctx.function
             def fail() -> None:
                 raise KeyError("missing")
 
-            with pytest.raises(HostError) as excinfo:
+            with pytest.raises(KeyError, match="missing"):
                 ctx.eval("fail()")
-            assert isinstance(excinfo.value.__cause__, KeyError)
 
 
-def test_host_error_cause_is_cleared_between_evals() -> None:
-    """A successful host-fn call after a failing one must not inherit the
-    previous __cause__. If the bridge's side-channel isn't cleared on
-    consumption, a subsequent unrelated JSError could surface with a
-    bogus Python traceback attached.
+def test_host_exception_side_channel_cleared_between_evals() -> None:
+    """A first eval that raises a host exception must not poison a
+    later, unrelated eval. The bridge clears _last_host_exception at
+    each eval entry so a JS-thrown TypeError after an earlier host raise
+    surfaces as a plain JSError with no Python-side cause attached.
     """
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -41,10 +41,9 @@ def test_host_error_cause_is_cleared_between_evals() -> None:
             def fail() -> None:
                 raise KeyError("first call")
 
-            # First eval raises HostError with a cause.
-            with pytest.raises(HostError) as first:
+            # First eval bubbles out the original KeyError.
+            with pytest.raises(KeyError, match="first call"):
                 ctx.eval("fail()")
-            assert isinstance(first.value.__cause__, KeyError)
 
             # A plain JS-thrown error that isn't HostError-named should
             # raise as JSError with no Python-side cause.
@@ -80,6 +79,30 @@ def test_swallowed_host_raise_does_not_leak_cause_into_later_eval() -> None:
                     "const e = new Error('fake'); e.name = 'HostError'; throw e;"
                 )
             assert excinfo.value.__cause__ is None
+
+
+def test_within_eval_synthesized_hosterror_not_misattributed_to_swallowed_raise() -> None:
+    """Same eval: host A raises and JS catches it; JS then hand-throws an
+    error with name='HostError'. The synthesized throw must surface as
+    HostError (not as the swallowed Python exception). The bridge's
+    re-raise unwrap is keyed on the (name, message, stack) shape that
+    only the bridge produces, so a JS-synthesized HostError-named throw
+    with a custom message and a JS stack does not consume the side
+    channel.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            @ctx.function
+            def swallowed() -> None:
+                raise RuntimeError("never see this")
+
+            with pytest.raises(HostError) as excinfo:
+                ctx.eval(
+                    "try { swallowed(); } catch (e) {}"
+                    " const fake = new Error('synth'); fake.name = 'HostError'; throw fake;"
+                )
+            assert excinfo.value.message == "synth"
+            assert not isinstance(excinfo.value, RuntimeError)
 
 
 def test_js_catches_hosterror_and_reads_name_and_message() -> None:

@@ -153,9 +153,7 @@ async def test_eval_handle_async_returns_handle() -> None:
 
 async def test_eval_async_propagates_js_rejection() -> None:
     """An async host fn that raises → rejected Promise →
-    HostError surfaces from eval_async via routing."""
-    from quickjs_rs import HostError
-
+    original exception bubbles out of eval_async uncaught."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -165,10 +163,8 @@ async def test_eval_async_propagates_js_rejection() -> None:
 
             ctx.register("fail", fail)
 
-            with pytest.raises(HostError) as excinfo:
+            with pytest.raises(ValueError, match="from async host"):
                 await ctx.eval_async("await fail()")
-            assert excinfo.value.message == "Host function failed"
-            assert isinstance(excinfo.value.__cause__, ValueError)
 
 
 async def test_handle_await_promise_happy_path() -> None:

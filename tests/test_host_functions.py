@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from quickjs_rs import HostError, Runtime
+import pytest
+
+from quickjs_rs import Runtime
 
 
 def test_reentrant_eval_from_host_function() -> None:
@@ -59,9 +61,10 @@ def test_host_function_args_are_copied_before_dispatch() -> None:
             assert seen == ["alpha", "beta"]
 
 
-def test_host_function_exception_surfaces_as_hosterror() -> None:
-    """Python exception out of a registered host function round-trips as
-    HostError when it escapes back through ctx.eval. ."""
+def test_host_function_exception_propagates_original() -> None:
+    """An uncaught host-function exception bubbles out of ctx.eval as
+    the original Python exception. JS-visible try/catch still sees
+    only the sanitized HostError name/message."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
 
@@ -69,12 +72,8 @@ def test_host_function_exception_surfaces_as_hosterror() -> None:
             def explode() -> None:
                 raise RuntimeError("bang")
 
-            try:
+            with pytest.raises(RuntimeError, match="bang"):
                 ctx.eval("explode()")
-            except HostError as exc:
-                assert exc.message == "Host function failed"
-            else:
-                raise AssertionError("expected HostError")
 
 
 def test_register_preserves_callable_identity() -> None:

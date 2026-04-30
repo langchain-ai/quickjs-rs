@@ -7,7 +7,7 @@ import inspect
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any
+from typing import Any, NoReturn
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
@@ -92,9 +92,11 @@ class Context:
         # dispatcher looks up fn_id here.
         self._host_registry: dict[int, Callable[..., Any]] = {}
         self._next_fn_id: int = 1
-        # Host-exception side channel: when a host fn raises,
-        # the dispatcher stashes the Python exception here so eval's
-        # HostError catch can thread it via __cause__.
+        # Host-exception side channel: when a host fn raises, the
+        # dispatcher stashes the Python exception here so the eval
+        # boundary can re-raise the original (uncaught path) or thread
+        # it via __cause__ on a synthesized HostError (the rare path
+        # where JS hand-throws a HostError-named error).
         self._last_host_exception: BaseException | None = None
 
         # Async machinery. _eval_async_in_flight is the
@@ -187,8 +189,7 @@ class Context:
             name, message, stack = e.args
             if self._engine_ctx.take_sync_eval_hit_async_call():
                 raise sync_eval_handle_async_call_error() from None
-            classified = self._classify_jserror(name, message, stack, deadline)
-            raise classified from classified.__cause__
+            self._raise_classified(name, message, stack, deadline)
         except _engine.MarshalError as e:
             if self._engine_ctx.take_sync_eval_hit_async_call():
                 raise sync_eval_handle_async_call_error() from None
@@ -245,10 +246,7 @@ class Context:
             # downstream error the async-rejected promise produced.
             if self._engine_ctx.take_sync_eval_hit_async_call():
                 raise sync_eval_async_call_error() from None
-            classified = self._classify_jserror(name, message, stack, deadline)
-            # Preserve HostError.__cause__ that _classify_jserror
-            # just threaded from the side channel.
-            raise classified from classified.__cause__
+            self._raise_classified(name, message, stack, deadline)
         except _engine.MarshalError as e:
             if self._engine_ctx.take_sync_eval_hit_async_call():
                 raise sync_eval_async_call_error() from None
@@ -265,6 +263,42 @@ class Context:
             raise sync_eval_async_call_error()
         return result
 
+    def _raise_classified(
+        self,
+        name: str,
+        message: str,
+        stack: str | None,
+        deadline: float | None,
+    ) -> NoReturn:
+        """Raise the exception that should surface for this rejection.
+
+        For an uncaught host-callback rejection (name == "HostError"
+        with a stashed Python exception in the side channel), re-raise
+        the original Python exception so callers see the underlying
+        ValueError / RuntimeError / etc. directly. Otherwise classify
+        the JS error and raise the synthesized QuickJSError.
+
+        JS-visible behavior is unaffected: this only runs when a
+        rejection has bubbled past JS try/catch to the eval boundary.
+        """
+        if (
+            name == "HostError"
+            and message == _HOST_ERROR_SANITIZED_MESSAGE
+            and self._last_host_exception is not None
+        ):
+            # The (name, message) shape matches what the bridge
+            # produces, so this rejection is from a host raise rather
+            # than a JS hand-thrown HostError-named error with a
+            # different message. ``from None`` so the caught
+            # _engine.JSError doesn't show up as ``__context__``
+            # ("During handling of the above exception") and leak
+            # QuickJS internals into the user's traceback.
+            original = self._last_host_exception
+            self._last_host_exception = None
+            raise original from None
+        classified = self._classify_jserror(name, message, stack, deadline)
+        raise classified from classified.__cause__
+
     def _classify_jserror(
         self,
         name: str,
@@ -277,7 +311,9 @@ class Context:
 
         - name == "HostError": threaded with __cause__ from
           self._last_host_exception so the original Python traceback
-          shows up for the user.
+          shows up for the user. (Only reached when JS code synthesizes
+          a HostError-named throw without an underlying host raise; an
+          actual host raise is unwrapped earlier in _raise_classified.)
         - name == "InternalError" with message "interrupted":
           TimeoutError. The runtime's only source of interrupts is
           the wall-clock deadline we install from eval entry; any
@@ -567,8 +603,7 @@ class Context:
                 )
         except _engine.JSError as e:
             name, message, stack = e.args
-            classified = self._classify_jserror(name, message, stack, deadline)
-            raise classified from classified.__cause__
+            self._raise_classified(name, message, stack, deadline)
         except _engine.MarshalError as e:
             raise MarshalError(str(e)) from None
         return Handle(self, inner)
@@ -744,8 +779,7 @@ class Context:
             message = str(message) if message is not None else ""
         if stack is not None and not isinstance(stack, str):
             stack = None
-        classified = self._classify_jserror(name, message, stack, deadline)
-        raise classified from classified.__cause__
+        self._raise_classified(name, message, stack, deadline)
 
     def _handle_name_is(self, reason: Handle, expected: str) -> bool:
         """Read the `.name` property off a JS exception Handle and
@@ -845,8 +879,9 @@ class Context:
             except BaseException as exc:
                 resolve_ok = False
                 self._last_host_exception = exc
-                # Preserve internals in Python (__cause__), but expose
-                # only a stable sanitized message over the JS boundary.
+                # Stable sanitized payload for the JS-visible rejection;
+                # the side-channel carries the original for re-raise at
+                # the eval boundary if JS doesn't catch.
                 err_message = _HOST_ERROR_SANITIZED_MESSAGE
                 err_stack = None
 
@@ -869,13 +904,12 @@ class Context:
         """fn_id → callable lookup and call. Invoked from the
         Rust trampoline with the GIL held.
 
-        On user-fn exception: stash the Python exception on the
-        side channel, re-raise as ``_engine.JSError(("HostError",
-        message, stack))`` so the Rust side throws a JS Error with
-        name="HostError". Context.eval catches the
-        ``_engine.JSError`` and promotes to the pure-Python
-        ``HostError`` with ``__cause__`` threaded from the side
-        channel.
+        On user-fn exception: stash the Python exception on the side
+        channel and re-raise a sanitized ``_engine.JSError("HostError",
+        "Host function failed", None)`` so JS try/catch sees only the
+        stable message. If the rejection bubbles out of eval uncaught,
+        ``_raise_classified`` consumes the side-channel and re-raises
+        the original Python exception.
         """
         fn = self._host_registry.get(fn_id)
         if fn is None:
@@ -888,6 +922,4 @@ class Context:
             return fn(*args)
         except BaseException as exc:
             self._last_host_exception = exc
-            # Preserve original exception in __cause__, while
-            # sanitizing the JS-visible HostError payload.
             raise _engine.JSError("HostError", _HOST_ERROR_SANITIZED_MESSAGE, None) from None
