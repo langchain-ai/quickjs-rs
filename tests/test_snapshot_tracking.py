@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import struct
+
 import pytest
 
 from quickjs_rs import JSError, QuickJSError, Runtime, Snapshot
@@ -120,11 +123,19 @@ def test_snapshot_missing_name_policies() -> None:
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
             rt2.restore_snapshot(tomb_snap, ctx2)
+            assert ctx2.eval("Object.prototype.hasOwnProperty.call(globalThis, 'late')") is True
             with pytest.raises(
                 JSError,
                 match="Value for 'late' was not captured because the identifier was not resolvable",
             ):
                 ctx2.eval("late")
+
+    with Runtime() as rt3:
+        with rt3.new_context() as ctx3:
+            rt3.restore_snapshot(skip_snap, ctx3)
+            assert ctx3.eval("Object.prototype.hasOwnProperty.call(globalThis, 'late')") is False
+            with pytest.raises(JSError, match="late is not defined"):
+                ctx3.eval("late")
 
 
 def test_snapshot_unserializable_policies() -> None:
@@ -145,6 +156,20 @@ def test_snapshot_unserializable_policies() -> None:
                 ctx2.eval("fn")
 
 
+def test_restore_snapshot_overwrites_existing_globals() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const keep = 7;")
+            snap = ctx.create_snapshot()
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            ctx2.eval("globalThis.keep = 999;")
+            assert ctx2.eval("keep") == 999
+            rt2.restore_snapshot(snap, ctx2)
+            assert ctx2.eval("keep") == 7
+
+
 def test_restore_snapshot_unknown_version_rejected() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -156,6 +181,21 @@ def test_restore_snapshot_unknown_version_rejected() -> None:
         with rt2.new_context() as ctx2:
             with pytest.raises(ValueError, match="format version"):
                 rt2.restore_snapshot(Snapshot.from_bytes(bytes(data)), ctx2)
+
+
+def test_restore_snapshot_rquickjs_version_rejected() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const x = 1;")
+            data = _rewrite_snapshot_header(
+                ctx.create_snapshot().to_bytes(),
+                {"rquickjs_version": "0.0.0-test"},
+            )
+
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            with pytest.raises(ValueError, match="rquickjs version"):
+                rt2.restore_snapshot(Snapshot.from_bytes(data), ctx2)
 
 
 def test_create_snapshot_module_mode_guard_sync() -> None:
@@ -200,3 +240,25 @@ def test_engine_dump_load_invalid_bytes_raises() -> None:
         with rt.new_context() as ctx:
             with pytest.raises((_engine.JSError, _engine.QuickJSError)):
                 ctx._engine_ctx.load_handle(b"not-valid-qjs-blob")
+
+
+def _rewrite_snapshot_header(data: bytes, updates: dict[str, str]) -> bytes:
+    if len(data) < 9:
+        raise ValueError("snapshot payload too short")
+    magic = data[:4]
+    version = data[4:5]
+    header_len = struct.unpack("<I", data[5:9])[0]
+    header_start = 9
+    header_end = header_start + header_len
+    header = json.loads(data[header_start:header_end].decode("utf-8"))
+    header.update(updates)
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    return b"".join(
+        [
+            magic,
+            version,
+            struct.pack("<I", len(header_bytes)),
+            header_bytes,
+            data[header_end:],
+        ]
+    )

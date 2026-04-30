@@ -215,6 +215,12 @@ executed module=True eval; module-mode snapshotting is not implemented",
                 decoded.header.quickjs_version, runtime_qjs
             )));
         }
+        if decoded.header.rquickjs_version != RQUICKJS_VERSION {
+            return Err(PyValueError::new_err(format!(
+                "snapshot rquickjs version {} does not match runtime rquickjs version {}",
+                decoded.header.rquickjs_version, RQUICKJS_VERSION
+            )));
+        }
 
         let flags = SnapshotFlags {
             allow_bytecode: decoded.header.allow_bytecode,
