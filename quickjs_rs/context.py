@@ -283,10 +283,45 @@ class Context:
         allow_reference: bool = True,
         allow_sab: bool = False,
     ) -> Snapshot:
-        """Create a context snapshot.
+        """Create a Snapshot V1 payload from this context.
 
-        Resolves tracked top-level names in Python and delegates
-        policy/record/envelope handling to the engine.
+        Snapshot V1 tracks script-mode top-level declarations across
+        eval calls, resolves those names at snapshot time, and
+        serializes the active values as one aggregate graph so aliasing
+        is preserved across restored names.
+
+        Args:
+            on_unserializable: Policy for names whose resolved value
+                cannot be serialized. ``"tombstone"`` records the name
+                as unavailable after restore; ``"error"`` fails snapshot
+                creation.
+            on_missing_name: Policy for tracked names that no longer
+                resolve by identifier lookup at snapshot time.
+                ``"skip"`` omits the name entirely, ``"tombstone"``
+                restores a throwing placeholder, and ``"error"`` fails
+                snapshot creation.
+            allow_bytecode: Passed through to QuickJS object
+                serialization. Leave disabled unless bytecode objects
+                are intentionally part of the snapshot boundary.
+            allow_reference: Passed through to QuickJS object
+                serialization. Enabled by default so shared references
+                inside the captured graph can round-trip.
+            allow_sab: Passed through to QuickJS object serialization
+                for SharedArrayBuffer support.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload that can be converted
+            to bytes or restored into another context.
+
+        Raises:
+            NotImplementedError: If this context has executed any
+                ``module=True`` eval surface. Module-mode snapshotting is
+                intentionally unsupported in V1.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on this context.
+            QuickJSError: If the context is closed, async host tasks are
+                pending, or a policy is set to ``"error"`` and a tracked
+                name cannot be captured.
         """
         result = self._runtime.create_snapshot(
             self,
@@ -308,10 +343,35 @@ class Context:
         allow_sab: bool = False,
         timeout: float | None = None,
     ) -> Snapshot:
-        """Create a context snapshot with async identifier resolution.
+        """Create a Snapshot V1 payload with async identifier resolution.
 
-        Async path resolves each registered name via ``eval_handle_async``
-        and then delegates policy/record/envelope handling to the engine.
+        This follows the same snapshot model as
+        :meth:`create_snapshot`, but resolves each tracked name through
+        :meth:`eval_handle_async` so contexts whose identifier lookup
+        path can touch async host functions remain snapshot-capable.
+
+        Args:
+            on_unserializable: See :meth:`create_snapshot`.
+            on_missing_name: See :meth:`create_snapshot`.
+            allow_bytecode: See :meth:`create_snapshot`.
+            allow_reference: See :meth:`create_snapshot`.
+            allow_sab: See :meth:`create_snapshot`.
+            timeout: Optional per-name timeout override passed to
+                ``eval_handle_async`` while resolving tracked
+                identifiers. ``None`` uses the context's cumulative
+                async budget rules.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload.
+
+        Raises:
+            NotImplementedError: If this context has executed any
+                ``module=True`` eval surface.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on this context.
+            QuickJSError: If the context is closed, async host tasks are
+                pending, or a policy is set to ``"error"`` and a tracked
+                name cannot be captured.
         """
         return await self._runtime.create_snapshot_async(
             self,

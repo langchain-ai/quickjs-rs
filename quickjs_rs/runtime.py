@@ -229,7 +229,30 @@ class Runtime:
         *,
         inject_globals: bool = True,
     ) -> None:
-        """Restore a serialized snapshot into `ctx`."""
+        """Restore a snapshot payload into ``ctx``.
+
+        Args:
+            snapshot: Snapshot payload previously produced by
+                :meth:`create_snapshot`,
+                :meth:`create_snapshot_async`, or the corresponding
+                context helpers.
+            ctx: Destination context. It must belong to this runtime.
+            inject_globals: If ``True`` (default), restored active
+                names are injected into the destination context's
+                globals and tombstones are installed for unavailable
+                names. If ``False``, the payload is decoded and
+                validated without mutating the destination globals.
+
+        Raises:
+            TypeError: If ``snapshot`` is not a
+                :class:`quickjs_rs.Snapshot`.
+            QuickJSError: If the runtime or context is closed, the
+                context belongs to a different runtime, or the payload
+                cannot be restored.
+            ValueError: If the snapshot envelope is malformed or its
+                compatibility metadata does not match the current
+                runtime.
+        """
         _validate_runtime_context(self, ctx)
         if not isinstance(snapshot, Snapshot):
             raise TypeError("snapshot must be quickjs_rs.Snapshot")
@@ -251,6 +274,40 @@ class Runtime:
         allow_reference: bool = True,
         allow_sab: bool = False,
     ) -> Snapshot:
+        """Create a snapshot from ``ctx`` using synchronous resolution.
+
+        Args:
+            ctx: Source context. It must belong to this runtime.
+            on_unserializable: Policy for tracked names whose resolved
+                value cannot be serialized. ``"tombstone"`` records the
+                name as unavailable after restore; ``"error"`` fails
+                snapshot creation.
+            on_missing_name: Policy for tracked names that no longer
+                resolve by identifier lookup at snapshot time.
+                ``"skip"`` omits the name entirely, ``"tombstone"``
+                restores a throwing placeholder, and ``"error"`` fails
+                snapshot creation.
+            allow_bytecode: Passed through to QuickJS object
+                serialization.
+            allow_reference: Passed through to QuickJS object
+                serialization. Enabled by default so shared references
+                inside the captured graph can round-trip.
+            allow_sab: Passed through to QuickJS object serialization
+                for SharedArrayBuffer support.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload.
+
+        Raises:
+            NotImplementedError: If ``ctx`` has executed any
+                ``module=True`` eval surface.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on ``ctx``.
+            QuickJSError: If the runtime/context is closed, the context
+                belongs to a different runtime, async host tasks are
+                pending, or policy requires an unavailable name to fail
+                snapshot creation.
+        """
         _validate_snapshot_request(
             self,
             ctx,
@@ -290,6 +347,33 @@ class Runtime:
         allow_sab: bool = False,
         timeout: float | None = None,
     ) -> Snapshot:
+        """Create a snapshot from ``ctx`` using async resolution.
+
+        Args:
+            ctx: Source context. It must belong to this runtime.
+            on_unserializable: See :meth:`create_snapshot`.
+            on_missing_name: See :meth:`create_snapshot`.
+            allow_bytecode: See :meth:`create_snapshot`.
+            allow_reference: See :meth:`create_snapshot`.
+            allow_sab: See :meth:`create_snapshot`.
+            timeout: Optional per-name timeout override passed to
+                ``ctx.eval_handle_async(...)`` while resolving tracked
+                names. ``None`` uses the context's cumulative async
+                timeout behavior.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload.
+
+        Raises:
+            NotImplementedError: If ``ctx`` has executed any
+                ``module=True`` eval surface.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on ``ctx``.
+            QuickJSError: If the runtime/context is closed, the context
+                belongs to a different runtime, async host tasks are
+                pending, or policy requires an unavailable name to fail
+                snapshot creation.
+        """
         _validate_snapshot_request(
             self,
             ctx,
