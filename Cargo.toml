@@ -1,6 +1,6 @@
 [package]
 name = "quickjs-rs-python"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 
@@ -11,24 +11,24 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 rquickjs = { version = "0.11", features = [
-    "classes",
-    "properties",
-    "futures",
-    # Enables Resolver / Loader traits + Runtime::set_loader
-    # for ES module support.
-    # The feature is trait-surface only — no behavior change to any
-    # existing code path.
-    "loader",
-    # `bindgen` is deliberately omitted: rquickjs-sys ships
-    # pre-generated bindings for every target we build wheels for
-    # (aarch64 / x86_64 × linux-gnu / linux-musl / apple-darwin /
-    # pc-windows-msvc). Enabling bindgen would pull in libclang +
-    # glibc-devel at build time, which breaks the manylinux build
-    # container (`bits/libc-header-start.h: file not found`) and
-    # slows cold compiles everywhere. If we ever target a platform
-    # without a pre-generated binding file (see
-    # rquickjs-sys/src/bindings/), add bindgen back here and
-    # ensure the build environment has libclang.
+  "classes",
+  "properties",
+  "futures",
+  # Enables Resolver / Loader traits + Runtime::set_loader
+  # for ES module support.
+  # The feature is trait-surface only — no behavior change to any
+  # existing code path.
+  "loader",
+  # `bindgen` is deliberately omitted: rquickjs-sys ships
+  # pre-generated bindings for every target we build wheels for
+  # (aarch64 / x86_64 × linux-gnu / linux-musl / apple-darwin /
+  # pc-windows-msvc). Enabling bindgen would pull in libclang +
+  # glibc-devel at build time, which breaks the manylinux build
+  # container (`bits/libc-header-start.h: file not found`) and
+  # slows cold compiles everywhere. If we ever target a platform
+  # without a pre-generated binding file (see
+  # rquickjs-sys/src/bindings/), add bindgen back here and
+  # ensure the build environment has libclang.
 ] }
 # TypeScript support — str entries ending in .ts/.tsx are
 # transparently type-stripped at install() time.
