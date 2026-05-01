@@ -37,7 +37,7 @@
 
 1. Internal callers may pass sensitive business data, credentials, and user data through eval/callback paths.
 2. The library itself does not persist state to disk or external databases; retention is process-memory bounded by runtime/context lifecycles.
-3. Upstream dependency security response (quickjs-ng via `rquickjs`/`rquickjs-sys`, plus `oxidase`) is handled by repository maintainers.
+3. Upstream dependency security response (quickjs-ng via `rquickjs`/`rquickjs-sys`, plus OXC transpiler crates) is handled by repository maintainers.
 
 ---
 
@@ -84,7 +84,7 @@ flowchart TD
 | C7 | Resolver/loader module store | In-memory module registry with scope-root path normalization and no filesystem loader. | framework-controlled | No (explicit opt-in required) | `src/modules.rs:resolve_with`, `src/modules.rs:normalize_path`, `src/modules.rs:StoreLoader::load` |
 | C8 | Caller-provided JS/TS/module source | Untrusted or semi-trusted script content passed to eval/install APIs. | user-controlled | No (explicit opt-in required) | `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context.eval_async`, `quickjs_rs/runtime.py:Runtime._install_recursive` |
 | C9 | Caller-provided Python callbacks | Python callables registered into JS global scope and invoked by JS code. | user-controlled | No (explicit opt-in required) | `quickjs_rs/context.py:Context.register`, `quickjs_rs/context.py:Context.function` |
-| C10 | Upstream dependency surface | Embedded runtime/transpiler dependencies (`rquickjs`, quickjs-ng via `rquickjs-sys`, `oxidase`) executed inside process/build. | external | Yes (main package dependency) | `src/runtime.rs:QjsRuntime::new`, `src/modules.rs:maybe_strip_ts` |
+| C10 | Upstream dependency surface | Embedded runtime/transpiler dependencies (`rquickjs`, quickjs-ng via `rquickjs-sys`, OXC crates) executed inside process/build. | external | Yes (main package dependency) | `src/runtime.rs:QjsRuntime::new`, `src/modules.rs:maybe_strip_ts` |
 
 ---
 
@@ -238,7 +238,7 @@ flowchart TD
 | T2 | DF1, DF4 | DC2, DC4 | CPU/memory denial-of-service when callers disable/raise limits (`memory_limit=None`, permissive timeout) while executing attacker-influenced scripts. | TB1 | High | Accepted with guardrails | Verified | `quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::new`, `quickjs_rs/context.py:Context.eval`, `quickjs_rs/context.py:Context._eval_and_drive` |
 | T3 | DF9 | DC3 | Host exception messages and tracebacks can leak secrets/paths into JS-visible errors and upstream logs. | TB3 | High | Mitigated for JS-visible surface (sanitized HostError payload); residual on Python-uncaught path | Verified | `quickjs_rs/context.py:Context._dispatch_host_call`, `quickjs_rs/context.py:Context._run_async_host_call`, `quickjs_rs/context.py:Context._raise_classified`, `src/host_fn.rs:dispatch_async_host_fn` |
 | T4 | DF1, DF4, DF11 | DC2, DC5 | Native engine vulnerability risk: attacker-controlled JS reaches embedded quickjs-ng execution path via `rquickjs`; upstream memory safety flaws could lead process compromise. | TB2, TB6 | Critical | Accepted (architectural) | Unverified | `src/context.rs:QjsContext::eval`, `src/context.rs:QjsContext::eval_module_async`, `src/runtime.rs:QjsRuntime::new` |
-| T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (`oxidase` transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
+| T5 | DF11 | DC5 | Build/runtime supply-chain compromise risk from external dependency code paths (OXC transpilation and engine crates). | TB6 | High | Accepted | Likely | `src/modules.rs:maybe_strip_ts`, `src/runtime.rs:QjsRuntime::new` |
 | T6 | DF8 | DC1, DC5 | `pending_id` wraparound (`u32::wrapping_add`) can collide with unresolved entries, potentially misrouting async Promise settlements under extreme long-lived load. | TB5 | Medium | Mitigated (collision-safe allocator) | Verified | `src/host_fn.rs:dispatch_async_host_fn`, `src/host_fn.rs:find_available_pending_id`, `src/context.rs:QjsContext::resolve_pending` |
 | T7 | DF2, DF3, DF5 | DC2 | Runtime-level shared module store can allow cross-tenant module poisoning if one runtime serves multiple trust domains (multi-tenant pooled-runtime pattern). | TB1, TB4 | High (conditional) | Accepted (documented constraint) | Likely | `quickjs_rs/runtime.py:Runtime.install`, `quickjs_rs/runtime.py:Runtime._install_recursive`, `src/runtime.rs:QjsRuntime::ensure_module_store` |
 | T8 | DF7, DF10 | DC2, DC5 | Reentrant eval across sibling contexts on one runtime can run against the wrong context identity, causing cross-context read/write contamination. | TB2, TB3 | High | Mitigated (requested-context enforcement) | Verified | `src/reentrance.rs:with_active_ctx`, `tests/test_reentrance.py` |
@@ -282,7 +282,7 @@ flowchart TD
 - **Flow**: DF11.
 - **Description**: compromised dependency artifacts or malicious upstream commits affect transpile/runtime behavior.
 - **Preconditions**: dependency source compromised before/at build.
-- **Mitigations**: commit pinning for `oxidase` (non-floating branch), explicit dependency declarations, RustSec advisory scanning in CI (`.github/workflows/dependency-security.yml`), and Cargo.lock git-source allowlist enforcement (`.github/scripts/check_cargo_lock_git_sources.py`).
+- **Mitigations**: explicit dependency declarations, RustSec advisory scanning in CI (`.github/workflows/dependency-security.yml`), and Cargo.lock git-source allowlist enforcement (`.github/scripts/check_cargo_lock_git_sources.py`).
 - **Residual risk**: high; pinning alone does not guarantee artifact integrity.
 
 #### T6: Async pending ID collision
@@ -357,7 +357,7 @@ This section is the dependency-risk and sandbox-boundary addendum consolidated i
 ### Purpose and Scope
 
 In scope:
-- Rust dependency chain (`pyo3`, `rquickjs`, `rquickjs-core`, `rquickjs-sys`, `oxidase` + transitive graph).
+- Rust dependency chain (`pyo3`, `rquickjs`, `rquickjs-core`, `rquickjs-sys`, `oxc_*` crates + transitive graph).
 - Runtime isolation properties of embedded quickjs-ng execution in this project.
 - Practical maintenance/adoption signals for upstream risk posture.
 
@@ -375,7 +375,7 @@ Out of scope:
 | `rquickjs` | `0.11.0` (crates.io) | Rust API wrapper over quickjs-ng | `Cargo.lock`:717-735 and `rquickjs` README (`docs.rs`) |
 | `rquickjs-sys` | `0.11.0` (crates.io) | Low-level native bindings used by `rquickjs` | `Cargo.lock`:738-744 |
 | `quickjs-ng` | Transitive native engine source bundled via `rquickjs-sys` (not a direct Cargo package entry) | JavaScript VM compiled into the extension module | `rquickjs` README states quickjs-ng backing; `rquickjs-sys` bundled engine source tree (`quickjs/*`) |
-| `oxidase` | git rev `045ea46...` | TypeScript stripping at install time | `Cargo.toml` dependency pin; `Cargo.lock`:497-519 |
+| `oxc_transformer` | crates.io (`0.31.0`) | TypeScript stripping/transforms at install time | `Cargo.toml` dependency line; `Cargo.lock` OXC package entries |
 
 #### Chain topology
 
@@ -388,8 +388,8 @@ quickjs-rs-python
           -> compiled into `_engine` native module
   -> pyo3
     -> pyo3-ffi
-  -> oxidase (git rev)
-    -> oxc* transitive dependencies (git branch in lockfile)
+  -> oxc_transformer
+    -> oxc* transitive dependencies
 ```
 
 Evidence:
@@ -406,7 +406,7 @@ Evidence:
 | Native engine memory-safety risk | JS is executed by embedded native engine (quickjs-ng via `rquickjs-sys`) in-process. | Runtime limits and interrupt handler in project code (`src/runtime.rs:QjsRuntime::new`, `QjsRuntime::set_interrupt_handler`) | High |
 | Compromised upstream release (crates.io) | `pyo3`/`rquickjs`/`rquickjs-sys` come from registry artifacts. | `Cargo.lock` pinning by version + checksum | Medium |
 | Compromised quickjs-ng upstream import path | quickjs-ng source is vendored inside the `rquickjs-sys` supply path; an upstream compromise or malicious import/update can enter runtime engine code. | Version pinning of `rquickjs-sys` crate and lockfile review | Medium-High |
-| Compromised git dependency | `oxidase` comes from git commit; transitive `oxc*` sources are git-based in lockfile. | Explicit commit pin for `oxidase` plus git-source allowlist checks in CI (`.github/scripts/check_cargo_lock_git_sources.py`) | Medium |
+| Compromised dependency release | `oxc_*` crates are third-party transpiler dependencies in the build/runtime path. | Version pinning in `Cargo.lock`, dependency review, and CI scanning (`cargo audit`) | Medium |
 | Silent transitive drift on lock update | Lock refresh can pull new transitive versions/commits. | CI gate fails on unexpected git-source introductions outside allowlist | Medium |
 | Vulnerability lag | New advisories can emerge for shipped versions after lockfile updates. | Always-on RustSec scan in CI (`cargo audit`) plus Dependabot/GitHub alerts | Medium |
 
@@ -417,7 +417,7 @@ Evidence:
 | quickjs-ng | quickjs-ng repository shows active releases (for example `previous implementation` on 2026-04-11). | Actively released upstream C engine fork, but still native in-process risk. |
 | `rquickjs` / `rquickjs-sys` | `rquickjs` 0.11.0 release (2025-12-24); repository metadata current at snapshot time. | Wrapper and bindings appear actively maintained. |
 | PyO3 | `pyo3` 0.28.3 release (2026-04-02); repository metadata current at snapshot time. | Mature, high-velocity bridge ecosystem. |
-| `oxidase` (git dep) | Pinned commit date 2025-02-09; smaller maintainer footprint than PyO3/rquickjs. | Higher governance risk than large crates.io projects; pinning helps reproducibility, not compromise resistance. |
+| OXC transpiler crates | crates.io releases consumed via `Cargo.toml` / `Cargo.lock`. | Standard crates.io supply-chain risk; mitigated by lockfile review and audit cadence. |
 
 Notes:
 - `rquickjs-sys` carries bundled engine sources and local patches, which is useful but increases divergence-tracking responsibility for consumers.

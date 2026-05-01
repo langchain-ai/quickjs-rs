@@ -21,7 +21,7 @@ from types import MappingProxyType
 # Order is the resolver's preference order when a bare specifier
 # lands on a scope: whichever index.<ext> exists first in this
 # list wins. JS variants first (faster — no strip), then TS
-# variants (always stripped via oxidase), then JSX/TSX.
+# variants (always stripped via the OXC transpile step), then JSX/TSX.
 _INDEX_EXTENSIONS: tuple[str, ...] = (
     "js",
     "mjs",

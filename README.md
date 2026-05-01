@@ -2,7 +2,7 @@
 
 Sandboxed JavaScript execution for Python.
 
-Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via OXC-based transpilation.
 
 > [!WARNING]
 > `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
@@ -88,7 +88,7 @@ Shared deps are declared by spreading (`**utils.modules`) into each scope that n
 
 ## TypeScript
 
-Source strings whose key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped at `install()` time via oxidase. Enums, namespaces, and parameter properties are transformed; plain type annotations erase to whitespace. No type checking — run `tsc --noEmit` separately if you want that.
+Source strings whose key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped at `install()` time via OXC tooling. Enums, namespaces, and parameter properties are transformed; plain type annotations erase to whitespace. No type checking — run `tsc --noEmit` separately if you want that.
 
 ```python
 rt.install(ModuleScope({
@@ -103,7 +103,7 @@ rt.install(ModuleScope({
 }))
 ```
 
-TypeScript syntax errors surface at `install()` time (oxidase parses during stripping) rather than at eval.
+TypeScript syntax errors surface at `install()` time (the transpile step parses during install) rather than at eval.
 
 ## Security
 

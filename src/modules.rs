@@ -351,62 +351,15 @@ pub(crate) fn normalize_path(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Transparent TypeScript stripping. If the scope-entry key
-/// ends in `.ts` or `.tsx`, run the source through oxidase to
-/// erase type annotations (plus transform enums, namespaces, and
-/// parameter properties — see the oxidase README). Any other
-/// extension (`.js`, `.mjs`, `.cjs`, or none) passes through
-/// unchanged.
+/// Transparent TypeScript transpilation during install.
 ///
-/// On a parser panic, returns the aggregated error messages as a
-/// `String`. On parser success with non-fatal diagnostics, ignores
-/// them — oxidase is deliberately lenient (see its parser options:
-/// `allow_return_outside_function: true, allow_skip_ambient: true`)
-/// and the transpile output in those cases is still usable.
-///
-/// Import specifiers are NOT rewritten: `import { x } from
-/// "./y.ts"` stays `"./y.ts"` in the stripped output. That's
-/// important for our resolver — it looks up keys exactly as they
-/// appear in the ModuleScope dict, so a `.ts` key must stay a
-/// `.ts` specifier. Verified against oxidase 045ea46b by
-/// inspecting `handle_import_declaration` — it only patches
-/// type-only imports (`import type { ... }`).
+/// If the scope-entry key ends in `.ts`, `.mts`, `.cts`, or `.tsx`,
+/// run the source through our OXC pipeline to erase types and emit
+/// JS transforms where needed (enums, namespaces, parameter
+/// properties). Any other extension (`.js`, `.mjs`, `.cjs`, or none)
+/// passes through unchanged.
 pub(crate) fn maybe_strip_ts(key: &str, source: &str) -> Result<String, String> {
-    let source_type = if key.ends_with(".ts") || key.ends_with(".mts") || key.ends_with(".cts") {
-        oxidase::SourceType::ts()
-    } else if key.ends_with(".tsx") {
-        oxidase::SourceType::tsx()
-    } else {
-        // .js, .mjs, .cjs, no extension, anything else — pass
-        // through. Users who want .ts behavior on an odd filename
-        // can rename; we don't heuristically guess.
-        return Ok(source.to_string());
-    };
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let allocator = oxidase::Allocator::default();
-        let mut buf = source.to_string();
-        let ret = oxidase::transpile(&allocator, source_type, &mut buf);
-        (buf, ret.parser_panicked, ret.parser_errors
-            .iter()
-            .map(|d| d.to_string())
-            .collect::<Vec<_>>())
-    }));
-
-    let (buf, panicked, errors) = outcome.map_err(|_| {
-        format!("oxidase panicked unexpectedly while parsing {}", key)
-    })?;
-    
-    if panicked {
-        let msg = if errors.is_empty() {
-            format!("oxidase failed to parse {}", key)
-        } else {
-            format!("TypeScript parse error in {}: {}", key, errors.join("; "))
-        };
-        return Err(msg);
-    }
-
-    Ok(buf)
+    crate::transpile::maybe_transpile(key, source)
 }
 
 #[cfg(test)]

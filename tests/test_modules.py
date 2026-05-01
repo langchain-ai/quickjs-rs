@@ -1138,19 +1138,19 @@ async def test_comprehension_removal_makes_module_unreachable() -> None:
                 )
 
 
-# TypeScript via oxidase —
+# TypeScript via OXC transpile step —
 #
 # .ts and .tsx keys are transparently stripped at install() time.
 # The resolver treats the key literally — ".ts" stays ".ts" in
 # canonical paths — so `import { x } from "./foo.ts"` resolves
-# against the dict key "foo.ts", not "foo.js". Oxidase preserves
+# against the dict key "foo.ts", not "foo.js". The transpiler preserves
 # the specifier untouched (verified against 045ea46b).
 
 
 async def test_ts_file_with_type_annotations_imports_and_runs() -> None:
     """A .ts entry point + a .ts helper, types stripped at
     install time. Exercises the basic wire-up: key-based extension
-    detection, oxidase round-trip, specifier preservation, and the
+    detection, transpile round-trip, specifier preservation, and the
     validation-rule broadening that admits index.ts as a
     valid entry point alongside index.js."""
     with Runtime() as rt:
@@ -1187,7 +1187,7 @@ async def test_ts_file_with_type_annotations_imports_and_runs() -> None:
 
 
 async def test_tsx_file_strips_types() -> None:
-    """.tsx uses oxidase's tsx source-type. We don't
+    """.tsx uses the transpiler's tsx source-type. We don't
     evaluate JSX here (QuickJS wouldn't understand it) — just
     verify that a .tsx file with TS annotations but no JSX
     elements installs + runs. The strip path itself is the
@@ -1221,7 +1221,7 @@ async def test_tsx_file_strips_types() -> None:
 
 
 async def test_ts_enum_is_transpiled_to_runtime_value() -> None:
-    """Oxidase transforms TS enums into runtime IIFE code,
+    """The transpile step transforms TS enums into runtime IIFE code,
     unlike strip-only transpilers. Verify that enum member access
     actually works at runtime."""
     with Runtime() as rt:
@@ -1300,7 +1300,7 @@ async def test_ts_interface_has_no_runtime_artifact() -> None:
 def test_ts_syntax_error_surfaces_at_install_time() -> None:
     """Unlike plain JS (whose syntax errors land at eval
     time — per test_syntax_error_in_module_surfaces_at_eval_time
-    above), TS parse errors fire during install() because oxidase
+    above), TS parse errors fire during install() because the transpiler
     parses the source then and there. That's a better failure
     mode: the user's TS mistakes surface immediately, not after
     a bunch of other modules have already been imported.
@@ -1362,7 +1362,7 @@ async def test_mixed_ts_and_js_files_in_same_scope() -> None:
 
 async def test_ts_to_ts_relative_import_preserves_extension() -> None:
     """The resolver's specifier-literal rule: a .ts file
-    that imports "./other.ts" keeps the ".ts" specifier (oxidase
+    that imports "./other.ts" keeps the ".ts" specifier (the transpiler
     leaves it alone), and the resolver looks up "other.ts" in the
     scope's file set — which matches exactly because the key was
     registered as "other.ts"."""
@@ -1731,7 +1731,7 @@ async def test_dynamic_import_within_scope() -> None:
 
 
 async def test_dynamic_import_typescript() -> None:
-    """Dynamic import of a .ts file. At install() time oxidase
+    """Dynamic import of a .ts file. At install() time the transpiler
     stripped ``utils.ts`` and registered the canonical path
     ``@m/utils.ts`` against the stripped JS. The dynamic import's
     specifier ``"./utils.ts"`` should hit the same resolver path
