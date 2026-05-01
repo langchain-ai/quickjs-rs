@@ -40,12 +40,13 @@ rquickjs = { version = "0.11", features = [
 # on the linked dylib (+28% over the module-loading-only baseline).
 oxidase = { git = "https://github.com/branchseer/oxidase", rev = "045ea46b604cee97c65f1eeac05dcdbc5eb0be25" }
 # Snapshot name extraction parser.
-# Use the same oxc git revision family as oxidase to avoid duplicate
-# AST/parser graphs in the build and to keep APIs consistent.
-oxc_allocator = { git = "https://github.com/branchseer/oxc", rev = "7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5" }
-oxc_ast = { git = "https://github.com/branchseer/oxc", rev = "7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5" }
-oxc_parser = { git = "https://github.com/branchseer/oxc", rev = "7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5" }
-oxc_span = { git = "https://github.com/branchseer/oxc", rev = "7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5" }
+# Keep the same source identity as oxidase (`branch = "ast_alloc"`), otherwise
+# Cargo resolves two parallel oxc graphs (branch + rev) and compiles everything
+# twice. The exact tested commit remains pinned in Cargo.lock.
+oxc_allocator = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_ast = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_parser = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_span = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
