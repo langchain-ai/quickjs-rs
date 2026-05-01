@@ -49,6 +49,40 @@ class QjsContext:
         strict: bool = False,
         filename: str = "<eval>",
     ) -> Any: ...
+    def snapshot_registry_names(self) -> list[str]: ...
+    def snapshot_module_touched(self) -> bool: ...
+    def create_snapshot_from_resolved(
+        self,
+        *,
+        resolved_entries: list[tuple[str, str, QjsHandle | None, str | None]],
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> bytes: ...
+    def restore_snapshot_bytes(
+        self,
+        data: bytes,
+        *,
+        inject_globals: bool = True,
+    ) -> None: ...
+    def dump_handle(
+        self,
+        handle: QjsHandle,
+        *,
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> bytes: ...
+    def load_handle(
+        self,
+        data: bytes,
+        *,
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> QjsHandle: ...
     def close(self) -> None: ...
     def is_closed(self) -> bool: ...
     def global_object(self) -> QjsHandle: ...

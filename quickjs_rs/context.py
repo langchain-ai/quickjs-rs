@@ -26,6 +26,7 @@ from quickjs_rs.errors import (
 from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
+from quickjs_rs.snapshot import Snapshot
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
@@ -152,6 +153,14 @@ class Context:
         self._runtime._unregister_context(self)
         self._closed = True
 
+    def _snapshot_registry_names(self) -> tuple[str, ...]:
+        """Test-only helper exposing the ordered snapshot registry."""
+        return tuple(self._engine_ctx.snapshot_registry_names())
+
+    def _debug_snapshot_registry_names(self) -> tuple[str, ...]:
+        """Backward-compatible alias for older tests/callers."""
+        return self._snapshot_registry_names()
+
     def eval_handle(
         self,
         code: str,
@@ -259,6 +268,115 @@ class Context:
         if self._engine_ctx.take_sync_eval_hit_async_call():
             raise sync_eval_async_call_error()
         return result
+
+    def create_snapshot(
+        self,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+    ) -> Snapshot:
+        """Create a Snapshot V1 payload from this context.
+
+        Snapshot V1 tracks script-mode top-level declarations across
+        eval calls, resolves those names at snapshot time, and
+        serializes the active values as one aggregate graph so aliasing
+        is preserved across restored names.
+
+        Args:
+            on_unserializable: Policy for names whose resolved value
+                cannot be serialized. ``"tombstone"`` records the name
+                as unavailable after restore; ``"error"`` fails snapshot
+                creation.
+            on_missing_name: Policy for tracked names that no longer
+                resolve by identifier lookup at snapshot time.
+                ``"skip"`` omits the name entirely, ``"tombstone"``
+                restores a throwing placeholder, and ``"error"`` fails
+                snapshot creation.
+            allow_bytecode: Passed through to QuickJS object
+                serialization. Leave disabled unless bytecode objects
+                are intentionally part of the snapshot boundary.
+            allow_reference: Passed through to QuickJS object
+                serialization. Enabled by default so shared references
+                inside the captured graph can round-trip.
+            allow_sab: Passed through to QuickJS object serialization
+                for SharedArrayBuffer support.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload that can be converted
+            to bytes or restored into another context.
+
+        Raises:
+            NotImplementedError: If this context has executed any
+                ``module=True`` eval surface. Module-mode snapshotting is
+                intentionally unsupported in V1.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on this context.
+            QuickJSError: If the context is closed, async host tasks are
+                pending, or a policy is set to ``"error"`` and a tracked
+                name cannot be captured.
+        """
+        result = self._runtime.create_snapshot(
+            self,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+            allow_bytecode=allow_bytecode,
+            allow_reference=allow_reference,
+            allow_sab=allow_sab,
+        )
+        return result
+
+    async def create_snapshot_async(
+        self,
+        *,
+        on_unserializable: str = "tombstone",
+        on_missing_name: str = "skip",
+        allow_bytecode: bool = False,
+        allow_reference: bool = True,
+        allow_sab: bool = False,
+        timeout: float | None = None,
+    ) -> Snapshot:
+        """Create a Snapshot V1 payload with async identifier resolution.
+
+        This follows the same snapshot model as
+        :meth:`create_snapshot`, but resolves each tracked name through
+        :meth:`eval_handle_async` so contexts whose identifier lookup
+        path can touch async host functions remain snapshot-capable.
+
+        Args:
+            on_unserializable: See :meth:`create_snapshot`.
+            on_missing_name: See :meth:`create_snapshot`.
+            allow_bytecode: See :meth:`create_snapshot`.
+            allow_reference: See :meth:`create_snapshot`.
+            allow_sab: See :meth:`create_snapshot`.
+            timeout: Optional per-name timeout override passed to
+                ``eval_handle_async`` while resolving tracked
+                identifiers. ``None`` uses the context's cumulative
+                async budget rules.
+
+        Returns:
+            A :class:`quickjs_rs.Snapshot` payload.
+
+        Raises:
+            NotImplementedError: If this context has executed any
+                ``module=True`` eval surface.
+            ConcurrentEvalError: If ``eval_async`` is currently in
+                flight on this context.
+            QuickJSError: If the context is closed, async host tasks are
+                pending, or a policy is set to ``"error"`` and a tracked
+                name cannot be captured.
+        """
+        return await self._runtime.create_snapshot_async(
+            self,
+            on_unserializable=on_unserializable,
+            on_missing_name=on_missing_name,
+            allow_bytecode=allow_bytecode,
+            allow_reference=allow_reference,
+            allow_sab=allow_sab,
+            timeout=timeout,
+        )
 
     def _raise_classified(
         self,
@@ -664,17 +782,13 @@ class Context:
                             self._engine_ctx.run_pending_jobs()
 
                             # Step 2: check promise state.
-                            state = self._engine_ctx.promise_state(
-                                handle._require_live()
-                            )
+                            state = self._engine_ctx.promise_state(handle._require_live())
 
                             # Step 3: fulfilled → return result.
                             if state == 1:
                                 result_handle = Handle(
                                     self,
-                                    self._engine_ctx.promise_result(
-                                        handle._require_live()
-                                    ),
+                                    self._engine_ctx.promise_result(handle._require_live()),
                                 )
                                 handle.dispose()
                                 handle = None
@@ -684,9 +798,7 @@ class Context:
                             if state == 2:
                                 reason_handle = Handle(
                                     self,
-                                    self._engine_ctx.promise_result(
-                                        handle._require_live()
-                                    ),
+                                    self._engine_ctx.promise_result(handle._require_live()),
                                 )
                                 try:
                                     self._raise_from_reason_handle(reason_handle, deadline)
@@ -735,23 +847,17 @@ class Context:
                 # traceback and trip the cross-thread drop check.
                 try:
                     self._engine_ctx.run_pending_jobs()
-                    state = self._engine_ctx.promise_state(
-                        handle._require_live()
-                    )
+                    state = self._engine_ctx.promise_state(handle._require_live())
                     if state == 1:
                         absorbed_handle = Handle(
                             self,
-                            self._engine_ctx.promise_result(
-                                handle._require_live()
-                            ),
+                            self._engine_ctx.promise_result(handle._require_live()),
                         )
                         handle.dispose()
                     elif state == 2:
                         reason_handle = Handle(
                             self,
-                            self._engine_ctx.promise_result(
-                                handle._require_live()
-                            ),
+                            self._engine_ctx.promise_result(handle._require_live()),
                         )
                         try:
                             is_our_cancel = self._handle_name_is(
