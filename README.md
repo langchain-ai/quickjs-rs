@@ -109,14 +109,6 @@ TypeScript syntax errors surface at `install()` time (oxidase parses during stri
 
 `quickjs-rs` can snapshot the restorable portion of a context's script-mode top-level state and restore it into another context.
 
-Snapshot V1 is intentionally narrower than a full VM snapshot:
-
-- it tracks top-level declarations from script-mode evals,
-- resolves those names only when a snapshot is requested,
-- serializes active values as one aggregate object graph to preserve aliasing,
-- restores active names back into the target context's globals,
-- represents unavailable names as either omissions, tombstones, or errors depending on policy.
-
 It does **not** attempt to snapshot module-local bindings, pending async work, host callback identity, or full lexical-environment state.
 
 ```python
@@ -162,12 +154,6 @@ Async contexts use the same snapshot model:
 snap = await ctx.create_snapshot_async(on_missing_name="tombstone")
 rt.restore_snapshot(snap, other_ctx, inject_globals=True)
 ```
-
-Important V1 limitations:
-
-- Any context that has executed `module=True` eval is not snapshot-compatible in V1; `create_snapshot()` raises `NotImplementedError`.
-- Snapshot creation requires a quiescent context. It will fail if `eval_async` is in flight or async host tasks are still pending.
-- `inject_globals=False` validates and loads the snapshot without mutating the destination globals.
 
 ## Security
 
