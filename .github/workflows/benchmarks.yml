@@ -6,9 +6,7 @@ name: benchmarks
 # Mode is walltime: simulation (Valgrind) can't see QuickJS bytecode
 # execution inside the native extension any better than it saw it
 # inside the wasm module — walltime captures the full stack, which
-# is what users actually experience. Single platform (Linux x86_64)
-# is intentional: cross-platform benchmark comparison isn't
-# meaningful.
+# is what users actually experience.
 #
 # Same venv dance as test.yml — `maturin develop` refuses to
 # install outside a virtualenv, so we create .venv and export
@@ -27,7 +25,7 @@ permissions:
 jobs:
   benchmarks:
     name: Run benchmarks
-    runs-on: ubuntu-latest
+    runs-on: codspeed-macro
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -62,19 +60,17 @@ jobs:
           maturin develop --release -E dev,bench
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@93bbfdc546455345ae00c6f4e100a37838b37bcf # v4.14.0
+        uses: CodSpeedHQ/action@dfaf2584d705312e4ab4e23a4dd3e2f56b71ef3b # v4
         with:
           mode: walltime
-          token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest benchmarks/ --codspeed --ignore benchmarks/test_memory.py
 
       - name: Run memory benchmarks
         # CodSpeed memory mode tracks allocation regressions on a
         # small deterministic subset designed for heap behavior.
-        uses: CodSpeedHQ/action@93bbfdc546455345ae00c6f4e100a37838b37bcf # v4.14.0
+        uses: CodSpeedHQ/action@dfaf2584d705312e4ab4e23a4dd3e2f56b71ef3b # v4
         with:
           mode: memory
-          token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest benchmarks/test_memory.py --codspeed --codspeed-mode memory -q
 
       - name: Emit threaded TPS summary
