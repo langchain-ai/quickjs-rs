@@ -5,6 +5,8 @@ These cases provide short/medium/large pairs:
 - "with_names" variant with many top-level ``var`` declarations
 
 Compare each size pair to estimate extraction + registry-merge overhead.
+These are intentionally narrower than ``test_snapshot.py``, which
+benchmarks end-to-end snapshot create/restore costs.
 """
 
 from __future__ import annotations
