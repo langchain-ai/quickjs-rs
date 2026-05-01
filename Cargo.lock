@@ -81,9 +81,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.60"
+version = "1.2.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
+checksum = "d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -261,9 +261,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "lock_api"
@@ -360,6 +360,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxc_allocator"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "allocator-api2",
+ "bumpalo",
+]
+
+[[package]]
 name = "oxc_ast"
 version = "0.31.0"
 source = "git+https://github.com/branchseer/oxc?branch=ast_alloc#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
@@ -367,17 +376,42 @@ dependencies = [
  "bitflags",
  "derive-where",
  "num-bigint",
- "oxc_allocator",
- "oxc_ast_macros",
- "oxc_regular_expression",
- "oxc_span",
- "oxc_syntax",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_regular_expression 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+]
+
+[[package]]
+name = "oxc_ast"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "bitflags",
+ "derive-where",
+ "num-bigint",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_regular_expression 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
 ]
 
 [[package]]
 name = "oxc_ast_macros"
 version = "0.31.0"
 source = "git+https://github.com/branchseer/oxc?branch=ast_alloc#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "oxc_ast_macros"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -407,21 +441,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxc_diagnostics"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "miette",
+ "owo-colors",
+ "rustc-hash",
+ "textwrap",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
 name = "oxc_ecmascript"
 version = "0.31.0"
 source = "git+https://github.com/branchseer/oxc?branch=ast_alloc#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
 dependencies = [
  "num-bigint",
  "num-traits",
- "oxc_ast",
- "oxc_span",
- "oxc_syntax",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+]
+
+[[package]]
+name = "oxc_ecmascript"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
 ]
 
 [[package]]
 name = "oxc_index"
 version = "0.31.0"
 source = "git+https://github.com/branchseer/oxc?branch=ast_alloc#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+
+[[package]]
+name = "oxc_index"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
 
 [[package]]
 name = "oxc_parser"
@@ -436,13 +499,37 @@ dependencies = [
  "memchr",
  "num-bigint",
  "num-traits",
- "oxc_allocator",
- "oxc_ast",
- "oxc_diagnostics",
- "oxc_ecmascript",
- "oxc_regular_expression",
- "oxc_span",
- "oxc_syntax",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_diagnostics 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ecmascript 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_regular_expression 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "rustc-hash",
+ "seq-macro",
+]
+
+[[package]]
+name = "oxc_parser"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "assert-unchecked",
+ "bitflags",
+ "cfg-if",
+ "cow-utils",
+ "derive-where",
+ "memchr",
+ "num-bigint",
+ "num-traits",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_diagnostics 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ecmascript 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_regular_expression 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
  "rustc-hash",
  "seq-macro",
 ]
@@ -453,10 +540,25 @@ version = "0.31.0"
 source = "git+https://github.com/branchseer/oxc?branch=ast_alloc#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
 dependencies = [
  "derive-where",
- "oxc_allocator",
- "oxc_ast_macros",
- "oxc_diagnostics",
- "oxc_span",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_diagnostics 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "phf",
+ "rustc-hash",
+ "unicode-id-start",
+]
+
+[[package]]
+name = "oxc_regular_expression"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "derive-where",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_diagnostics 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
  "phf",
  "rustc-hash",
  "unicode-id-start",
@@ -470,8 +572,20 @@ dependencies = [
  "compact_str",
  "derive-where",
  "miette",
- "oxc_allocator",
- "oxc_ast_macros",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+]
+
+[[package]]
+name = "oxc_span"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "compact_str",
+ "derive-where",
+ "miette",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
 ]
 
 [[package]]
@@ -483,10 +597,29 @@ dependencies = [
  "bitflags",
  "dashmap",
  "nonmax",
- "oxc_allocator",
- "oxc_ast_macros",
- "oxc_index",
- "oxc_span",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_index 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "phf",
+ "rustc-hash",
+ "ryu-js",
+ "unicode-id-start",
+]
+
+[[package]]
+name = "oxc_syntax"
+version = "0.31.0"
+source = "git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5#7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5"
+dependencies = [
+ "assert-unchecked",
+ "bitflags",
+ "dashmap",
+ "nonmax",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast_macros 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_index 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
  "phf",
  "rustc-hash",
  "ryu-js",
@@ -505,14 +638,14 @@ dependencies = [
  "derive_more",
  "ghost-cell",
  "hashbrown 0.14.5",
- "oxc_allocator",
- "oxc_ast",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
  "oxc_data_structures",
- "oxc_diagnostics",
- "oxc_index",
- "oxc_parser",
- "oxc_span",
- "oxc_syntax",
+ "oxc_diagnostics 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_index 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_parser 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
+ "oxc_syntax 0.31.0 (git+https://github.com/branchseer/oxc?branch=ast_alloc)",
  "rustc-hash",
  "smallvec 2.0.0-alpha.12",
  "thiserror",
@@ -656,10 +789,10 @@ dependencies = [
 name = "quickjs-rs-python"
 version = "0.1.0"
 dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
+ "oxc_allocator 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_ast 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_parser 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
+ "oxc_span 0.31.0 (git+https://github.com/branchseer/oxc?rev=7a44876d040c23c0fe4ea0e7730d9ecd6b3658a5)",
  "oxidase",
  "pyo3",
  "rquickjs",

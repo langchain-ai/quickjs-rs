@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import struct
+from contextlib import suppress
 
 import pytest
 
-from quickjs_rs import JSError, QuickJSError, Runtime, Snapshot
+from quickjs_rs import ConcurrentEvalError, JSError, QuickJSError, Runtime, Snapshot
 from quickjs_rs.handle import Handle
 
 
@@ -77,8 +79,6 @@ def test_eval_handle_and_eval_handle_async_update_registry() -> None:
                 with await ctx.eval_handle_async("const fromHandleAsync = 2; fromHandleAsync;"):
                     pass
                 return ctx._snapshot_registry_names()
-
-    import asyncio
 
     assert asyncio.run(run()) == ("fromHandle", "fromHandleAsync")
 
@@ -280,6 +280,50 @@ async def test_create_snapshot_async_module_guard() -> None:
             await ctx.eval_async("globalThis.modTouched = 1", module=True)
             with pytest.raises(NotImplementedError, match="module=True"):
                 await ctx.create_snapshot_async()
+
+
+async def test_create_snapshot_rejects_in_flight_eval_async() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            started = asyncio.Event()
+            released = asyncio.Event()
+
+            async def block() -> int:
+                started.set()
+                await released.wait()
+                return 1
+
+            ctx.register("block", block)
+            eval_task = asyncio.create_task(ctx.eval_async("await block()"))
+            await started.wait()
+            with pytest.raises(ConcurrentEvalError, match="eval_async is in flight"):
+                ctx.create_snapshot()
+            with pytest.raises(ConcurrentEvalError, match="eval_async is in flight"):
+                await ctx.create_snapshot_async()
+            released.set()
+            assert await eval_task == 1
+
+
+async def test_create_snapshot_rejects_when_pending_host_tasks_exist() -> None:
+    """Guard the quiescence check directly.
+
+    Public APIs usually pair pending host tasks with an in-flight eval guard.
+    This test forces the pending-task state to cover the dedicated branch.
+    """
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            sleeper = asyncio.create_task(asyncio.sleep(60))
+            ctx._pending_tasks[4242] = sleeper
+            try:
+                with pytest.raises(QuickJSError, match="async host tasks are pending"):
+                    ctx.create_snapshot()
+                with pytest.raises(QuickJSError, match="async host tasks are pending"):
+                    await ctx.create_snapshot_async()
+            finally:
+                ctx._pending_tasks.pop(4242, None)
+                sleeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sleeper
 
 
 def test_runtime_create_snapshot_sync() -> None:

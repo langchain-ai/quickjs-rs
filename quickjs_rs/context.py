@@ -285,7 +285,7 @@ class Context:
     ) -> Snapshot:
         """Create a context snapshot.
 
-        V1 resolves tracked top-level names in Python and delegates
+        Resolves tracked top-level names in Python and delegates
         policy/record/envelope handling to the engine.
         """
         result = self._runtime.create_snapshot(

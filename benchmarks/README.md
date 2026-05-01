@@ -68,6 +68,7 @@ commits.
 | `test_marshaling.py` | int, string, dict, list, bytes round-trips |
 | `test_host_functions.py` | sync + async host call dispatch |
 | `test_eval_async.py` | async pipeline, fan-out, sequential await |
+| `test_snapshot_extraction.py` | extraction/registry overhead pairs (short, medium, large) |
 | `test_threaded_stress.py` | Threaded stress: multi-runtime/context isolation under concurrent load + TPS |
 | `test_memory.py` | CodSpeed memory mode suite — allocation regression tracking |
 
