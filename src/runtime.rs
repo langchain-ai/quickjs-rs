@@ -111,14 +111,15 @@ impl QjsRuntime {
     ///     as the source-map key and as the module name QuickJS
     ///     sees when it asks the loader to materialize the module.
     ///   * `source`: the source text. If `key` ends in .ts / .mts /
-    ///     .cts / .tsx, the text is passed through oxidase to strip
-    ///     type annotations and transform enums / namespaces /
-    ///     parameter properties before the stripped output lands
-    ///     in the store. Other extensions pass through unchanged.
+    ///     .cts / .tsx, the text is passed through an OXC
+    ///     transpile step to strip type annotations and transform
+    ///     enums / namespaces / parameter properties before output
+    ///     lands in the store. Other extensions pass through
+    ///     unchanged.
     ///
     /// TypeScript parse errors surface HERE (install time), not
-    /// later at eval time — oxidase parses during stripping, and
-    /// a parser panic turns into a QuickJSError raised from this
+    /// later at eval time — transpilation parses during install,
+    /// and a parser panic turns into a QuickJSError raised from this
     /// call. That's the contract promises: users see their
     /// TypeScript errors at `ctx.install(scope)` rather than at
     /// `ctx.eval_async(..., module=True)`.
