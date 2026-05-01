@@ -270,8 +270,9 @@ class Handle:
 
         Respects the enclosing cancel scope (cancellation in the
         driving task cascades here). Uses the owning Context's
-        cumulative eval_async budget unless ``timeout=`` is passed,
-        in which case that value applies for this call only.
+        per-call timeout by default (same semantics as
+        ``Context.eval_async``); ``timeout=`` overrides it for this
+        call only.
 
         Honours the concurrent-eval rule: if an ``eval_async``
         or another ``await_promise`` is in flight on the same
@@ -298,7 +299,7 @@ class Handle:
         if timeout is not None:
             deadline = _time.monotonic() + timeout
         else:
-            deadline = ctx._cumulative_deadline
+            deadline = _time.monotonic() + ctx._timeout
 
         ctx._eval_async_in_flight = True
         ctx._runtime._deadline = deadline
