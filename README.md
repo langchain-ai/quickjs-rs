@@ -105,6 +105,70 @@ rt.install(ModuleScope({
 
 TypeScript syntax errors surface at `install()` time (oxidase parses during stripping) rather than at eval.
 
+## Snapshots
+
+`quickjs-rs` can snapshot the restorable portion of a context's script-mode top-level state and restore it into another context.
+
+Snapshot V1 is intentionally narrower than a full VM snapshot:
+
+- it tracks top-level declarations from script-mode evals,
+- resolves those names only when a snapshot is requested,
+- serializes active values as one aggregate object graph to preserve aliasing,
+- restores active names back into the target context's globals,
+- represents unavailable names as either omissions, tombstones, or errors depending on policy.
+
+It does **not** attempt to snapshot module-local bindings, pending async work, host callback identity, or full lexical-environment state.
+
+```python
+from quickjs_rs import Runtime, Snapshot
+
+with Runtime() as rt:
+    with rt.new_context() as ctx:
+        ctx.eval("""
+            const shared = { count: 1 };
+            const a = shared;
+            const b = shared;
+        """)
+        snap = ctx.create_snapshot()
+        payload = snap.to_bytes()
+
+with Runtime() as rt2:
+    with rt2.new_context() as ctx2:
+        snap = Snapshot.from_bytes(payload)
+        rt2.restore_snapshot(snap, ctx2)
+        assert ctx2.eval("a === b") is True
+        assert ctx2.eval("a.count") == 1
+```
+
+Snapshot creation supports two policy knobs:
+
+- `on_missing_name`: `skip`, `tombstone`, or `error`
+- `on_unserializable`: `tombstone` or `error`
+
+Example:
+
+```python
+with Runtime() as rt:
+    with rt.new_context() as ctx:
+        ctx.eval("const fn = () => 1;")
+        snap = ctx.create_snapshot(on_unserializable="tombstone")
+```
+
+On restore, a tombstoned name is installed as a global property whose getter throws a descriptive error if read. This makes missing or unserializable bindings explicit instead of silently disappearing unless you choose `skip`.
+
+Async contexts use the same snapshot model:
+
+```python
+snap = await ctx.create_snapshot_async(on_missing_name="tombstone")
+rt.restore_snapshot(snap, other_ctx, inject_globals=True)
+```
+
+Important V1 limitations:
+
+- Any context that has executed `module=True` eval is not snapshot-compatible in V1; `create_snapshot()` raises `NotImplementedError`.
+- Snapshot creation requires a quiescent context. It will fail if `eval_async` is in flight or async host tasks are still pending.
+- `inject_globals=False` validates and loads the snapshot without mutating the destination globals.
+
 ## Security
 
 - This library is not a host-memory isolation boundary. The JS engine (`quickjs-ng` via `rquickjs`/`rquickjs-sys`) runs in the same process/address space as Python.
