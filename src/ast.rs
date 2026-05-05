@@ -12,12 +12,22 @@ use oxc_span::SourceType;
 ///
 /// Returns `None` on parser error (caller should skip registry update).
 pub(crate) fn extract_top_level_declared_names(source: &str, module: bool) -> Option<Vec<String>> {
+    let source_type = if module { SourceType::mjs() } else { SourceType::cjs() };
+    if let Some(names) = parse_declared_names(source, source_type) {
+        return Some(names);
+    }
+
+    // Script-mode eval_async allows top-level await via JS_EVAL_FLAG_ASYNC.
+    // The parser only accepts top-level await in module mode, so fall back
+    // to a module parse solely for declaration extraction.
+    if module {
+        return None;
+    }
+    parse_declared_names(source, SourceType::mjs())
+}
+
+fn parse_declared_names(source: &str, source_type: SourceType) -> Option<Vec<String>> {
     let allocator = Allocator::default();
-    let source_type = if module {
-        SourceType::mjs()
-    } else {
-        SourceType::cjs()
-    };
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return None;
@@ -109,4 +119,15 @@ mod tests {
     fn parser_error_returns_none() {
         assert!(extract_top_level_declared_names("const =", false).is_none());
     }
+
+    #[test]
+    fn extracts_top_level_await_script_declarations() {
+        let got = extract_top_level_declared_names(
+            "await Promise.resolve('x'); const story = 'hi'",
+            false,
+        )
+        .unwrap();
+        assert_eq!(got, vec!["story"]);
+    }
+
 }

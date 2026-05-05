@@ -230,6 +230,36 @@ async def test_create_snapshot_async_roundtrip() -> None:
             assert ctx2.eval("a === b") is True
 
 
+@pytest.mark.parametrize(
+    ("setup", "probe"),
+    [
+        ("const story = 'hi'", "story"),
+        ("const story = await Promise.resolve('hi')", "story"),
+        ("await Promise.resolve('x'); const story = 'hi'", "story"),
+        ("let story", "story = await Promise.resolve('hi'); story"),
+    ],
+    ids=[
+        "non-await-declaration",
+        "top-level-await-declaration",
+        "await-before-declaration",
+        "predeclared-then-await-assign",
+    ],
+)
+async def test_snapshot_roundtrip_preserves_eval_async_bindings(
+    setup: str, probe: str
+) -> None:
+    with Runtime(memory_limit=64 * 1024 * 1024) as runtime:
+        with runtime.new_context(timeout=5.0) as ctx:
+            await ctx.eval_async(setup, timeout=5.0)
+            before = await ctx.eval_async(probe, timeout=5.0)
+            payload = ctx.create_snapshot().to_bytes()
+        with runtime.new_context(timeout=5.0) as ctx2:
+            runtime.restore_snapshot(Snapshot.from_bytes(payload), ctx2, inject_globals=True)
+            after = await ctx2.eval_async(probe, timeout=5.0)
+    assert before == "hi"
+    assert after == "hi"
+
+
 async def test_create_snapshot_async_missing_name_tombstone() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
