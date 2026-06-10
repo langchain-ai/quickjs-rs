@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal, TypeAlias
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import ConcurrentEvalError, QuickJSError
-from quickjs_rs.modules import ModuleScope
 from quickjs_rs.snapshot import Snapshot
 
 _SnapshotResolveStatus: TypeAlias = Literal["active", "missing", "unserializable"]
 _ResolvedEntry: TypeAlias = tuple[str, _SnapshotResolveStatus, _engine.QjsHandle | None, str | None]
 _ClassifiedResolvedHandle: TypeAlias = tuple[_ResolvedEntry, Any | None]
+_ImportHandler: TypeAlias = Callable[[str, str | None, str], str | None]
 
 
 def _validate_runtime_context(runtime: Runtime, ctx: Any) -> None:
@@ -134,6 +135,7 @@ class Runtime:
 
         self._closed = False
         self._contexts: list[Any] = []  # list[Context] once step 2 lands
+        self._import_handler: _ImportHandler | None = None
 
         # Per-eval deadline slot (monotonic-clock absolute time, seconds).
         # Context writes it before eval, clears it after.
@@ -193,34 +195,29 @@ class Runtime:
         except ValueError:
             pass
 
-    def install(self, scope: ModuleScope) -> None:
-        """Register modules in this runtime's shared module store.
+    def set_import_handler(self, handler: _ImportHandler | None) -> None:
+        """Set/clear the runtime import handler.
 
-        Any context created from this runtime can import installed
-        modules (subject to QuickJS module-cache semantics).
+        The callback signature is:
+            ``handler(requested_key, referrer, specifier) -> str | None``
+
+        where:
+            * ``requested_key`` is the module key to load. Bare
+              specifiers are passed through unchanged; relative
+              specifiers are normalized against ``referrer`` first.
+            * ``referrer`` is the importing module path, or ``None`` for
+              top-level eval.
+            * ``specifier`` is the original import specifier string.
+
+        Return source text (str) to register and load that module file,
+        or ``None`` to indicate a miss.
         """
         if self._closed:
             raise QuickJSError("runtime is closed")
-        self._install_recursive(scope, scope_path="")
-
-    def _install_recursive(self, scope: ModuleScope, scope_path: str) -> None:
-        for key, value in scope.modules.items():
-            if isinstance(value, str):
-                canonical = key if scope_path == "" else f"{scope_path}/{key}"
-                try:
-                    self._engine_rt.add_module_source(scope_path, key, canonical, value)
-                except _engine.QuickJSError as e:
-                    # TypeScript parse errors surface at install.
-                    raise QuickJSError(str(e)) from e
-            elif isinstance(value, ModuleScope):
-                self._engine_rt.register_subscope(scope_path, key)
-                child_path = key if scope_path == "" else f"{scope_path}/{key}"
-                self._install_recursive(value, scope_path=child_path)
-            else:
-                raise TypeError(
-                    f"ModuleScope entry {key!r}: expected str | ModuleScope, "
-                    f"got {type(value).__name__}"
-                )
+        if handler is not None and not callable(handler):
+            raise TypeError("handler must be callable or None")
+        self._import_handler = handler
+        self._engine_rt.set_import_handler(handler)
 
     def restore_snapshot(
         self,

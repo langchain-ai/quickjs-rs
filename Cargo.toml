@@ -30,8 +30,8 @@ rquickjs = { version = "0.11", features = [
   # rquickjs-sys/src/bindings/), add bindgen back here and
   # ensure the build environment has libclang.
 ] }
-# TypeScript support — str entries ending in .ts/.tsx are
-# transparently type-stripped at install() time.
+# TypeScript support — handler-returned sources whose requested key ends in
+# .ts/.tsx are transparently type-stripped before module load.
 #
 # Pinned to a specific commit rather than `branch = "main"` because
 # oxidase is a single-maintainer project not (yet) on crates.io; a

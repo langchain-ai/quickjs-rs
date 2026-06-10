@@ -16,7 +16,6 @@ from quickjs_rs.errors import (
     TimeoutError,
 )
 from quickjs_rs.handle import Handle
-from quickjs_rs.modules import ModuleScope
 from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
 from quickjs_rs.threading import ThreadWorker
@@ -27,7 +26,6 @@ __all__ = [
     "Runtime",
     "Context",
     "Handle",
-    "ModuleScope",
     "Snapshot",
     "ThreadWorker",
     "Undefined",

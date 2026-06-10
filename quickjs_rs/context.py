@@ -7,7 +7,7 @@ import inspect
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeAlias
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
@@ -29,6 +29,8 @@ from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
+_ImportHandler: TypeAlias = Callable[[str, str | None, str], str | None]
+_ImportHandlerArg: TypeAlias = _ImportHandler | None
 
 
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
@@ -152,6 +154,12 @@ class Context:
         self._engine_ctx.close()
         self._runtime._unregister_context(self)
         self._closed = True
+
+    def set_import_handler(self, handler: _ImportHandlerArg) -> None:
+        """Alias to ``runtime.set_import_handler`` for compatibility."""
+        if self._closed:
+            raise QuickJSError("context is closed")
+        self._runtime.set_import_handler(handler)
 
     def _snapshot_registry_names(self) -> tuple[str, ...]:
         """Test-only helper exposing the ordered snapshot registry."""

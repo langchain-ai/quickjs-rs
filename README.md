@@ -2,7 +2,7 @@
 
 Sandboxed JavaScript execution for Python.
 
-Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules with a composable scope registry. Inline TypeScript support via [oxidase](https://github.com/branchseer/oxidase).
+Native Python extension (PyO3 + [rquickjs](https://github.com/DelSkayn/rquickjs)) wrapping [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork). Single self-contained wheel, zero runtime dependencies, microsecond-range runtime startup. ES modules are loaded through a host import handler.
 
 > [!WARNING]
 > `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
@@ -53,30 +53,26 @@ asyncio.run(main())
 
 ## ES modules
 
-Register modules via `ModuleScope`, then `import` them from module-mode eval. Scopes are recursive, self-contained resolver boundaries — each scope sees only what its own dict declares.
+Register a runtime import handler, then `import` modules from module-mode eval. The handler receives `(requested_key, referrer, specifier)` and returns source text or `None`; `referrer` is the importing module key, or `None` for top-level eval.
 
 ```python
-from quickjs_rs import ModuleScope, Runtime
+from quickjs_rs import Runtime
 
-stdlib = ModuleScope({
-    "@agent/utils": ModuleScope({
-        "index.js": """
-            export { slugify } from './strings.js';
-        """,
-        "strings.js": """
-            export function slugify(s) {
-                return s.toLowerCase().replace(/ /g, '-');
-            }
-        """,
-    }),
-    "@agent/config": ModuleScope({
-        "index.js": "export const MAX_RETRIES = 3;",
-    }),
-})
+sources = {
+    "@agent/utils": """
+        export function slugify(s) {
+            return s.toLowerCase().replace(/ /g, '-');
+        }
+    """,
+    "@agent/config": "export const MAX_RETRIES = 3;",
+}
+
+def module_source(requested_key: str, referrer: str | None, specifier: str) -> str | None:
+    return sources.get(requested_key)
 
 with Runtime() as rt:
+    rt.set_import_handler(module_source)
     with rt.new_context() as ctx:
-        rt.install(stdlib)
         assert await ctx.eval_async("""
             const { slugify } = await import("@agent/utils");
             const { MAX_RETRIES } = await import("@agent/config");
@@ -84,26 +80,36 @@ with Runtime() as rt:
         """) == "hello-world/3"
 ```
 
-Shared deps are declared by spreading (`**utils.modules`) into each scope that needs them. Resolver conventions are documented in `AGENTS.md`.
+Bare imports are passed to the handler unchanged. Relative imports are normalized against the importing module key before the handler is called. If you want package-style `index.js` aliases, implement that policy in the handler/backend.
+
+```python
+def module_source(requested_key: str, referrer: str | None, specifier: str) -> str | None:
+    # requested_key is "@/skills/foo" for import("@/skills/foo").
+    return db_lookup(requested_key)  # source text or None
+
+with Runtime() as rt:
+    rt.set_import_handler(module_source)
+    with rt.new_context() as ctx:
+        await ctx.eval_async('const mod = await import("@/skills/foo");', module=True)
+```
 
 ## TypeScript
 
-Source strings whose key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped at `install()` time via oxidase. Enums, namespaces, and parameter properties are transformed; plain type annotations erase to whitespace. No type checking — run `tsc --noEmit` separately if you want that.
+Source strings whose requested key ends in `.ts`, `.mts`, `.cts`, or `.tsx` are type-stripped before module load. No type checking: run `tsc --noEmit` separately if you want that.
 
 ```python
-rt.install(ModuleScope({
-    "@util": ModuleScope({
-        "index.ts": """
+def module_source(requested_key: str, referrer: str | None, specifier: str) -> str | None:
+    if requested_key == "@util/index.ts":
+        return """
             export enum Mode { Strict = 1, Loose = 2 }
             export function slug(s: string, mode: Mode): string {
                 return s.toLowerCase().replace(/ /g, mode === Mode.Strict ? '_' : '-');
             }
-        """,
-    }),
-}))
+        """
+    return None
 ```
 
-TypeScript syntax errors surface at `install()` time (oxidase parses during stripping) rather than at eval.
+TypeScript syntax errors surface while resolving the import.
 
 ## Snapshots
 

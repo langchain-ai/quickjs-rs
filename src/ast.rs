@@ -12,7 +12,11 @@ use oxc_span::SourceType;
 ///
 /// Returns `None` on parser error (caller should skip registry update).
 pub(crate) fn extract_top_level_declared_names(source: &str, module: bool) -> Option<Vec<String>> {
-    let source_type = if module { SourceType::mjs() } else { SourceType::cjs() };
+    let source_type = if module {
+        SourceType::mjs()
+    } else {
+        SourceType::cjs()
+    };
     if let Some(names) = parse_declared_names(source, source_type) {
         return Some(names);
     }
@@ -129,5 +133,4 @@ mod tests {
         .unwrap();
         assert_eq!(got, vec!["story"]);
     }
-
 }

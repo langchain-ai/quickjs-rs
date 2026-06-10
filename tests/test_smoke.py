@@ -18,7 +18,6 @@ from quickjs_rs import (
     JSError,
     MarshalError,  # noqa: F401 — exercised when handle marshaling lands
     MemoryLimitError,
-    ModuleScope,
     Runtime,
     TimeoutError,
 )
@@ -406,59 +405,37 @@ async def test_async_acceptance() -> None:
 
 
 async def test_module_acceptance() -> None:
-    """The motivating agent-code pattern end-to-end: a stdlib
-    ModuleScope carrying multiple named deps, a script that imports
-    across scopes, uses top-level await against async host
-    functions, and reads a global set by script-mode eval. Plus
-    composition tests (override, capability restriction, recursive
-    self-contained deps).
-    """
-    stdlib = ModuleScope(
-        {
-            "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 3;"}),
-            "@agent/utils": ModuleScope(
-                {
-                    "index.js": """
-                        export { slugify } from "./strings.js";
-                        export { chunk } from "./arrays.js";
-                    """,
-                    "strings.js": """
-                        export function slugify(s) {
-                            return s.toLowerCase().replace(/ /g, '-');
-                        }
-                    """,
-                    "arrays.js": """
-                        export function chunk(arr, size) {
-                            const r = [];
-                            for (let i = 0; i < arr.length; i += size)
-                                r.push(arr.slice(i, i + size));
-                            return r;
-                        }
-                    """,
-                }
-            ),
-            "@agent/fs": ModuleScope(
-                {
-                    "index.js": """
-                        export async function readFile(path) {
-                            return await _readFile(path);
-                        }
-                    """,
-                }
-            ),
-            "@agent/concurrency": ModuleScope(
-                {
-                    "index.js": """
-                        export async function swarm(tasks, opts) {
-                            return await _swarm(tasks, opts.concurrency || 10);
-                        }
-                    """,
-                }
-            ),
-        }
-    )
+    """Module loading through a runtime import handler, end-to-end."""
+    stdlib = {
+        "@agent/config": "export const MAX_RETRIES = 3;",
+        "@agent/utils": """
+            export function slugify(s) {
+                return s.toLowerCase().replace(/ /g, '-');
+            }
+
+            export function chunk(arr, size) {
+                const r = [];
+                for (let i = 0; i < arr.length; i += size)
+                    r.push(arr.slice(i, i + size));
+                return r;
+            }
+        """,
+        "@agent/fs": """
+            export async function readFile(path) {
+                return await _readFile(path);
+            }
+        """,
+        "@agent/concurrency": """
+            export async function swarm(tasks, opts) {
+                return await _swarm(tasks, opts.concurrency || 10);
+            }
+        """,
+    }
 
     with Runtime() as rt:
+        rt.set_import_handler(
+            lambda requested_key, _referrer, _specifier: stdlib.get(requested_key)
+        )
         with rt.new_context() as ctx:
 
             @ctx.function
@@ -481,12 +458,6 @@ async def test_module_acceptance() -> None:
                     ],
                 }
 
-            rt.install(stdlib)
-
-            # The motivating pattern — imports across scopes, top-
-            # level await calling async host functions, results
-            # funneled through globalThis so script-mode eval can
-            # read them afterwards.
             await ctx.eval_async(
                 """
                 import { readFile } from "@agent/fs";
@@ -518,7 +489,6 @@ async def test_module_acceptance() -> None:
             assert result["total"] == 1
             assert result["retries"] == 3
 
-            # Cross-scope import works
             await ctx.eval_async(
                 """
                 import { slugify } from "@agent/utils";
@@ -528,12 +498,9 @@ async def test_module_acceptance() -> None:
             )
             assert ctx.eval("slug") == "hello-world"
 
-            # Module scope isolation: `let` inside a module body
-            # stays module-scoped, does NOT pollute globalThis.
             await ctx.eval_async("let moduleLocal = 42;", module=True)
             assert ctx.eval("typeof moduleLocal") == "undefined"
 
-            # Globals bridge: Python → globalThis → module.
             ctx.globals["pyValue"] = "from python"
             await ctx.eval_async(
                 """
@@ -543,110 +510,32 @@ async def test_module_acceptance() -> None:
             )
             assert ctx.eval("bridged") == "from python via module"
 
-            # Resolver boundary: `./strings.js` in @agent/utils is
-            # NOT the same as `./strings.js` would be anywhere
-            # else. Scopes are isolated; the resolver only looks
-            # in the referrer's own scope. (Not separately
-            # asserted here — the fact that utils' slugify works
-            # above is the positive evidence; negative coverage
-            # lives in test_modules.py::
-            # test_same_filename_in_sibling_scopes_resolves_independently.)
-
-        # Composition: override for testing. Build a fresh
-        # Runtime for each alternate stdlib — the module store is
-        # per-runtime, so mixing overrides on the
-        # same runtime would layer on top of existing caches in
-        # ways that depend on import order. Separate runtimes
-        # give each composition a clean slate.
-        test_stdlib = ModuleScope(
-            {
-                **stdlib.modules,
-                "@agent/config": ModuleScope({"index.js": "export const MAX_RETRIES = 1;"}),
-            }
+    override = dict(stdlib)
+    override["@agent/config"] = "export const MAX_RETRIES = 1;"
+    with Runtime() as rt_override:
+        rt_override.set_import_handler(
+            lambda requested_key, _referrer, _specifier: override.get(requested_key)
         )
+        with rt_override.new_context() as ctx:
+            await ctx.eval_async(
+                """
+                import { MAX_RETRIES } from "@agent/config";
+                globalThis.retries = MAX_RETRIES;
+                """,
+                module=True,
+            )
+            assert ctx.eval("retries") == 1
 
-        with Runtime() as rt_override:
-            with rt_override.new_context() as ctx:
-
-                @ctx.function
-                async def _readFile(path: str) -> str:  # noqa: N802
-                    return "mock"
-
-                @ctx.function
-                async def _swarm(tasks: list, concurrency: int) -> dict:
-                    return {"completed": 0, "failed": 0, "results": []}
-
-                rt_override.install(test_stdlib)
+    restricted = {k: v for k, v in stdlib.items() if k != "@agent/fs"}
+    with Runtime() as rt_restricted:
+        rt_restricted.set_import_handler(
+            lambda requested_key, _referrer, _specifier: restricted.get(requested_key)
+        )
+        with rt_restricted.new_context() as ctx:
+            with pytest.raises(JSError, match="@agent/fs"):
                 await ctx.eval_async(
                     """
-                    import { MAX_RETRIES } from "@agent/config";
-                    globalThis.retries = MAX_RETRIES;
+                    import { readFile } from "@agent/fs";
                     """,
                     module=True,
                 )
-                assert ctx.eval("retries") == 1  # overridden
-
-        # Capability restriction: no @agent/fs.
-        restricted = ModuleScope({k: v for k, v in stdlib.modules.items() if k != "@agent/fs"})
-
-        with Runtime() as rt_restricted:
-            with rt_restricted.new_context() as ctx:
-                rt_restricted.install(restricted)
-                with pytest.raises(JSError, match="@agent/fs"):
-                    await ctx.eval_async(
-                        """
-                        import { readFile } from "@agent/fs";
-                        """,
-                        module=True,
-                    )
-
-        # Self-contained recursive deps. @app carries @agent/utils
-        # directly; @app's index.js imports it. Eval from the
-        # root cannot import @agent/utils directly because root
-        # doesn't declare it — even though @app does carry it.
-        utils = ModuleScope(
-            {
-                "@agent/utils": ModuleScope(
-                    {
-                        "index.js": ("export function greet(n) { return 'hi ' + n; }"),
-                    }
-                ),
-            }
-        )
-        recursive = ModuleScope(
-            {
-                "@app": ModuleScope(
-                    {
-                        **utils.modules,  # @app carries @agent/utils
-                        "index.js": """
-                            import { greet } from "@agent/utils";
-                            export const message = greet("world");
-                        """,
-                    }
-                ),
-                # Root does NOT carry @agent/utils. Eval from the
-                # root scope can only import @app.
-            }
-        )
-        with Runtime() as rt_recursive:
-            with rt_recursive.new_context() as ctx:
-                rt_recursive.install(recursive)
-                await ctx.eval_async(
-                    """
-                    import { message } from "@app";
-                    globalThis.msg = message;
-                    """,
-                    module=True,
-                )
-                assert ctx.eval("msg") == "hi world"
-
-                # Self-containment: the root scope does not
-                # itself carry @agent/utils, so eval from root
-                # cannot import it — even though @app does carry it.
-                with pytest.raises(JSError, match="@agent/utils"):
-                    await ctx.eval_async(
-                        """
-                        import { greet } from "@agent/utils";
-                        """,
-                        module=True,
-                    )

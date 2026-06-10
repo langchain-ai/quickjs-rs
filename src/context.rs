@@ -7,9 +7,9 @@
 //! `with_active_ctx` so reentrant evals from within host functions
 //! don't re-lock rquickjs's non-reentrant runtime RefCell.
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use pyo3::exceptions::PyValueError;
 use rquickjs::qjs;
 use rquickjs::{
     atom::PredefinedAtom, context::EvalOptions, CatchResultExt, CaughtError, Context, Module,
@@ -205,7 +205,8 @@ impl QjsContext {
             let val = persistent.restore(ctx).map_err(map_handle_error)?;
             let mut out = MaybeUninit::<u64>::uninit();
             let flags = Self::write_object_flags(allow_bytecode, allow_reference, allow_sab);
-            let buf = unsafe { qjs::JS_WriteObject(ctx_ptr, out.as_mut_ptr(), val.as_raw(), flags) };
+            let buf =
+                unsafe { qjs::JS_WriteObject(ctx_ptr, out.as_mut_ptr(), val.as_raw(), flags) };
             if buf.is_null() {
                 return Err(Self::ctx_exception_pyerr(ctx));
             }
@@ -649,8 +650,9 @@ impl QjsContext {
         let context = self.context()?.clone();
         let context_ptr = context.as_raw().as_ptr() as usize;
         let aggregate = with_active_ctx(&context, |ctx| {
-            let obj = Object::new(ctx.clone())
-                .map_err(|e| QuickJSError::new_err(format!("snapshot object alloc failed: {}", e)))?;
+            let obj = Object::new(ctx.clone()).map_err(|e| {
+                QuickJSError::new_err(format!("snapshot object alloc failed: {}", e))
+            })?;
             for (name, persistent) in active_values {
                 let value = persistent.clone().restore(ctx).map_err(map_handle_error)?;
                 obj.set(name.as_str(), value).map_err(|e| {

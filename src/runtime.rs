@@ -6,18 +6,12 @@ use pyo3::types::PyDict;
 use rquickjs::{runtime::InterruptHandler, Runtime};
 
 use crate::errors::{map_runtime_new_error, QuickJSError};
-use crate::modules::{maybe_strip_ts, StoreHandle, StoreLoader, StoreResolver};
+use crate::modules::{StoreHandle, StoreLoader, StoreResolver};
 
 #[pyclass(module = "quickjs_rs._engine", unsendable)]
 pub(crate) struct QjsRuntime {
     inner: Option<Runtime>,
-    /// module registry. Created lazily on the first install
-    /// call so runtimes that never use modules pay nothing. Once
-    /// created, the handle stays — `rt.set_loader` consumed its
-    /// own clones of the Resolver and Loader, but they share the
-    /// same `Rc<RefCell<ModuleStore>>` backing so subsequent
-    /// installs reach them through this clone.
-    module_store: Option<StoreHandle>,
+    module_store: StoreHandle,
 }
 
 #[pymethods]
@@ -26,15 +20,21 @@ impl QjsRuntime {
     #[pyo3(signature = (*, memory_limit=None, stack_limit=None))]
     fn new(memory_limit: Option<usize>, stack_limit: Option<usize>) -> PyResult<Self> {
         let rt = Runtime::new().map_err(map_runtime_new_error)?;
+        let module_store = StoreHandle::new();
         if let Some(limit) = memory_limit {
             rt.set_memory_limit(limit);
         }
         if let Some(limit) = stack_limit {
             rt.set_max_stack_size(limit);
         }
+        // Install the module resolver/loader once per runtime.
+        rt.set_loader(
+            StoreResolver(module_store.clone()),
+            StoreLoader(module_store.clone()),
+        );
         Ok(Self {
             inner: Some(rt),
-            module_store: None,
+            module_store,
         })
     }
 
@@ -98,60 +98,26 @@ impl QjsRuntime {
         Ok(out.unbind())
     }
 
-    /// Register a str-valued scope entry. Called from
-    /// Python's recursive Context.install walk for each str entry.
+    /// Configure (or clear) the runtime's dynamic import fallback.
     ///
-    ///   * `scope_path`: canonical path of the containing scope
-    ///     ("" for the root, or a '/'-joined chain like
-    ///     "@agent/fs" or "@agent/fs/@peer").
-    ///   * `key`: the dict key (a POSIX path within the scope,
-    ///     which may itself contain '/'). The file extension on
-    ///     this key controls TypeScript stripping.
-    ///   * `canonical_path`: the joined scope+key path used both
-    ///     as the source-map key and as the module name QuickJS
-    ///     sees when it asks the loader to materialize the module.
-    ///   * `source`: the source text. If `key` ends in .ts / .mts /
-    ///     .cts / .tsx, the text is passed through oxidase to strip
-    ///     type annotations and transform enums / namespaces /
-    ///     parameter properties before the stripped output lands
-    ///     in the store. Other extensions pass through unchanged.
+    /// Signature:
+    ///   handler(requested_key, referrer, specifier)
+    ///     -> str | None
     ///
-    /// TypeScript parse errors surface HERE (install time), not
-    /// later at eval time — oxidase parses during stripping, and
-    /// a parser panic turns into a QuickJSError raised from this
-    /// call. That's the contract promises: users see their
-    /// TypeScript errors at `ctx.install(scope)` rather than at
-    /// `ctx.eval_async(..., module=True)`.
-    fn add_module_source(
-        &mut self,
-        scope_path: &str,
-        key: &str,
-        canonical_path: &str,
-        source: &str,
-    ) -> PyResult<()> {
-        let stripped = maybe_strip_ts(key, source).map_err(QuickJSError::new_err)?;
-        let handle = self.ensure_module_store()?;
-        handle.with_mut(|store| {
-            store.add_source(scope_path, key, canonical_path, &stripped);
-        });
-        Ok(())
-    }
-
-    /// Declare that `child_key` inside `scope_path` is a
-    /// ModuleScope (bare-specifier child). Called by the Python
-    /// install walk for each ModuleScope-valued entry before
-    /// recursing into it.
-    fn register_subscope(&mut self, scope_path: &str, child_key: &str) -> PyResult<()> {
-        let handle = self.ensure_module_store()?;
-        handle.with_mut(|store| {
-            store.register_subscope(scope_path, child_key);
-        });
+    /// `referrer` is None for top-level eval.
+    #[pyo3(signature = (handler=None))]
+    fn set_import_handler(&self, handler: Option<Py<PyAny>>) -> PyResult<()> {
+        let _ = self.runtime()?;
+        self.module_store.set_source_handler(handler);
         Ok(())
     }
 
     fn close(&mut self) -> PyResult<()> {
+        self.module_store.with_mut(|store| {
+            store.resolved_sources.clear();
+            store.dynamic_source_handler = None;
+        });
         self.inner = None;
-        self.module_store = None;
         Ok(())
     }
 
@@ -165,21 +131,5 @@ impl QjsRuntime {
         self.inner
             .as_ref()
             .ok_or_else(|| QuickJSError::new_err("runtime is closed"))
-    }
-
-    /// Lazily create the module store and install the rquickjs
-    /// Resolver + Loader on first use. Subsequent calls return
-    /// the existing handle.
-    fn ensure_module_store(&mut self) -> PyResult<&StoreHandle> {
-        if self.module_store.is_none() {
-            let handle = StoreHandle::new();
-            let rt = self
-                .inner
-                .as_ref()
-                .ok_or_else(|| QuickJSError::new_err("runtime is closed"))?;
-            rt.set_loader(StoreResolver(handle.clone()), StoreLoader(handle.clone()));
-            self.module_store = Some(handle);
-        }
-        Ok(self.module_store.as_ref().unwrap())
     }
 }

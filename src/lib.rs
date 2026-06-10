@@ -15,6 +15,7 @@
 
 use pyo3::prelude::*;
 
+mod ast;
 mod context;
 mod errors;
 mod handle;
@@ -23,7 +24,6 @@ mod marshal;
 mod modules;
 mod reentrance;
 mod runtime;
-mod ast;
 mod snapshot;
 
 use crate::context::QjsContext;
