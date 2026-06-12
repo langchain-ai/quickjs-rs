@@ -19,7 +19,7 @@ Host languages should not link directly against QuickJS or native `rquickjs`. In
 ```text
 Python API      -> Python WASM host adapter   -> quickjs-core.wasm
 Node/TS API     -> JS/WASM host adapter       -> quickjs-core.wasm
-Rust host API   -> Wasmtime host adapter      -> quickjs-core.wasm
+Rust host API   -> Wasmtime host adapter      -> quickjs-core.wasm   (deferred; see Rust Host Adapter)
 ```
 
 This is a security hardening effort. The goal is to stop running the JavaScript engine and its object heap in the same directly addressable memory space as the host application. The WASM module becomes the REPL execution plane; host callbacks, module loading, async settlement, and value transfer happen through explicit capabilities and copied byte payloads.
@@ -62,7 +62,7 @@ The desired hardening change is to move the REPL execution plane into WebAssembl
                  +-----------------------+
 Python           | quickjs_rs Python API |
 JS (Node/browser)| quickjs JS/TS API     |
-Rust             | quickjs Rust host API |
+Rust (deferred)  | quickjs Rust host API |
                  +-----------+-----------+
                              |
                              v
@@ -96,7 +96,6 @@ crates/
   quickjs-core/              # no PyO3/N-API; compiles to wasm; owns execution semantics
   quickjs-core-abi/          # shared ABI structs/codecs; usable by hosts and guest
   quickjs-core-wasm-build/   # build/package glue for quickjs-core.wasm
-  quickjs-host-rust/         # Rust host adapter using Wasmtime directly
 
 python/
   quickjs_rs/                # Python public API over a WASM runtime adapter
@@ -110,6 +109,7 @@ There is no separate browser package or browser build artifact. The JS package i
 Optional later packages:
 
 ```text
+quickjs-host-rust/           # Rust host adapter using Wasmtime directly; deferred until a Rust consumer exists (see Rust Host Adapter)
 python-native/               # optional PyO3 convenience host wrapper, if needed
 node-native/                 # optional N-API convenience host wrapper, if needed
 quickjs-wasm-web/            # optional browser-sugar package (prebuilt worker bundles, COOP/COEP helpers), only if a concrete need emerges
@@ -681,25 +681,16 @@ WASI shim rules:
 
 Browser is a conformance target, not a package: CI runs the same package's conformance suite in a headless browser. It remains a distinct target because timer, memory, threading, and interruption behavior differ from server hosts (see Resource Controls).
 
-## Rust Host Adapter
+## Rust Host Adapter (Deferred)
 
-A Rust host adapter should exist for testing and server-side embedding:
+V1 ships Python and TypeScript adapters only. A `quickjs-host-rust` adapter (Wasmtime directly, typed wrappers over ABI calls, callback trait registry, async driver) is deferred until a Rust consumer actually exists — maintaining a third adapter is real cost with no V1 user.
 
-```text
-quickjs-host-rust
-  -> Wasmtime Engine/Module/Store
-  -> typed wrappers over ABI calls
-  -> callback trait registry
-  -> async driver
-```
+Its former roles are covered without it:
 
-This adapter is useful for:
-
-- conformance tests,
-- fuzzing,
-- benchmarks,
-- debugging guest ABI issues,
-- non-Python/non-Node consumers.
+- Conformance tests run through the Python adapter; `wasmtime-py` drives the same Wasmtime engine, so engine-level behaviors (epoch interruption, store limits, traps) are exercised through the same code paths.
+- Rust-side fuzzing targets the codec and guest crates directly (`cargo fuzz` against `quickjs-core-abi` decoders and `quickjs-core` internals); a host adapter was never required for that.
+- Differential fuzzing keeps three codec implementations without it: the guest/reference Rust codec (driven by a cargo harness), the Python host codec, and the TypeScript host codec.
+- Guest ABI debugging happens through the Python adapter. If that proves too slow an iteration loop in practice, add a minimal internal Rust test harness in the workspace — internal tooling, not a public adapter surface.
 
 ## Module Loading
 
@@ -785,8 +776,8 @@ Cooperative checks alone cannot stop a hostile `for(;;);` if the guest never yie
 
 | Host | Required mechanism | Strength |
 |---|---|---|
-| Rust (Wasmtime) | Epoch interruption (`Engine::increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
-| Python (`wasmtime-py`) | Epoch interruption (exposed by wasmtime-py) | Preemptive; traps mid-loop |
+| Python (`wasmtime-py`) | Epoch interruption (`Engine.increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
+| Rust (Wasmtime) — deferred host | Epoch interruption (`Engine::increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
 | Node | Worker-hosted instance (default) with `SharedArrayBuffer` interrupt flag, plus worker termination as backstop | Weaker; backstop destroys the instance |
 | Browser | Worker-hosted instance with `SharedArrayBuffer` interrupt flag (requires COOP/COEP), plus Web Worker termination as backstop | Weaker; backstop destroys the instance |
 
@@ -803,7 +794,7 @@ The cooperative interrupt flag has a sharp limitation in single-threaded JS host
 
 Cancellation and deadlines cannot preempt host code: if the deadline expires while a sync host callback is executing, nothing happens until the callback returns. Host callbacks should enforce their own internal timeouts; adapter documentation must state this gap.
 
-Phase 1 must demonstrate the Rust and Python mechanisms against an infinite loop before any callback or handle work begins (see Phase 1 exit criteria). High-risk deployments should still use worker processes/containers regardless.
+Phase 1 must demonstrate the Python mechanism against an infinite loop before any callback or handle work begins (see Phase 1 exit criteria). High-risk deployments should still use worker processes/containers regardless.
 
 ### Stack
 
@@ -851,7 +842,7 @@ Under this architecture the host adapter inherits the security-kernel role: it i
 - Never call back into guest exports from inside a host import. The sync host-call flow depends on this no-reentrancy invariant; it is enforced by a conformance test, not convention.
 - Re-validate memory views after growth: `memory.buffer` is detached/replaced when guest memory grows; adapters must re-acquire views rather than caching them across export calls.
 
-Because Python and TypeScript hosts cannot run the shared Rust codec, there will be at least three codec implementations (Rust, Python, TypeScript). Divergence between them is a protocol-confusion vulnerability. The test strategy must include differential fuzzing across all three (see Fuzzing).
+Because Python and TypeScript hosts cannot run the shared Rust codec, there are three codec implementations: the guest's Rust codec (the reference) plus the Python and TypeScript host codecs. Divergence between them is a protocol-confusion vulnerability. The test strategy must include differential fuzzing across all three (see Fuzzing).
 
 ### Instance Granularity And Trust Domains
 
@@ -903,10 +894,11 @@ Build a host-neutral conformance suite covering:
 
 Run the same cases through:
 
-- Rust host adapter,
 - Python adapter,
 - JS adapter in Node,
 - the same JS adapter in a headless browser, if browser support is approved.
+
+(The deferred Rust host adapter joins this matrix if/when it ships.)
 
 ### Fuzzing
 
@@ -924,10 +916,9 @@ Fuzz targets (host-side — guest output is attacker-controlled, so the host dec
 
 - response descriptor validation in every adapter (out-of-bounds `ptr`/`len`, integer overflow, descriptors pointing at the descriptor itself),
 - Python value/envelope decoder,
-- TypeScript value/envelope decoder,
-- Rust host decoder.
+- TypeScript value/envelope decoder.
 
-Differential fuzzing across the three codec implementations (Rust, Python, TypeScript): identical input must yield an identical parse or an identical error in all three. Any divergence is a protocol-confusion bug and fails CI.
+Differential fuzzing across the three codec implementations — the guest/reference Rust codec (driven directly by a cargo harness, no host adapter needed), Python, and TypeScript: identical input must yield an identical parse or an identical error in all three. Any divergence is a protocol-confusion bug and fails CI.
 
 ### Security Tests
 
@@ -971,7 +962,7 @@ Deliverables:
 - The ADR includes a retrospective on the project's earlier v0.2 WASM implementation (removed in `736c528`, benchmarked against native in `ada54b4`): why it was abandoned, what the measured performance deltas were, and why those forces do not sink the migration a second time. The ADR sets an explicit callback-overhead performance budget informed by that data.
 - Agreement that PyO3/N-API are not primary architecture.
 - Agreement on initial WASM target: likely `wasm32-wasip1`.
-- Agreement on minimum supported hosts for V1: Python and Node, Rust host for tests.
+- Agreement on minimum supported hosts for V1: Python and Node only. The Rust host adapter is deferred until a Rust consumer exists (see Rust Host Adapter); conformance and fuzzing do not require it.
 
 Exit criteria:
 
@@ -989,10 +980,10 @@ Scope:
 
 Exit criteria:
 
-- Rust host adapter can run `1 + 2`.
 - Python adapter can run `1 + 2`.
-- Runaway allocation raises `MemoryLimitError` (not host OOM) in both hosts.
-- A hostile infinite loop (`for(;;);`) is terminated via Wasmtime epoch interruption in both the Rust and Python (`wasmtime-py`) hosts, surfacing `TimeoutError`, before any callback or handle work begins.
+- Guest-crate unit tests (cargo, no host adapter) cover alloc/free and the version export.
+- Runaway allocation raises `MemoryLimitError` (not host OOM) in the Python host.
+- A hostile infinite loop (`for(;;);`) is terminated via Wasmtime epoch interruption in the Python (`wasmtime-py`) host, surfacing `TimeoutError`, before any callback or handle work begins.
 - The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
 - The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
 
@@ -1007,8 +998,8 @@ Scope:
 
 Exit criteria:
 
-- Primitive and container tests pass in Rust and Python hosts.
-- Malformed value payload fuzzing exists.
+- Primitive and container tests pass in the Python host.
+- Malformed value payload fuzzing exists (cargo harness for the reference codec; Python host decoder).
 
 ### Phase 3: Handles
 
@@ -1101,7 +1092,7 @@ Exit criteria:
 
 ### Runtime
 
-- Resolved: `wasmtime-py` is the first Python adapter runtime; epoch interruption is a hard requirement for Python/Rust hosts (see CPU And Timeouts). Open: do wasmer/wasmedge adapters matter enough to justify abstracting over a Wasmtime-specific interruption mechanism?
+- Resolved: `wasmtime-py` is the first Python adapter runtime; epoch interruption is a hard requirement for the Python host (and any future Rust host) (see CPU And Timeouts). Open: do wasmer/wasmedge adapters matter enough to justify abstracting over a Wasmtime-specific interruption mechanism?
 - What is the minimum acceptable browser support story, given its weaker (cooperative + worker-termination) interruption model?
 
 ### Product
@@ -1116,7 +1107,7 @@ Exit criteria:
 1. Write ADR: portable `quickjs-core.wasm` is the target REPL execution plane.
 2. Create `crates/quickjs-core-abi` with envelope/value/error structs and debug JSON codec.
 3. Create minimal `crates/quickjs-core` compiling to WASM with alloc/free and version export.
-4. Add Rust host smoke test using Wasmtime.
+4. Add guest-crate unit tests driven by cargo (no host adapter).
 5. Add Python host smoke test using a Python WASM runtime.
 6. Compile QuickJS into the guest and run primitive eval.
 7. Add memory-limit and timeout experiments before callbacks.
@@ -1125,7 +1116,7 @@ Exit criteria:
 10. Implement poll/event host callback protocol.
 11. Port modules and TypeScript stripping.
 12. Build the isomorphic JS package (Node + browser) around the same WASM artifact.
-13. Add conformance matrix across Rust/Python/Node.
+13. Add conformance matrix across Python/Node.
 14. Update security docs and REPL default configuration.
 
 ## References

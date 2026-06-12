@@ -8,10 +8,12 @@ Deciders: architecture owner, security owner (TBD)
 
 Move the REPL's default JavaScript execution plane into a portable
 WebAssembly artifact, `quickjs-core.wasm` (target `wasm32-wasip1`),
-instantiated by host adapters in Python (`wasmtime-py`), Node/browser
-(plain TypeScript over the standard `WebAssembly` API), and Rust
-(Wasmtime, for tests and server embedding). PyO3 and N-API are not the
-primary architecture. The full design is
+instantiated by host adapters in Python (`wasmtime-py`) and Node/browser
+(plain TypeScript over the standard `WebAssembly` API). A Rust host
+adapter is deferred until a Rust consumer exists; conformance runs
+through the Python adapter (which drives the same Wasmtime engine) and
+Rust-side fuzzing targets the codec/guest crates directly via cargo.
+PyO3 and N-API are not the primary architecture. The full design is
 `docs/repl-wasm-security-hardening-spec.md`; this ADR records the
 decision, the retrospective on our previous WASM implementation, and the
 performance budget that governs the migration.
