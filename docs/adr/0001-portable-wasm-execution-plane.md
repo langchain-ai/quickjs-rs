@@ -123,6 +123,18 @@ architecture is considered.
   wasmtime-py releases the GIL during wasm execution and preemptive
   timeout is real. Trap surfaces as `wasm trap: interrupt`,
   classifiable distinctly.
+- **Node worker + SAB interrupt shape: PASS.**
+  `spikes/node_worker_interrupt_spike.mjs` (Node 24.6.0): a
+  worker-hosted wasm infinite loop whose interrupt check calls a host
+  import (a JS closure reading a `SharedArrayBuffer` via
+  `Atomics.load`) was interrupted 501 ms in when the main thread
+  flipped the flag at 500 ms; a hostile loop with no interrupt check
+  was killed by `worker.terminate()` at the backstop deadline. Notably
+  this needs no shared wasm memory or threads feature — the SAB is read
+  inside the import closure — so it works on plain `wasm32-wasip1`.
+  Incidental measurement: ~69.8 M import calls in 488 ms (~7 ns per
+  host-import crossing in V8), confirming that serialization, not the
+  crossing itself, is where the callback budget goes.
 - **Build feasibility**: a Phase 1 spike built `quickjs-core.wasm` for
   `wasm32-wasip1` (~1.2 MB) and produced the findings recorded in the
   spec (sync host-call import flow, quickjs-ng stack-limit behavior on
