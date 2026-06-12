@@ -969,7 +969,7 @@ Note: an initial Phase 1 spike was built (`wasm32-wasip1`, ~1.2 MB artifact) and
 
 Scope:
 
-- Build `quickjs-core.wasm` with QuickJS.
+- Build `quickjs-core.wasm` with QuickJS, bound via `rquickjs` (decision: see Open Questions / Build).
 - Expose ABI version, alloc/free, runtime/context create/close, primitive eval.
 - No host callbacks, modules, handles, or snapshots.
 
@@ -981,6 +981,7 @@ Exit criteria:
 - A hostile infinite loop (`for(;;);`) is terminated via Wasmtime epoch interruption in the Python (`wasmtime-py`) host, surfacing `TimeoutError`, before any callback or handle work begins.
 - The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
 - The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
+- `quickjs-core.wasm` binary size is measured and reviewed against packaging budgets (reference points: v0.2 shipped ~1 MB gzipped; the lost spike artifact was 1.2 MB raw). If rquickjs proves materially heavier than those references, the binding decision is revisited with data.
 
 ### Phase 2: Value Protocol And Errors
 
@@ -1073,8 +1074,8 @@ Exit criteria:
 
 ### Build
 
-- Can current QuickJS/quickjs-ng build reliably to `wasm32-wasip1`?
-- Can we use `rquickjs` inside the guest, or do we need a smaller raw QuickJS wrapper?
+- Resolved (2026-06-12): the guest binding layer is Rust via `rquickjs` (over quickjs-ng), with per-call drop-down to the re-exported raw sys layer (`rquickjs::qjs`) where `rquickjs` lacks an API — the pattern the native snapshot code already uses. No hand-written C shim layer: the v0.2 retrospective (ADR 0001) forecloses it. Rationale: Javy proves rquickjs on `wasm32-wasip1`; the native semantics layer (marshal, modules, errors, handles) ports rather than being rewritten against raw FFI; the WASM sandbox contains binding bugs either way, so sys-everywhere buys only more unsafe surface. Phase 1 exit measures binary size to confirm; the `qjs` drop-down is the escape hatch if rquickjs fights the poll state machine, not a re-architecture.
+- Can current QuickJS/quickjs-ng build reliably to `wasm32-wasip1`? (The lost Phase 1 spike's artifact suggests yes; re-confirm in Phase 1.)
 - What is the size impact of including TypeScript stripping inside the guest?
 - What allocator should the guest use?
 

@@ -13,7 +13,15 @@ instantiated by host adapters in Python (`wasmtime-py`) and Node/browser
 adapter is deferred until a Rust consumer exists; conformance runs
 through the Python adapter (which drives the same Wasmtime engine) and
 Rust-side fuzzing targets the codec/guest crates directly via cargo.
-PyO3 and N-API are not the primary architecture. The full design is
+PyO3 and N-API are not the primary architecture.
+
+The guest binding layer is `rquickjs` (over quickjs-ng), with per-call
+drop-down to the re-exported raw sys layer (`rquickjs::qjs`) where the
+safe API falls short — the pattern the native snapshot code already
+uses. A hand-written C shim is foreclosed by the v0.2 retrospective
+below; sys-bindings-everywhere is rejected because the WASM sandbox
+contains binding bugs either way, so owning all the unsafe FFI
+discipline buys risk without security return. The full design is
 `docs/repl-wasm-security-hardening-spec.md`; this ADR records the
 decision, the retrospective on our previous WASM implementation, and the
 performance budget that governs the migration.
