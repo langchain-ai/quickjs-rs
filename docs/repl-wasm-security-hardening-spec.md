@@ -1,6 +1,6 @@
 # REPL WASM Execution Plane Security Hardening Spec
 
-Date: 2026-06-10
+Date: 2026-06-10 (revised 2026-06-12)
 Status: Draft for architecture review
 Owner: TBD
 
@@ -331,6 +331,11 @@ Snapshot compatibility must be decided explicitly:
 - Native-produced snapshots may not be compatible with WASM-produced snapshots.
 - Cross-version snapshot compatibility should be feature-gated and tested before promising it.
 - Snapshot payloads should include ABI version, QuickJS build identity, flags, and feature markers.
+
+Snapshot bytes are code-equivalent. Restore deserializes engine state, and `JS_ReadObject`-style bytecode loading is not hardened against malicious input: a malicious snapshot owns the restoring instance and everything in its trust domain. Rules:
+
+- Restore only snapshots produced in the same trust domain, or whose content is independently authenticated.
+- Snapshots persisted outside the producing process must carry a MAC or signature that the host adapter verifies before calling `qrs_snapshot_restore`. `qrs_snapshot_validate` checks structure and compatibility, not trustworthiness — it must not be presented as a security control.
 
 ## Wire Protocol
 
@@ -665,13 +670,14 @@ Package responsibilities:
 Environment differences are confined to a small conditional-exports seam (`"node"` / `"default"` entry points):
 
 - Byte loading: filesystem read in Node; `fetch`/`instantiateStreaming` in browsers. The API should also accept caller-provided bytes (`BufferSource | Response | URL`) to sidestep loader policy entirely.
-- Worker-termination backstop: `worker_threads` in Node, Web Worker in browsers (see CPU And Timeouts).
+- Worker hosting (the default) and termination backstop: `worker_threads` in Node, Web Worker in browsers, with the interrupt flag in a `SharedArrayBuffer` (see CPU And Timeouts).
 
 WASI shim rules:
 
 - The package ships one small pure-JS zero-capability `wasi_snapshot_preview1` shim used in **both** Node and browsers. Do not use `node:wasi`: the guest must see an identical import environment in every JS host.
 - With zero ambient capabilities configured, the expected import surface is small: `clock_time_get`, `random_get`, `fd_write` (panic/diagnostic output only), `environ_*` stubs, `proc_exit`.
 - Clock and randomness are policy points: the shim must support coarsening or fixing `clock_time_get` and deterministic `random_get` for deployments that want to withhold timing capabilities from guest JS.
+- Tradeoff: deterministic `random_get` makes QuickJS hash seeds predictable, enabling hash-flooding DoS by a guest that can choose object keys. Default to real randomness with a coarsened clock; deterministic mode is for reproducibility-controlled deployments that accept this risk, and the docs must say so.
 
 Browser is a conformance target, not a package: CI runs the same package's conformance suite in a headless browser. It remains a distinct target because timer, memory, threading, and interruption behavior differ from server hosts (see Resource Controls).
 
@@ -739,16 +745,32 @@ Consequences to design for:
 
 Controls:
 
-- QuickJS memory limit inside guest.
-- WASM linear memory maximum configured by host/runtime.
-- Optional host adapter max response size.
-- Optional max handle count.
-- Optional max module source bytes.
+- QuickJS memory limit inside guest. First line of defense — but it is enforced by the engine itself, so it does not hold under engine compromise.
+- WASM linear memory maximum configured by the host runtime (e.g. Wasmtime store limits). **Required, not optional:** this is the limit that holds when the engine is compromised. Adapters set it by default; unlimited memory requires explicit opt-in.
+- Host adapter caps (required defaults, host-enforced before parsing or allocation):
+
+| Cap | Suggested default |
+|---|---|
+| Sync host-call argument bytes | 8 MiB |
+| Response payload bytes | 32 MiB |
+| Module source bytes | 16 MiB |
+| Handles per context | 10,000 |
+| Pending host calls per context | 1,000 |
+| Contexts per runtime | 64 |
+| Runtimes per instance | 16 |
+
+Defaults are starting points to be tuned against real REPL workloads; the requirement is that every cap exists, is on by default, and raising it is an explicit configuration act.
+
+WASM linear memory never shrinks: a long-lived instance retains its peak footprint. Adapters must expose an instance-recycling policy for long-lived deployments and document peak-retention behavior.
+
+Polling is deadline-bounded: adapters must not drive `qrs_eval_poll` without a deadline. A guest that returns `Pending` indefinitely is terminated by the deadline like any other timeout.
 
 Required tests:
 
 - runaway allocation raises `MemoryLimitError`, not host OOM;
+- linear-memory growth beyond the store limit traps and is classified distinctly from QuickJS `MemoryLimitError`;
 - large ABI response is rejected predictably;
+- each adapter cap above rejects predictably at its boundary;
 - handle leaks are bounded by configured max handle count.
 
 ### CPU And Timeouts
@@ -765,14 +787,21 @@ Cooperative checks alone cannot stop a hostile `for(;;);` if the guest never yie
 |---|---|---|
 | Rust (Wasmtime) | Epoch interruption (`Engine::increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
 | Python (`wasmtime-py`) | Epoch interruption (exposed by wasmtime-py) | Preemptive; traps mid-loop |
-| Node | Cooperative QuickJS interrupt flag, plus worker-thread termination as backstop | Weaker; backstop destroys the instance |
-| Browser | Cooperative QuickJS interrupt flag, plus Web Worker termination as backstop | Weaker; backstop destroys the instance |
+| Node | Worker-hosted instance (default) with `SharedArrayBuffer` interrupt flag, plus worker termination as backstop | Weaker; backstop destroys the instance |
+| Browser | Worker-hosted instance with `SharedArrayBuffer` interrupt flag (requires COOP/COEP), plus Web Worker termination as backstop | Weaker; backstop destroys the instance |
 
 Rules:
 
-- An epoch/fuel trap tears down the eval and surfaces `TimeoutError`; the runtime instance must either recover to a verified-consistent state or be discarded.
+- An epoch/fuel trap tears down the eval and surfaces `TimeoutError`. A trap leaves the QuickJS heap in an arbitrary mid-mutation state: **the instance is poisoned and must be discarded — always.** "Recover to a verified-consistent state" is not an option; it is not cheaply verifiable and a wrong answer is an isolation failure. Adapter APIs must make post-trap recycling cheap and automatic.
 - Worker termination is a backstop, not a timeout mechanism: it loses all runtime state. Adapters relying on it must document that a tight-loop timeout destroys the instance.
 - Choosing a Python/Rust WASM runtime without epoch-or-equivalent interruption is not acceptable for V1.
+
+The cooperative interrupt flag has a sharp limitation in single-threaded JS hosts: while wasm executes synchronously, the event loop is blocked and nothing in the same thread can flip the flag. The flag helps only in polled evals, between poll steps. Therefore:
+
+- The Node adapter defaults to hosting the instance in a `worker_threads` worker, with the interrupt flag in a `SharedArrayBuffer` written from the main thread, and worker termination as the backstop. Main-thread hosting is opt-in and documented as having no mid-eval timeout for sync eval.
+- The browser story is the same shape with a Web Worker. `SharedArrayBuffer` requires cross-origin isolation (COOP/COEP headers); the package documentation must cover this, and the adapter must degrade explicitly (documented weaker timeout story), not silently, when isolation is unavailable.
+
+Cancellation and deadlines cannot preempt host code: if the deadline expires while a sync host callback is executing, nothing happens until the callback returns. Host callbacks should enforce their own internal timeouts; adapter documentation must state this gap.
 
 Phase 1 must demonstrate the Rust and Python mechanisms against an infinite loop before any callback or handle work begins (see Phase 1 exit criteria). High-risk deployments should still use worker processes/containers regardless.
 
@@ -810,6 +839,19 @@ wasi targets.
 - Host callbacks can still leak data or perform privileged actions.
 - In-process WASM does not isolate process-level CPU/RSS failure as strongly as OS isolation.
 - Browser/Node/Python runtimes differ in interruption and memory controls.
+- In-process WASM does not stop speculative-execution (Spectre-class) reads of host memory. Cranelift enables mitigations by default, but secrets resident in the host process (API keys, tokens, credentials) must be assumed reachable in principle by a hostile guest sharing the process. Do not co-locate secrets with hostile guests; see Deployment Profiles.
+
+### Host Adapter Security Requirements
+
+Under this architecture the host adapter inherits the security-kernel role: it is the code standing between a potentially compromised guest and the host process. Once engine compromise is assumed — the premise of this entire effort — every byte the guest emits is attacker-controlled, including response descriptors. Host adapters MUST:
+
+- Treat `AbiResponse.ptr`/`AbiResponse.len` as untrusted: validate `ptr + len` against the current linear-memory size with integer-overflow checks before every read. A descriptor that fails validation poisons the instance.
+- Fail closed on malformed payloads: a decode error is a terminal instance error, never a value silently coerced or skipped.
+- Bound decode work: enforce the caps in Resource Controls before parsing, cap container nesting depth, and avoid recursive or quadratic parsing strategies.
+- Never call back into guest exports from inside a host import. The sync host-call flow depends on this no-reentrancy invariant; it is enforced by a conformance test, not convention.
+- Re-validate memory views after growth: `memory.buffer` is detached/replaced when guest memory grows; adapters must re-acquire views rather than caching them across export calls.
+
+Because Python and TypeScript hosts cannot run the shared Rust codec, there will be at least three codec implementations (Rust, Python, TypeScript). Divergence between them is a protocol-confusion vulnerability. The test strategy must include differential fuzzing across all three (see Fuzzing).
 
 ### Instance Granularity And Trust Domains
 
@@ -826,15 +868,15 @@ Rule: **one WASM instance per trust domain.** This is the WASM-plane successor t
 
 | Profile | Shape | Intended use |
 |---|---|---|
-| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | Default REPL hardening target |
-| `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | UI/server responsiveness; not a strong security boundary |
-| `wasm-worker-process` | Separate process/container owns WASM instance | High-risk untrusted code |
+| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | Semi-trusted REPL workloads only |
+| `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | UI/server responsiveness; default JS-host shape; not a strong security boundary |
+| `wasm-worker-process` | Separate process/container owns WASM instance | **Default for untrusted input** |
 | `native-legacy` | Existing native QuickJS path | Migration/baseline only |
 
 Production recommendation:
 
-- Use `wasm-inproc` for semi-trusted REPL workloads.
-- Use `wasm-worker-process` for hostile/multi-tenant workloads.
+- Use `wasm-inproc` only for semi-trusted REPL workloads where the host process holds no high-value secrets.
+- Use `wasm-worker-process` as the default for untrusted input — not just "high-risk" workloads. The layers fail independently: WASM contains engine bugs; the jailed process contains WASM-runtime bugs and Spectre-class leakage. This matches the existing threat model's worker-process recommendation for the native path; the WASM plane adds a second failure domain inside it rather than replacing it.
 - In every profile, never multiplex runtimes from different trust domains into one WASM instance.
 
 ## Testing Strategy
@@ -868,7 +910,7 @@ Run the same cases through:
 
 ### Fuzzing
 
-Fuzz targets:
+Fuzz targets (guest-side):
 
 - ABI decoder,
 - value decoder,
@@ -878,6 +920,15 @@ Fuzz targets:
 - host-call settlement protocol,
 - handle ID/generation validation.
 
+Fuzz targets (host-side — guest output is attacker-controlled, so the host decoders are first-class attack surface, not plumbing):
+
+- response descriptor validation in every adapter (out-of-bounds `ptr`/`len`, integer overflow, descriptors pointing at the descriptor itself),
+- Python value/envelope decoder,
+- TypeScript value/envelope decoder,
+- Rust host decoder.
+
+Differential fuzzing across the three codec implementations (Rust, Python, TypeScript): identical input must yield an identical parse or an identical error in all three. Any divergence is a protocol-confusion bug and fails CI.
+
 ### Security Tests
 
 - No filesystem/env/network imports by default.
@@ -886,8 +937,12 @@ Fuzz targets:
 - Module provide settlements cannot target unknown, already-settled, or foreign request IDs.
 - Import specifiers reaching the host handler are treated as untrusted strings (no implicit path/URL interpretation).
 - Guest cannot forge host handles.
-- Malformed response descriptors are rejected.
-- Guest panic/trap tears down runtime cleanly.
+- Malformed response descriptors are rejected (including `ptr + len` overflow and out-of-bounds reads).
+- Guest panic/trap tears down runtime cleanly, and the trapped instance is never reused.
+- Host imports never re-enter guest exports (no-reentrancy invariant).
+- Every required adapter cap (argument size, response size, module source size, handle count, pending count) rejects at its boundary.
+- Adapters refuse a `quickjs-core.wasm` artifact whose hash does not match the pinned value.
+- Snapshot restore refuses unauthenticated snapshots when MAC/signature verification is configured.
 
 ### Performance Benchmarks
 
@@ -913,6 +968,7 @@ Keep native QuickJS baseline benchmarks during migration, but do not let native 
 Deliverables:
 
 - ADR approving portable WASM-first execution plane.
+- The ADR includes a retrospective on the project's earlier v0.2 WASM implementation (removed in `736c528`, benchmarked against native in `ada54b4`): why it was abandoned, what the measured performance deltas were, and why those forces do not sink the migration a second time. The ADR sets an explicit callback-overhead performance budget informed by that data.
 - Agreement that PyO3/N-API are not primary architecture.
 - Agreement on initial WASM target: likely `wasm32-wasip1`.
 - Agreement on minimum supported hosts for V1: Python and Node, Rust host for tests.
@@ -922,6 +978,8 @@ Exit criteria:
 - Architecture owner and security owner agree on the target shape.
 
 ### Phase 1: Minimal Guest Core
+
+Note: an initial Phase 1 spike was built (`wasm32-wasip1`, ~1.2 MB artifact) and produced the findings recorded in this spec (sync host-call import flow, epoch interruption, the quickjs-ng wasi stack-limit behavior), but its source was not preserved. Phase 1 is to be re-executed; this document is the canonical record of the spike's conclusions.
 
 Scope:
 
@@ -935,7 +993,8 @@ Exit criteria:
 - Python adapter can run `1 + 2`.
 - Runaway allocation raises `MemoryLimitError` (not host OOM) in both hosts.
 - A hostile infinite loop (`for(;;);`) is terminated via Wasmtime epoch interruption in both the Rust and Python (`wasmtime-py`) hosts, surfacing `TimeoutError`, before any callback or handle work begins.
-- The Node interruption story (cooperative flag + worker-termination backstop) is documented with its limitations.
+- The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
+- The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
 
 ### Phase 2: Value Protocol And Errors
 
@@ -1013,6 +1072,8 @@ Scope:
 
 - Package `quickjs-core.wasm` with Python wheel/sdist.
 - Package `quickjs-core.wasm` with the JS npm package.
+- Reproducible build for `quickjs-core.wasm`; the artifact hash is pinned in the Python wheel and npm package and verified at load time, so a swapped artifact is refused.
+- Extend the existing CI dependency gates (`cargo audit`, Cargo.lock git-source allowlist) to cover Wasmtime/`wasmtime-py` and the JS adapter toolchain.
 - Add headless-browser conformance CI for the JS package if browser support is approved.
 - Switch REPL default to WASM execution plane.
 
