@@ -19,7 +19,6 @@ Host languages should not link directly against QuickJS or native `rquickjs`. In
 ```text
 Python API      -> Python WASM host adapter   -> quickjs-core.wasm
 Node/TS API     -> JS/WASM host adapter       -> quickjs-core.wasm
-Rust host API   -> Wasmtime host adapter      -> quickjs-core.wasm   (deferred; see Rust Host Adapter)
 ```
 
 This is a security hardening effort. The goal is to stop running the JavaScript engine and its object heap in the same directly addressable memory space as the host application. The WASM module becomes the REPL execution plane; host callbacks, module loading, async settlement, and value transfer happen through explicit capabilities and copied byte payloads.
@@ -62,7 +61,6 @@ The desired hardening change is to move the REPL execution plane into WebAssembl
                  +-----------------------+
 Python           | quickjs_rs Python API |
 JS (Node/browser)| quickjs JS/TS API     |
-Rust (deferred)  | quickjs Rust host API |
                  +-----------+-----------+
                              |
                              v
@@ -777,7 +775,6 @@ Cooperative checks alone cannot stop a hostile `for(;;);` if the guest never yie
 | Host | Required mechanism | Strength |
 |---|---|---|
 | Python (`wasmtime-py`) | Epoch interruption (`Engine.increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
-| Rust (Wasmtime) — deferred host | Epoch interruption (`Engine::increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
 | Node | Worker-hosted instance (default) with `SharedArrayBuffer` interrupt flag, plus worker termination as backstop | Weaker; backstop destroys the instance |
 | Browser | Worker-hosted instance with `SharedArrayBuffer` interrupt flag (requires COOP/COEP), plus Web Worker termination as backstop | Weaker; backstop destroys the instance |
 
@@ -785,7 +782,7 @@ Rules:
 
 - An epoch/fuel trap tears down the eval and surfaces `TimeoutError`. A trap leaves the QuickJS heap in an arbitrary mid-mutation state: **the instance is poisoned and must be discarded — always.** "Recover to a verified-consistent state" is not an option; it is not cheaply verifiable and a wrong answer is an isolation failure. Adapter APIs must make post-trap recycling cheap and automatic.
 - Worker termination is a backstop, not a timeout mechanism: it loses all runtime state. Adapters relying on it must document that a tight-loop timeout destroys the instance.
-- Choosing a Python/Rust WASM runtime without epoch-or-equivalent interruption is not acceptable for V1.
+- Choosing a host WASM runtime without epoch-or-equivalent interruption is not acceptable for V1 server-side hosts.
 
 The cooperative interrupt flag has a sharp limitation in single-threaded JS hosts: while wasm executes synchronously, the event loop is blocked and nothing in the same thread can flip the flag. The flag helps only in polled evals, between poll steps. Therefore:
 
@@ -897,8 +894,6 @@ Run the same cases through:
 - Python adapter,
 - JS adapter in Node,
 - the same JS adapter in a headless browser, if browser support is approved.
-
-(The deferred Rust host adapter joins this matrix if/when it ships.)
 
 ### Fuzzing
 
@@ -1092,7 +1087,7 @@ Exit criteria:
 
 ### Runtime
 
-- Resolved: `wasmtime-py` is the first Python adapter runtime; epoch interruption is a hard requirement for the Python host (and any future Rust host) (see CPU And Timeouts). Open: do wasmer/wasmedge adapters matter enough to justify abstracting over a Wasmtime-specific interruption mechanism?
+- Resolved: `wasmtime-py` is the first Python adapter runtime; epoch interruption is a hard requirement for the Python host (see CPU And Timeouts). Open: do wasmer/wasmedge adapters matter enough to justify abstracting over a Wasmtime-specific interruption mechanism?
 - What is the minimum acceptable browser support story, given its weaker (cooperative + worker-termination) interruption model?
 
 ### Product
