@@ -100,7 +100,12 @@ Notes / open annotations:
   prefix would only add a "prefix must equal real extent" canonicalization
   burden for no use case. The depth cap and per-length bounds-check
   (below) cover the recursion/oversize attack surface.
-- **Object keys are always String bodies**, never arbitrary values (JS
+- **Object keys are a String *body* (`len:u32` + utf8), with no value
+  tag** — the key is always a string, so a tag would be redundant. A
+  consequence: there is no "non-string key" byte sequence to reject (a
+  key is structurally always a string), so no such rejection reason
+  exists. (Surfaced by the conformance corpus.) Object keys are never
+  arbitrary values (JS
   property keys are strings or symbols; symbols don't cross — they error
   at marshal, as today).
 - **Handle is the identity triple only** — `(context_id, handle_id,
@@ -361,9 +366,8 @@ depth_exceeded           # nesting past the depth cap
 size_exceeded            # payload past the total-size cap
 trailing_bytes           # bytes remain after a complete top-level value
 truncated                # buffer ends mid-value
-non_string_object_key    # object key whose tag is not String
 reserved_flag_set        # envelope flags has a nonzero (reserved) bit
-duplicate_object_key     # only if duplicate keys are decided to be rejected (see Open questions)
+duplicate_object_key     # same key appears twice in one Object (resolved: reject)
 ```
 
 This list is part of the contract; adding a rejection condition adds a
@@ -397,19 +401,15 @@ discipline as the rest of the format.
 5. ~~`request_id` width~~ **Resolved:** u64 (only `request_id`; other ids
    stay u32). See envelope notes.
 
-New open question surfaced while pinning the debug-JSON representation:
+6. ~~Duplicate object keys~~ **Resolved (2026-06-13): reject** with
+   `duplicate_object_key`. A correct encoder never emits duplicate keys,
+   so receiving them is malformed/non-canonical input — fail closed
+   rather than silently preserving or normalizing (consistent with the
+   reject-non-canonical stance; refuses to transform adversarial input).
+7. ~~Debug-JSON f64 form~~ **Resolved (2026-06-13): hex bit pattern.**
+   The 16-hex-digit big-endian bits are exact, one-per-value, express
+   NaN/Inf/-0 unambiguously, and compare identically across the three
+   JSON libraries (a decimal form risks cross-library rounding — a false
+   mismatch in an equality oracle). See Debug-JSON representation.
 
-6. **Duplicate object keys** — when a decoded Object contains the same
-   key twice (the wire format permits it; the pair-array debug form can
-   express it), is that (a) legal and preserved as-is, (b) legal with
-   last-wins/first-wins normalization, or (c) a `duplicate_object_key`
-   rejection? JS object literals last-win; QuickJS won't *produce*
-   duplicates on the guest→host path, so this only matters for
-   host→guest or adversarial input. Leaning **reject** (treat as
-   non-canonical — the encoder should never emit dupes, so receiving one
-   is malformed), which is the strictest and simplest to fuzz. Needs a
-   decision before the corpus freezes its reject vectors.
-
-7. **Debug-JSON f64 form** — hex bit pattern (current) vs a decimal form
-   with `NaN`/`Inf`/`-0` sentinels. Leaning hex (exact, no cross-library
-   rounding). See Debug-JSON representation.
+All open questions resolved.
