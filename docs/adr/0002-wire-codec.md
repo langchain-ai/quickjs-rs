@@ -63,9 +63,9 @@ Each value is `tag (1 byte) || body`. Tags:
 
 Notes / open annotations:
 
-- **Bool folded into the tag** (0x02/0x03) instead of a 1-byte body — one
-  fewer byte, one fewer thing to canonicalize. *Annotate if you'd rather
-  keep a single Bool tag + body byte.*
+- **Bool folded into the tag** (0x02/0x03) instead of a 1-byte body —
+  one fewer byte, and no body byte to canonicalize (a tag+body form would
+  add a "body must be 0 or 1, reject otherwise" rule). Ratified 2026-06-13.
 - **Number is always f64** (8 bytes, IEEE-754 little-endian), matching JS.
   Two f64 edge cases need explicit canonical-form rules, because "8 raw
   bytes" alone does not give one-encoding-per-value:
@@ -149,10 +149,16 @@ Notes / open annotations:
   - The codec itself is unaware of any of this: it only needs
     Handle-as-a-value (tag `0x0A`). The `eval`/`eval_handle` export
     contract is ABI-surface, specified separately.
-- **No integer tag.** JS numbers are f64; we do not add an int type. This
-  is deliberate (avoids the MessagePack "which int width" ambiguity).
-  *Annotate if array-index/length-heavy payloads make a u32 fast-path
-  worth the extra canonicalization rule.*
+- **No integer tag — f64-only, final for V1** (decided 2026-06-13). JS
+  numbers are f64; we do not add an int type. A u32/i32 fast-path would
+  give the integer `5` two valid encodings (int-tagged and f64-tagged),
+  forcing a canonical-boundary rule all three codecs must agree on
+  exactly — the MessagePack "which int width" ambiguity through the side
+  door, traded for byte savings we have not measured a need for.
+  Revisited only if the marshalling benchmark (see spec → Performance
+  Benchmarks) shows integer-array marshalling is a real hotspot; if so,
+  the fast-path is added then with its canonical-boundary rule designed
+  deliberately, not speculatively now.
 
 ## Limits (decoder caps, enforced before/while parsing)
 
@@ -175,11 +181,20 @@ Envelope (request):
 
 ```
 abi_version : u32
-request_id  : u32        # correlation; debugging + async settlement
+request_id  : u64        # correlation; debugging + async settlement (u64: free-running counter, no wraparound mis-correlation)
 kind        : u32        # which operation (eval, eval_handle, handle_get, ...)
 flags       : u32        # per-kind orthogonal bitflags; reserved, must be 0
 payload     : Value      # operation-specific, encoded per the value model
 ```
+
+`request_id` is **u64** (decided 2026-06-13): it is a free-running
+correlation counter, and a u32 could wrap on a long-lived multiplexed
+instance, risking a stale response matched to a recycled id — on the
+async-settlement path, resolving the wrong pending promise. u64 makes
+that structurally impossible for 4 extra bytes. The other ids
+(`handle_id`, `context_id`, `generation`) stay u32: they are
+cap-bounded and generation/validation-protected, not free-running
+counters with a correlation dependency.
 
 `flags` carries *orthogonal, composable* per-kind options only (a future
 example: eval strict-mode). Mutually-exclusive operation choices are
@@ -252,12 +267,20 @@ so reading it is always safe; only what it points to needs validation.
 9  abi_mismatch
 10 timeout                # deadline enforcement (added: classified distinctly)
 11 stack_overflow         # recursion/stack trap (added: classified distinctly)
+12 deadlock               # eval can provably never progress (no pending host calls, jobs, or timers); distinct from timeout
 ```
 
-`timeout` and `stack_overflow` are new vs the spec's original list —
-added because our review decided both must be classified distinctly from
-a generic trap/panic so hosts surface `TimeoutError` / `StackOverflow`
-rather than `guest_panic`.
+`timeout`, `stack_overflow`, and `deadlock` are new vs the spec's
+original list, added so hosts surface a precise condition rather than a
+generic trap/panic. `timeout` (`TimeoutError`) and `stack_overflow`
+(`StackOverflow`) replace what would otherwise be `guest_panic`.
+`deadlock` is distinct from `timeout`: it is reported only when the eval
+can *provably never* progress — no pending host calls, no scheduled
+jobs, no timers — which the eval state machine already detects as its
+`Deadlock` poll state. Mapping it to `timeout` would be lossy (timeout =
+"ran too long, might have finished"; deadlock = "will never finish").
+The guest must be certain (no pending anything) before reporting it; a
+false deadlock report is worse than a timeout.
 
 ## Versioning rule
 
@@ -285,10 +308,14 @@ best-effort cross-version parsing.
 1. ~~NaN canonicalization~~ **Resolved:** canonical quiet NaN
    `0x7FF8000000000000` on encode, reject other NaN-class patterns on
    decode; signed zero preserved. See Number notes above.
-2. Bool-in-tag vs Bool tag + body byte?
-3. Any need for a u32 integer fast-path, or is f64-only final?
-4. Are the two added status codes (`timeout`, `stack_overflow`) the right
-   split, or do we also want a distinct `deadlock` code (the eval state
-   machine has a Deadlock poll state)?
-5. `request_id` width — u32 enough, or u64 for long-lived multiplexed
-   instances?
+2. ~~Bool-in-tag vs body byte~~ **Resolved:** keep bool-in-tag
+   (0x02/0x03) — smaller, no body to canonicalize.
+3. ~~u32 integer fast-path~~ **Resolved:** f64-only, final for V1;
+   revisit only if the marshalling benchmark shows it's a hotspot. See
+   Number notes.
+4. ~~`deadlock` status code~~ **Resolved:** added as status 12, distinct
+   from `timeout`. See Status codes.
+5. ~~`request_id` width~~ **Resolved:** u64 (only `request_id`; other ids
+   stay u32). See envelope notes.
+
+All open questions resolved.

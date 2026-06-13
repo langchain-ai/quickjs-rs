@@ -225,7 +225,12 @@ Status values:
 7 = resource_exhausted
 8 = guest_panic
 9 = abi_mismatch
+10 = timeout          # deadline enforcement; distinct from guest_panic
+11 = stack_overflow   # recursion/stack trap; distinct from guest_panic
+12 = deadlock         # eval can provably never progress (no pending host calls, jobs, or timers); distinct from timeout
 ```
+
+`timeout`, `stack_overflow`, and `deadlock` are classified distinctly so hosts surface a precise error rather than a generic trap/panic. `deadlock` corresponds to the eval state machine's `Deadlock` poll state and is reported only when the eval can provably never progress; the wire codec (`docs/adr/0002-wire-codec.md`) holds the authoritative status table.
 
 ### Runtime And Context Exports
 
@@ -407,7 +412,7 @@ Response {
 }
 ```
 
-Request IDs are useful for debugging, async host-call correlation, and test traces.
+Request IDs are useful for debugging, async host-call correlation, and test traces. `request_id` is u64 (free-running counter; avoids wraparound mis-correlation on long-lived instances); see the wire codec for field widths.
 
 ## Host Callback Model
 
