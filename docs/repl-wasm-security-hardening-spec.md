@@ -876,7 +876,7 @@ The ABI multiplexes multiple runtimes into one WASM instance (`runtime_id` param
 Rule: **one WASM instance per trust domain.** This is the WASM-plane successor to the existing "one Runtime per trust domain" rule in the threat model.
 
 - Host adapters may pool instances only within a single trust domain.
-- Multi-tenant hosts must map tenant -> instance (or stronger: tenant -> process), never tenant -> runtime_id within a shared instance.
+- Multi-tenant hosts must map tenant -> instance, never tenant -> runtime_id within a shared instance. Tenant -> instance in one process is the default; tenant -> process is the escalation reserved for the runtime-escape axis (see Deployment Profiles), not a baseline multi-tenancy requirement.
 - Snapshots restore within the same trust domain they were created in unless their content is independently trusted.
 - The default adapter API should make instance-per-`Runtime` the obvious path and require explicit opt-in to share an instance across `Runtime` objects.
 
@@ -886,17 +886,17 @@ Rule: **one WASM instance per trust domain.** This is the WASM-plane successor t
 |---|---|---|
 | `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | **Default REPL hardening target** — semi-trusted code (agent/LLM-generated, internal skills) |
 | `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | Default JS-host shape (placement rule); responsiveness, not a stronger security boundary |
-| `wasm-worker-process` | Separate process/container owns WASM instance | Hostile / multi-tenant code, or host holds secrets the guest must never reach |
+| `wasm-worker-process` | Separate process/container owns WASM instance | A WASM-runtime escape is in scope, or the host holds secrets the guest must never reach |
 | `native-legacy` | Existing native QuickJS path | Migration/baseline only |
 
 Production recommendation:
 
 - **`wasm-inproc` is the default, and that is the point of this effort.** The WASM plane *is* the isolation boundary: it contains an engine memory-safety bug in guest linear memory without a separate process. For the primary target — semi-trusted code that is buggy or accidentally adversarial (the recursion bomb), not an attacker engineering a runtime escape — one boundary in-process is the right trade, and not needing process-per-execution is the improvement over the native path.
-- **Escalate to `wasm-worker-process` only when the threat actually warrants a second boundary**, decided on two concrete conditions, not a blanket "untrusted" label:
-  - *Hostile or multi-tenant code* — you run arbitrary third parties' code and must assume some actively attack the WASM runtime itself. The second boundary contains a WASM-runtime escape; the layers fail independently.
+- **Multi-tenancy is a topology, not a threat, and is handled in-process by default.** A REPL-execution service serving many customers is multi-tenant by definition — the expected default deployment. Tenant isolation comes from the instance-granularity invariant (*one WASM instance per trust domain*; see Instance Granularity), realized as **tenant → instance**, not tenant → process. Two instances in one process are already isolated by the WASM sandbox — the boundary this whole effort provides — so `wasm-inproc` with one instance per tenant is the intended multi-tenant default. What is forbidden is multiplexing tenants into one instance (shared linear memory), which the invariant already rules out independent of profile.
+- **Escalate to `wasm-worker-process` only on the runtime-escape axis**, which is orthogonal to tenant count, decided on two concrete conditions:
+  - *WASM-runtime escape is in scope* — you must assume the WASM runtime itself (e.g. a Cranelift/Wasmtime CVE) can be escaped, which would make sibling instances in the same process co-resident again. The process boundary is the second, independently-failing containment layer. This is a risk-tolerance call about runtime-escape, not a function of how many tenants you serve.
   - *Secret co-residency* — the host process holds data the guest must never reach (API keys, other tenants' data), making in-process Spectre-class leakage a real risk. Move the guest out, or move the secrets out.
-- When neither condition holds, a separate process buys negligible additional safety at real cost (startup, IPC marshaling, operational complexity) — and choosing it by reflex throws away the reason to adopt the WASM plane at all.
-- In every profile, never multiplex runtimes from different trust domains into one WASM instance (this holds even in-process and is independent of the profile choice).
+- When neither condition holds — including ordinary multi-tenant serving — a separate process per execution buys negligible additional safety at real cost (startup, IPC marshaling, operational complexity), and choosing it by reflex throws away the reason to adopt the WASM plane at all.
 
 ## Testing Strategy
 
