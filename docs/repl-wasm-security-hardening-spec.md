@@ -792,6 +792,7 @@ Rules:
 
 - An epoch/fuel trap tears down the eval and surfaces `TimeoutError`. A trap leaves the QuickJS heap in an arbitrary mid-mutation state: **the instance is poisoned and must be discarded — always.** "Recover to a verified-consistent state" is not an option; it is not cheaply verifiable and a wrong answer is an isolation failure. Adapter APIs must make post-trap recycling cheap and automatic.
 - Worker termination is a backstop, not a timeout mechanism: it loses all runtime state. Adapters relying on it must document that a tight-loop timeout destroys the instance.
+- **Backstop trigger:** termination fires only on deadline-expiry-without-response — the parent flips the SAB flag at the deadline (graceful attempt), waits a configured grace window, and terminates only if the slice still hasn't ended (cooperative check unreachable: native-builtin loop, compromised engine, or broken flag path). Resource limits never escalate to termination: heap-limit errors, store-memory traps, and stack traps all end the slice on their own and are handled by the normal error/discard rules. Termination exists solely for the one failure that never ends the slice — unbounded CPU.
 - Choosing a host WASM runtime without epoch-or-equivalent interruption is not acceptable for V1 server-side hosts.
 
 The cooperative interrupt flag has a sharp limitation in single-threaded JS hosts: while wasm executes synchronously, the event loop is blocked and nothing in the same thread can flip the flag. The flag helps only in polled evals, between poll steps. Therefore:
