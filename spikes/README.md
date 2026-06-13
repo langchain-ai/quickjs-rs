@@ -30,6 +30,7 @@ Spike Python runs use a throwaway venv (`/tmp/qjs-spike-venv`) with
 | B | Node worker + SAB interrupt | Does the worker-hosted timeout shape work on plain wasm? | **PASS** — interrupt + termination both work | `8b8ab72` |
 | C | Build feasibility | Does rquickjs build to wasip1 from source we control today, and run? | **GREEN** — no bindgen, evals `1+2` | `219f6ae` |
 | D | Stack-check verdict | Can engine-level recursion limits be restored on wasi? | **RESTORABLE** — recursion made catchable | `dc7425d` |
+| E | Main-thread freeze | Does a hostile spin freeze a single-threaded host, and is the flag undeliverable there? | **CONFIRMED** — froze; worker control stayed responsive | (this turn) |
 
 ---
 
@@ -160,12 +161,51 @@ python ../../spikes/stack_check_run.py \
 
 ---
 
+## Spike E — Main-thread freeze (placement rule)
+
+**File:** `main_thread_freeze_spike.mjs` · reuses `interrupt_spike.wasm`.
+
+**Why it mattered.** The spec's placement rule and delivery bullet assert
+that a hostile synchronous spin on a single-threaded JS host freezes the
+event loop, and that the cooperative interrupt flag is *undeliverable* there
+because nothing on the one thread can run to set it — which is the whole
+reason the Node adapter defaults to worker hosting. Asserted but never shown.
+
+**Method.** Three cases, each main-thread case in a forked child with a hard
+kill (a frozen main thread can't end itself). Each arms a 50 ms heartbeat and
+a 200 ms timer that sets the interrupt flag, then enters a spin. (1) hostile
+spin (`spin_hostile`, never checks the import); (2) cooperative spin
+(`spin_cooperative`, *would* honor the flag); (3) worker control hosting the
+hostile spin while the main thread heartbeats and then `terminate()`s.
+
+**Result.**
+
+| Case | heartbeats during spin | flag-setter ran | spin returned |
+|---|---|---|---|
+| main-thread hostile | **0** | **no** | no |
+| main-thread cooperative | **0** | **no** | no |
+| worker control | **10** | n/a | killed by `terminate()` |
+
+The cooperative case is the sharp finding: even a loop that *would* obey the
+flag is unsavable on a single thread, because the timer that sets the flag
+cannot run while the synchronous call holds the stack. Cooperativeness is
+irrelevant without a second thread to deliver the signal. The worker control
+stayed responsive (10 beats) and was killable — the shape the spec mandates.
+
+```
+node spikes/main_thread_freeze_spike.mjs    # expects PASS
+```
+
+---
+
 ## What these did and did not establish
 
 **Established:** the Python timeout mechanism is real (A); the Node timeout
 shape works on plain wasm (B); the rquickjs binding builds and runs to wasip1
 from source we control with no surprise toolchain dependency (C); the worst
-agent-reachable trap path is closeable (D).
+agent-reachable trap path is closeable (D); single-threaded hosting is unsafe
+for hostile spins regardless of loop cooperativeness, and worker hosting is
+what makes the timeout story real (E).
 
 **Not in scope (Phase 1 construction):** the full ABI surface, the wire
 codec, host-side module resolution, the Python/TS adapters, and integrating
