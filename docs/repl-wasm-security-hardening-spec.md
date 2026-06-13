@@ -302,17 +302,19 @@ Handle invariants:
 
 ### Module Exports
 
-Module source acquisition is host-mediated through the eval poll state machine, mirroring the current native architecture where `runtime.set_import_handler(...)` owns source lookup. The guest owns specifier normalization and the module cache; the host owns source lookup only. See the Module Loading section for the full flow.
+Module resolution and source acquisition are host-mediated through the eval poll state machine. The host owns resolution (specifier + referrer -> canonical key) and source lookup; the guest owns the edge-resolution cache, module cache, and compile/link. See the Module Loading section for the full design.
 
 ```text
-qrs_module_provide(eval_id, request_id, flags, source_ptr, source_len, out_response_ptr) -> status
-qrs_module_cache_clear(runtime_id, request_ptr, request_len, out_response_ptr) -> status  # optional/future
+qrs_module_provide(eval_id, request_id, flags, key_ptr, key_len, source_ptr, source_len, out_response_ptr) -> status
+qrs_module_cache_clear(context_id, request_ptr, request_len, out_response_ptr) -> status
 ```
 
 `qrs_module_provide` settles a pending `ModuleRequest` event from `qrs_eval_poll`:
 
-- `flags = source`: bytes are UTF-8 module source for the requested key; the guest registers, optionally type-strips, compiles, and caches it.
-- `flags = miss`: the host has no module for this key; the guest raises the import error inside JS.
+- `flags = resolve`: `key` is the canonical key for the requested edge. If the key is unregistered, `source` must carry UTF-8 module source — the guest registers, optionally type-strips, compiles, and caches it under that key. If the key is already registered, `source` must be absent and the settlement links the existing instance; a settlement that violates either pairing fails with `invalid_request`.
+- `flags = miss`: the host cannot resolve this edge; the guest raises the import error inside JS.
+
+`qrs_module_cache_clear` invalidates the guest's edge-resolution cache and module cache (all keys, or the keys named in the request payload). It is the host's invalidation lever and part of the V1 ABI — with host-side resolution it is the only way for a host to change a prior resolution answer.
 
 Settlements are validated against the originating eval and request ID. A `qrs_module_provide` call with an unknown, already-settled, or foreign `request_id` fails with `invalid_request` and must not affect any other pending import.
 
@@ -546,7 +548,7 @@ Current behavior:
 Target behavior:
 
 ```text
-TypeScript source (returned by host import handler)
+TypeScript source (returned by host resolver)
   -> provided to guest via qrs_module_provide
   -> Rust stripping/transpile step, likely still oxidase initially
   -> JavaScript source
@@ -659,7 +661,7 @@ Package responsibilities:
 - Load and instantiate `quickjs-core.wasm`.
 - Provide TypeScript declarations.
 - Encode/decode ABI values.
-- Manage the callback registry and import handler.
+- Manage the callback registry and module resolver (including the default resolver).
 - Map async host functions to Promises.
 - Drive the eval poll state machine on the event loop.
 - Integrate with timers/`AbortSignal` for cancellation and timeout.
@@ -692,41 +694,42 @@ Its former roles are covered without it:
 
 ## Module Loading
 
-`ModuleScope` no longer exists. The current architecture is a runtime-level dynamic import handler, and the WASM design must preserve its semantics:
+`ModuleScope` no longer exists. The current native architecture is a runtime-level dynamic import handler; the WASM design preserves its observable semantics but changes the division of labor (decision 2026-06-12): **resolution is a host concern.** The host resolver is a graph-building algorithm — each import statement is an edge `(referrer, specifier)`, the host resolves it to a canonical node (`canonical_key`), and provides the node's source the first time the node appears. The engine never interprets specifiers; module identity is entirely host-minted.
 
 ```text
-handler(requested_key, referrer, specifier) -> source | miss
+resolver(specifier, referrer_key | none) -> { canonical_key, source? } | miss
 ```
 
-- Relative specifiers are normalized against the importing module key inside the engine before the handler is called.
-- Bare specifiers are passed to the handler unchanged.
-- `referrer` is the importing module key, or none for top-level eval.
-- A returned source string registers and loads that module key; a miss raises the import error inside JS.
-- Resolved modules are cached; QuickJS module cache semantics remain visible.
-- TypeScript keys (`.ts`, `.mts`, `.cts`, `.tsx`) are type-stripped at load.
+- `specifier` is the raw text written in the import statement, untouched.
+- `referrer_key` is the canonical key of the importing module, or none for top-level eval. Every referrer key was itself minted by the host in an earlier resolution, so the host can reconstruct the full import chain from edges it has already seen — the event does not carry a call stack.
+- `canonical_key` is the node identity: the module cache is keyed on it, and it becomes the `referrer_key` for imports inside that module. Aliases/namespaces (e.g. `@module` mapping into a packaged file tree) are expressed by resolving different edges to the same or different canonical keys — edge labels never become identities.
+- `source` must be present iff `canonical_key` is not already registered in the guest; for an already-registered key the settlement links the existing module instance (this is how aliases and import cycles converge).
+- `miss` raises the import error inside JS, preserving the current error shape.
+- TypeScript keys (`.ts`, `.mts`, `.cts`, `.tsx`) are type-stripped at registration, as before.
 
-In the WASM model, module lookup is a host capability expressed through the same event/poll protocol as host callbacks:
+Flow through the poll protocol:
 
 ```text
-1. Guest QuickJS resolver hits an unregistered module key (static or dynamic import).
-2. Guest normalizes the specifier against the referrer to produce requested_key.
-3. qrs_eval_poll returns ModuleRequest { request_id, requested_key, referrer, specifier }.
-4. Host adapter invokes the registered import handler.
-5. Host calls qrs_module_provide(eval_id, request_id, source | miss).
-6. Guest type-strips if needed, compiles, caches, and resumes evaluation.
-7. Host continues qrs_eval_poll.
+1. Guest QuickJS hits an import edge with no cached resolution (static or dynamic import).
+2. qrs_eval_poll returns ModuleRequest { request_id, specifier, referrer_key | none }.
+3. Host adapter invokes the resolver.
+4. Host calls qrs_module_provide(eval_id, request_id, canonical_key, source | none | miss).
+5. Guest caches the edge resolution, registers/type-strips/compiles the module if new, links, resumes.
+6. Host continues qrs_eval_poll.
 ```
 
 Division of responsibility:
 
-- Guest owns: specifier normalization, module cache, compile/link, TypeScript stripping, import error shape. One resolver implementation across all hosts.
-- Host owns: source lookup only. The handler is a capability like any host callback; no handler registered means imports fail.
+- Guest owns: the **edge-resolution cache** (`(referrer_key, specifier) -> canonical_key`), the **module cache** (`canonical_key -> instance`), compile/link, TypeScript stripping, import error shape.
+- Host owns: resolution and source lookup. The resolver is a capability like any host callback; no resolver registered means imports fail.
+- Adapters ship a **default resolver** preserving current native semantics — relative specifiers resolve path-wise against the referrer key, bare specifiers pass through as their own canonical key — so hosts that don't care about namespacing see no behavior change. The default resolver's algorithm is pinned by the conformance corpus in every adapter; an old-style `handler(requested_key, referrer, specifier) -> source | miss` wraps directly on top of it.
 
-Consequences to design for:
+Rules and consequences:
 
-- Every first import of a key is a host round-trip through the poll loop; repeat imports hit the guest cache. Module-heavy startup cost must be benchmarked (see Performance Benchmarks).
-- Module sources are guest-controlled input to the host handler (`specifier` is attacker-chosen text). Host adapters must treat handler arguments as untrusted strings and must not interpret them as filesystem paths or URLs without explicit, validated policy.
-- An optional batch/prefetch form (host provides several modules in one settlement) may be added later if round-trip cost shows up in benchmarks; it must not change resolution semantics.
+- The host is consulted **once per unique edge** per context; repeat edges and repeat nodes are guest-local. Edges ≥ nodes, so first-build round trips slightly exceed the previous once-per-key design; module-heavy startup cost must be benchmarked (see Performance Benchmarks).
+- **Determinism rule:** within a context, the resolver must answer a given edge consistently; the guest's edge cache enforces at-most-once consultation, and `qrs_module_cache_clear` (clears both caches) is the host's only lever to re-resolve. A host that wants different answers over time clears and rebuilds; mid-graph identity changes are not expressible.
+- `specifier` and `referrer_key` in events are guest-emitted bytes: attacker-controlled under engine compromise. Host adapters must treat both as untrusted strings (no implicit path/URL interpretation), and referrer-based *policy* (e.g. "only `@charts` internals may import `@charts/private`") is advisory — the enforceable security gate is what source the host ever provides, which remains fully host-controlled.
+- An optional batch/prefetch form (host resolves several edges in one settlement) may be added later if round-trip cost shows up in benchmarks; it must not change resolution semantics.
 
 ## Resource Controls
 
@@ -884,8 +887,10 @@ Build a host-neutral conformance suite covering:
 - async host callbacks,
 - sync eval triggering async host call,
 - cancellation absorption,
-- import handler resolution (static and dynamic import, relative normalization, bare specifiers, handler miss),
-- module cache semantics,
+- host resolver protocol (static and dynamic import, default-resolver relative/bare semantics, resolver miss),
+- namespace/alias resolution: same-named files under different namespaces get distinct canonical keys; two edges resolving to one canonical key share one module instance,
+- edge-resolution cache semantics (resolver consulted once per unique edge; repeat edges guest-local),
+- module cache semantics, including `qrs_module_cache_clear` invalidation and import cycles converging through already-registered keys,
 - TypeScript stripping,
 - snapshots where supported.
 
@@ -921,7 +926,8 @@ Differential fuzzing across the three codec implementations — the guest/refere
 - Host callback registry cannot be invoked with unknown `fn_id`.
 - Pending IDs cannot collide or be settled across contexts.
 - Module provide settlements cannot target unknown, already-settled, or foreign request IDs.
-- Import specifiers reaching the host handler are treated as untrusted strings (no implicit path/URL interpretation).
+- Import specifiers and referrer keys reaching the host resolver are treated as untrusted strings (no implicit path/URL interpretation); referrer-based policy is documented as advisory under engine compromise.
+- `qrs_module_provide` settlements violating the key/source pairing rules (source for a registered key, no source for an unregistered key) are rejected with `invalid_request`.
 - Guest cannot forge host handles.
 - Malformed response descriptors are rejected (including `ptr + len` overflow and out-of-bounds reads).
 - Guest panic/trap tears down runtime cleanly, and the trapped instance is never reused.
@@ -1029,14 +1035,16 @@ Exit criteria:
 
 Scope:
 
-- `ModuleRequest` poll event and `qrs_module_provide` settlement export.
-- Specifier normalization and module cache inside guest.
-- Static and dynamic import through the host import handler.
+- `ModuleRequest` poll event and `qrs_module_provide` settlement export (host-side resolution: canonical key + source).
+- Edge-resolution cache and module cache inside guest; `qrs_module_cache_clear`.
+- Default resolver in the Python and TS adapters (conformance-pinned; preserves current native semantics).
+- Static and dynamic import through the host resolver.
 - TypeScript stripping strategy.
 
 Exit criteria:
 
-- Existing import-handler module tests pass through the Python adapter.
+- Existing import-handler module tests pass through the Python adapter (via the default resolver).
+- Namespace/alias resolution works: edges under different namespaces resolve to distinct canonical keys; the collision case (relative import inside a bare-keyed module) is covered by a conformance test.
 - Dynamic import works for downstream REPL skill loaders.
 - TypeScript syntax errors surface when the handler-provided source is loaded, matching current behavior.
 
