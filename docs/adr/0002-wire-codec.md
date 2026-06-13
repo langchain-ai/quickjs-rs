@@ -66,9 +66,27 @@ Notes / open annotations:
 - **Bool folded into the tag** (0x02/0x03) instead of a 1-byte body — one
   fewer byte, one fewer thing to canonicalize. *Annotate if you'd rather
   keep a single Bool tag + body byte.*
-- **Number is always f64**, matching JS. NaN/Infinity are valid f64 bit
-  patterns and cross as-is. *Open: do we canonicalize NaN to a single bit
-  pattern to keep "one encoding per value"? Leaning yes — quiet NaN.*
+- **Number is always f64** (8 bytes, IEEE-754 little-endian), matching JS.
+  Two f64 edge cases need explicit canonical-form rules, because "8 raw
+  bytes" alone does not give one-encoding-per-value:
+  - **NaN is canonicalized.** IEEE-754 has many NaN bit patterns; JS
+    exposes only a single observable `NaN`. Encoders MUST emit the
+    canonical quiet NaN `0x7FF8000000000000` for any NaN value. Decoders
+    MUST treat any received NaN-class pattern (exponent all ones, nonzero
+    mantissa) as `NaN`, but — per the reject-non-canonical rule — MUST
+    reject a NaN-class pattern that is not exactly the canonical one with
+    `invalid_request`. (Rationale: without this, the three codecs could
+    emit different NaN bits for the same value, a false differential-fuzz
+    divergence. Pass-through would only preserve NaN-payload bits, which
+    JS semantics never expose and we have no use for.)
+  - **Signed zero is preserved.** `+0.0` (`0x0000000000000000`) and
+    `-0.0` (`0x8000000000000000`) are distinct encodings and both valid;
+    they are NOT canonicalized to one. JS observes the difference
+    (`Object.is(-0, 0) === false`, `1 / -0 === -Infinity`), so collapsing
+    them would lose a value distinction.
+  - Infinities (`±Infinity`) and all finite f64 values cross as their
+    exact bit pattern; there is one bit pattern per such value, so no
+    extra rule is needed.
 - **BigInt as decimal string** (not raw two's-complement) per the spec, to
   avoid sign/width ambiguity and precision loss. Canonical form: no
   leading zeros, leading `-` only for negatives, `0` is `0` not `-0`.
@@ -264,7 +282,9 @@ best-effort cross-version parsing.
 
 ## Open questions for annotation
 
-1. NaN canonicalization — fix to quiet NaN, or pass f64 bits through?
+1. ~~NaN canonicalization~~ **Resolved:** canonical quiet NaN
+   `0x7FF8000000000000` on encode, reject other NaN-class patterns on
+   decode; signed zero preserved. See Number notes above.
 2. Bool-in-tag vs Bool tag + body byte?
 3. Any need for a u32 integer fast-path, or is f64-only final?
 4. Are the two added status codes (`timeout`, `stack_overflow`) the right
