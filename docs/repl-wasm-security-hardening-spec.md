@@ -884,7 +884,7 @@ Rule: **one WASM instance per trust domain.** This is the WASM-plane successor t
 
 | Profile | Shape | Intended use |
 |---|---|---|
-| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | **Default REPL hardening target** — semi-trusted code (agent/LLM-generated, internal skills) |
+| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | **Default REPL hardening target** — semi-trusted code (agent/LLM-generated, internal) |
 | `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | Default JS-host shape (placement rule); responsiveness, not a stronger security boundary |
 | `wasm-worker-process` | Separate process/container owns WASM instance | A WASM-runtime escape is in scope, or the host holds secrets the guest must never reach |
 | `native-legacy` | Existing native QuickJS path | Migration/baseline only |
@@ -1076,7 +1076,7 @@ Exit criteria:
 
 - Existing import-handler module tests pass through the Python adapter (via the default resolver).
 - Namespace/alias resolution works: edges under different namespaces resolve to distinct canonical keys; the collision case (relative import inside a bare-keyed module) is covered by a conformance test.
-- Dynamic import works for downstream REPL skill loaders.
+- Dynamic import (`import()`) resolves through the host resolver and links correctly.
 - TypeScript syntax errors surface when the handler-provided source is loaded, matching current behavior.
 
 ### Phase 6: Snapshots
