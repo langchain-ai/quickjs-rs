@@ -50,6 +50,41 @@ python ../../spikes/build_feasibility_run.py \
   target/wasm32-wasip1/release/quickjs_core.wasm   # expects "PASS ... GREEN"
 ```
 
+## Stack-check verdict (2026-06-12): RESTORABLE
+
+The question: quickjs-ng disables its stack limit on `__wasi__`
+(`update_stack_limit` → `stack_limit = 0`), so `JS_SetMaxStackSize` is a
+no-op and unbounded JS recursion traps the instance instead of raising a
+catchable error. Can engine-level checking be restored on wasip1?
+
+**Yes — demonstrated end-to-end.**
+
+- *Default behavior reproduced* (`qrs_recurse_depth`, unpatched build):
+  recursion runs past the disabled limit and **traps** — `wasmtime.Trap`,
+  instance dead. `set_max_stack_size(256 KB)` had no effect. Confirms the
+  spec's concern empirically, not just from source.
+- *Root cause confirmed*: only the threshold is neutered. The check
+  machinery (`js_check_stack_overflow`) runs every call; it compares the
+  stack pointer (`__builtin_frame_address(0)`) against `stack_limit`, and
+  `__builtin_frame_address(0)` is valid on wasm (resolves into the
+  linear-memory shadow stack — our `quickjs.c` already compiles and uses
+  it). Upstream zeroes the limit out of caution, not because the
+  primitive is unavailable.
+- *Fix proven*: patched `update_stack_limit`'s `__wasi__` branch to use
+  the normal `stack_top - stack_size` calculation, built via a vendored
+  rquickjs-sys (`[patch.crates-io]`), re-ran the same probe. Recursion is
+  now **catchable**: error raised at depth 1486 with a 256 KB QuickJS
+  limit under a 1 MiB wasm stack; the instance survives and the eval
+  returns normally. One-line semantic change, no toolchain change.
+
+Consequence for the spec: the most agent-reachable trap path
+(unbounded recursion) **can be closed**, returning it to a catchable
+`InternalError` with a surviving context — native parity. Phase 1 should
+adopt the patch; the delivery mechanism (vendored quickjs source vs.
+build-time source rewrite in `quickjs-core-wasm-build`) is a Phase 1
+implementation choice. The spike's vendored copy was removed after the
+verdict; reproduce via the patch described above.
+
 ## Open (deliberately out of scope for feasibility)
 
 - `rquickjs` 0.11 vs 0.12 — pin chosen at Phase 1 start, not here.

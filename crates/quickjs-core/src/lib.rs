@@ -18,6 +18,46 @@ pub extern "C" fn qrs_abi_version() -> u32 {
     1
 }
 
+/// Stack-check probe. Evals deep self-recursion inside try/catch and
+/// returns the depth at which QuickJS raised a catchable error. If the
+/// module instead traps (wasm stack exhaustion), the host never gets a
+/// return value and observes a Trap — that is the "permanently fatal"
+/// outcome. A positive return = recursion is catchable (the limit fired);
+/// negative sentinels = the engine surfaced a non-Range error.
+///
+/// `limit` is passed to `set_max_stack_size` first so we can measure
+/// whether that call has any effect on wasi (expected: none by default,
+/// because update_stack_limit zeroes stack_limit on __wasi__).
+#[no_mangle]
+pub extern "C" fn qrs_recurse_depth(limit: u32) -> i32 {
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return -1,
+    };
+    rt.set_max_stack_size(limit as usize);
+    let ctx = match Context::full(&rt) {
+        Ok(ctx) => ctx,
+        Err(_) => return -2,
+    };
+    ctx.with(|ctx| {
+        // Counts frames until QuickJS throws; the catch returns the depth.
+        // If the C stack check never fires, this recurses until the wasm
+        // stack is exhausted and the whole module traps before returning.
+        let code = r#"
+            (function () {
+                let depth = 0;
+                function rec() { depth++; rec(); }
+                try { rec(); } catch (e) { return depth; }
+                return -100; // returned without throwing: unexpected
+            })()
+        "#;
+        match ctx.eval::<i32, _>(code) {
+            Ok(v) => v,
+            Err(_) => -3,
+        }
+    })
+}
+
 /// Returns the integer result of evaluating `1 + 2` inside a fresh
 /// QuickJS context, or a negative sentinel on failure so the harness can
 /// distinguish "engine ran but eval failed" from "module trapped".

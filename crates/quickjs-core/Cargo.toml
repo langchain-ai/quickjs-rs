@@ -18,6 +18,12 @@ crate-type = ["cdylib"]
 # which is itself a verdict (we then add "bindgen" and record the cost).
 rquickjs = { version = "0.11", default-features = false }
 
+# Note: the stack-check spike temporarily added a [patch.crates-io]
+# redirect to a vendored+patched rquickjs-sys to prove the wasi
+# stack-limit fix end-to-end (see FEASIBILITY.md, Stack-check verdict).
+# Reverted after the verdict; the real patch-delivery mechanism is a
+# Phase 1 decision.
+
 [profile.release]
 opt-level = "z"
 lto = true
