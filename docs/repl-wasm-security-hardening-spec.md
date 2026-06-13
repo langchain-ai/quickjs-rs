@@ -266,6 +266,14 @@ qrs_eval_cancel(eval_id, reason_ptr, reason_len, out_response_ptr) -> status
 
 `qrs_eval` can be convenience sync eval for code that does not suspend on host callbacks.
 
+Result modes — `eval_handle` is the total primitive, `eval` is sugar over it:
+
+- `qrs_eval_handle` always returns the result as a `Value::Handle` — no marshalling, faithful for every JS value (functions, Promises, cyclic/shared graphs). This is the truth source; the same applies to `qrs_eval_start` with `EVAL_FLAG_HANDLE_RESULT`.
+- `qrs_eval` returns a marshalled value tree: it is defined as `eval_handle` followed by `to_value` (`qrs_handle_to_value`) on the result. There is exactly one marshaller, in `to_value`, and it runs guest-side (one boundary crossing, not N), keeping a single semantics layer across hosts.
+- `to_value` is **path-based** (see Wire Codec, Marshalling model): primitives and tree-shaped containers copy by value; a node that is non-copyable (function/Promise/exotic) or that revisits a node already on the current ancestor path (a true cycle) is emitted as that node's *existing* handle — at that node only, never propagated to its container. Shared-but-acyclic structure duplicates (matches native deep-copy).
+- Because of that, an `eval` value tree **may contain handle leaves**. The response descriptor flags this (a bit in `tag`) so the host knows the result carries handles it now **owns and must dispose**. Handle-leaf count is bounded by the configured max-handle-count cap. A pure-primitive/tree result carries no handles and needs no disposal.
+- `to_value` options (carried in `qrs_handle_to_value`'s options payload) may override the depth cap; the path-vs-visited marshalling discipline is fixed (path-based) for V1, not an option.
+
 `qrs_eval_start`/`qrs_eval_poll` should be the portable async model. It can represent:
 
 - completed value,
@@ -298,7 +306,8 @@ Handle invariants:
 - Handles include generation checks.
 - Disposed handles fail fast.
 - Handles never reveal raw guest pointers or QuickJS pointers.
-- Host adapters must dispose handles deterministically where possible and warn on leaked handles if the host language supports it.
+- Host adapters must dispose handles deterministically where possible and warn on leaked handles if the host language supports it. This includes handle leaves embedded in an `eval` value tree (see Eval Exports), not just top-level handle results.
+- `qrs_handle_to_value` is the single marshaller `qrs_eval` is sugar over (path-based; see Eval Exports and Wire Codec). It runs guest-side and its result may itself contain handle leaves the host then owns.
 
 ### Module Exports
 
@@ -369,7 +378,7 @@ Rules:
 - BigInt crosses as decimal string to avoid precision loss.
 - Bytes cross as bytes, not base64, in the binary protocol.
 - Object properties should preserve insertion order where QuickJS exposes it.
-- Cycles are not supported in normal value marshaling; handles should be used for opaque object graphs.
+- The value tree cannot encode identity or back-references; marshalling (`to_value`) is path-based, so a cyclic back-edge or a non-copyable node is emitted as that node's existing handle rather than erroring. See Eval Exports and the Wire Codec marshalling model for the full rule and its consequences (shared-acyclic duplicates; `eval` results may carry handle leaves).
 
 ### Request/Response Envelope
 
