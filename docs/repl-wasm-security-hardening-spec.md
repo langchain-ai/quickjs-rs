@@ -884,16 +884,19 @@ Rule: **one WASM instance per trust domain.** This is the WASM-plane successor t
 
 | Profile | Shape | Intended use |
 |---|---|---|
-| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | Semi-trusted REPL workloads only |
-| `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | UI/server responsiveness; default JS-host shape; not a strong security boundary |
-| `wasm-worker-process` | Separate process/container owns WASM instance | **Default for untrusted input** |
+| `wasm-inproc` | Host process instantiates `quickjs-core.wasm` directly | **Default REPL hardening target** — semi-trusted code (agent/LLM-generated, internal skills) |
+| `wasm-worker-thread` | Host worker thread/Web Worker owns WASM instance | Default JS-host shape (placement rule); responsiveness, not a stronger security boundary |
+| `wasm-worker-process` | Separate process/container owns WASM instance | Hostile / multi-tenant code, or host holds secrets the guest must never reach |
 | `native-legacy` | Existing native QuickJS path | Migration/baseline only |
 
 Production recommendation:
 
-- Use `wasm-inproc` only for semi-trusted REPL workloads where the host process holds no high-value secrets.
-- Use `wasm-worker-process` as the default for untrusted input — not just "high-risk" workloads. The layers fail independently: WASM contains engine bugs; the jailed process contains WASM-runtime bugs and Spectre-class leakage. This matches the existing threat model's worker-process recommendation for the native path; the WASM plane adds a second failure domain inside it rather than replacing it.
-- In every profile, never multiplex runtimes from different trust domains into one WASM instance.
+- **`wasm-inproc` is the default, and that is the point of this effort.** The WASM plane *is* the isolation boundary: it contains an engine memory-safety bug in guest linear memory without a separate process. For the primary target — semi-trusted code that is buggy or accidentally adversarial (the recursion bomb), not an attacker engineering a runtime escape — one boundary in-process is the right trade, and not needing process-per-execution is the improvement over the native path.
+- **Escalate to `wasm-worker-process` only when the threat actually warrants a second boundary**, decided on two concrete conditions, not a blanket "untrusted" label:
+  - *Hostile or multi-tenant code* — you run arbitrary third parties' code and must assume some actively attack the WASM runtime itself. The second boundary contains a WASM-runtime escape; the layers fail independently.
+  - *Secret co-residency* — the host process holds data the guest must never reach (API keys, other tenants' data), making in-process Spectre-class leakage a real risk. Move the guest out, or move the secrets out.
+- When neither condition holds, a separate process buys negligible additional safety at real cost (startup, IPC marshaling, operational complexity) — and choosing it by reflex throws away the reason to adopt the WASM plane at all.
+- In every profile, never multiplex runtimes from different trust domains into one WASM instance (this holds even in-process and is independent of the profile choice).
 
 ## Testing Strategy
 

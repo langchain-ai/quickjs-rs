@@ -168,10 +168,17 @@ architecture is considered.
 
 ## Consequences
 
-- Two independent failure domains stand between hostile JS and the host
-  process in the recommended deployment (`wasm-worker-process`): the
-  WASM sandbox contains engine bugs; the jailed process contains WASM
-  runtime bugs and Spectre-class leakage.
+- The default deployment is `wasm-inproc`: the WASM sandbox is the
+  isolation boundary, containing an engine memory-safety bug in guest
+  linear memory without a separate process. Not needing
+  process-per-execution for semi-trusted (agent-generated, internal)
+  code is the improvement over the native path and the point of this
+  effort. `wasm-worker-process` is reserved for the cases that warrant
+  a second independent boundary — hostile/multi-tenant code, or a host
+  holding secrets the guest must never reach — where the jailed process
+  contains a WASM-runtime escape and Spectre-class leakage. Defaulting
+  to the worker process for all "untrusted" code would negate the
+  reason to adopt the WASM plane (see spec, Deployment Profiles).
 - Host adapters become security-critical code with normative
   requirements (spec, "Host Adapter Security Requirements"), including
   differential fuzzing across the three codec implementations.
