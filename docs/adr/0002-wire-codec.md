@@ -181,14 +181,43 @@ exception).
 Fixed 16-byte struct written to guest memory / out-pointer:
 
 ```
-status : u32
-tag    : u32     # disambiguates payload shape for this status
+status : u32     # coarse outcome (see Status codes)
+tag    : u32     # payload-shape enum, interpreted relative to status
 ptr    : u32     # guest linear-memory offset of the payload
 len    : u32     # payload length in bytes
 ```
 
+`tag` is a **pure payload-shape enum**, scoped per `status` (same value
+means different shapes under different statuses — like request `flags`
+are per-`kind`). Defined values today:
+
+| status | tag | payload shape |
+|--------|----:|---------------|
+| `ok` | 0 | `value` — a value tree, no handle leaves, nothing to dispose |
+| `ok` | 1 | `value_with_handles` — a value tree carrying handle leaves the host owns and must dispose (the disposal signal, modeled as a shape, not a flag bit) |
+| `guest_error_response` | 0 | `GuestErrorRecord` |
+| `guest_error_response` | 1 | `HostDiagnosticRecord` *(reserved slot; defined when diagnostics land)* |
+| no-payload statuses (`invalid_*`, `timeout`, `stack_overflow`, …) | 0 | empty; `len = 0` |
+
+Rules:
+
+- An unknown `tag` for the given `status` is rejected (`invalid_request`
+  / poison) — never best-effort. This canonical-form rule is what makes
+  "enum now, split later" safe.
+- **Enum now, split later (decided 2026-06-12).** `tag` stays a pure
+  shape enum while handle-leaves is the only orthogonal response signal.
+  If a *second* signal appears that must *combine* with handle-leaves
+  (rather than be mutually exclusive with it), promote `tag` to an
+  enum-plus-flags subfield split (low bits shape, high bits
+  reserved-must-be-zero flags) — an ABI-versioned change at that point,
+  not a silently-enabled bit. One signal = enum; two combinable = split.
+
 Hosts validate `ptr + len` against linear memory with overflow checks
-before reading (Host Adapter Security Requirements).
+before reading (Host Adapter Security Requirements): `ptr`/`len` are
+attacker-controlled under engine compromise — check the `u32` addition
+does not wrap and `ptr + len <= memory size`, fail closed on either.
+The descriptor's own 16-byte size is fixed and never guest-controlled,
+so reading it is always safe; only what it points to needs validation.
 
 ## Status codes
 
