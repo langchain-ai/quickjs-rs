@@ -18,9 +18,11 @@ every flexibility is a place the three host decoders (Rust/Python/TS) can
 disagree — protocol confusion — and a place a hostile guest can probe.
 A format with exactly one valid byte sequence per value is adversarially
 simpler, removes a third-party dependency from the Python wheel and npm
-package (helping repro/supply-chain), and lets BigInt-as-decimal and
-Handle be first-class. Cost: we write and fuzz three decoders. That cost
-is accepted; the differential-fuzz harness keeps them honest.
+package (helping repro/supply-chain), and lets BigInt-as-decimal be
+first-class. Host-specific ergonomics (e.g. typed handle wrappers) stay
+in the host adapter, not the shared codec. Cost: we write and fuzz three
+decoders. That cost is accepted; the differential-fuzz harness keeps
+them honest.
 
 ## Design rules
 
@@ -56,7 +58,7 @@ Each value is `tag (1 byte) || body`. Tags:
 | `0x07` | Bytes | `len: u32` then `len` raw bytes |
 | `0x08` | Array | `count: u32` then `count` encoded values |
 | `0x09` | Object | `count: u32` then `count` pairs of (`key`: String-body `len:u32`+utf8, `value`: encoded value); insertion order preserved |
-| `0x0A` | Handle | `context_id: u32`, `handle_id: u32`, `generation: u32`, `type_name`: `len:u32`+utf8 |
+| `0x0A` | Handle | `context_id: u32`, `handle_id: u32`, `generation: u32` (fixed 12 bytes, no body length) |
 | `0x0B` | Error | `name`, `message`, `stack` each as `len:u32`+utf8; `stack` len may be 0 (absent) |
 
 Notes / open annotations:
@@ -70,9 +72,35 @@ Notes / open annotations:
 - **BigInt as decimal string** (not raw two's-complement) per the spec, to
   avoid sign/width ambiguity and precision loss. Canonical form: no
   leading zeros, leading `-` only for negatives, `0` is `0` not `-0`.
+- **Array/Object are count-prefixed, not byte-length-prefixed** (decided
+  2026-06-12). A container's byte extent is defined implicitly by
+  decoding its `count` children; nesting is recursion in the grammar (an
+  Object's value field is itself a full encoded value, to any depth). We
+  always fully decode and never skip subtrees, so a redundant byte-length
+  prefix would only add a "prefix must equal real extent" canonicalization
+  burden for no use case. The depth cap and per-length bounds-check
+  (below) cover the recursion/oversize attack surface.
 - **Object keys are always String bodies**, never arbitrary values (JS
   property keys are strings or symbols; symbols don't cross — they error
   at marshal, as today).
+- **Handle is the identity triple only** — `(context_id, handle_id,
+  generation)`, no type name on the wire. The triple is the unforgeable,
+  context-scoped, reuse-safe identity (generation defeats slot-reuse/ABA
+  confusion); no raw guest pointer or `JSValue` ever crosses. Type is a
+  host-side, on-demand concern via `qrs_handle_type_of` (cached on the
+  host wrapper), not a codec field: it served only host-SDK ergonomics
+  (e.g. a TS API wrapping Promise/function/Array handles), which is one
+  host's convenience and must not be a burden every host's codec pays —
+  Python/Rust hosts have no structural use for it. Removing it also makes
+  Handle fixed-width (12 bytes), simpler to encode/validate/fuzz.
+  - **Guest validation obligation:** every handle-bearing operation
+    validates the full triple against the live handle table and fails
+    with `invalid_handle` on any mismatch (wrong context, unknown id,
+    stale generation) — never best-effort. This is a decoder/handler
+    requirement, not convention.
+  - **`qrs_handle_type_of` returns a display string, not a security
+    signal:** the guest mints it, so hosts must treat it as descriptive
+    only and never branch trust/security decisions on it.
 - **Cycles are not representable** and not supported — the value model is
   a tree. Opaque object graphs use Handle. A guest that produces a cyclic
   structure for marshaling gets a marshal error, not infinite output.
