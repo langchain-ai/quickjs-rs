@@ -357,7 +357,7 @@ Snapshot bytes are code-equivalent. Restore deserializes engine state, and `JS_R
 
 ### Encoding
 
-Start with a compact tagged binary format implemented in shared Rust code. Keep a debug JSON mode for tests and diagnostics.
+Start with a compact tagged binary format implemented in shared Rust code. Keep a debug-JSON mode for tests and diagnostics — it is the host-neutral abstract value model and the conformance assertion target; its exact representation is pinned in the wire codec (`docs/adr/0002-wire-codec.md` → Debug-JSON representation).
 
 Do not use host-language object serialization as the core format. Avoid Python pickle, JS structured clone, and host-specific object encodings.
 

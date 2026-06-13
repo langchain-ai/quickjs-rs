@@ -40,7 +40,9 @@ them honest.
 5. **Bounded.** Nesting depth and total size are capped (see Limits);
    decoders are iterative or depth-counted, never blindly recursive.
 6. **Debug-JSON mode** exists for tests/diagnostics only; it is never the
-   wire format and never enabled on the hot path.
+   wire format and never enabled on the hot path. It is also the
+   **conformance assertion target** (see Debug-JSON representation): the
+   abstract value model, host-neutral, that every decoder must produce.
 
 ## Value model — wire format
 
@@ -159,6 +161,53 @@ Notes / open annotations:
   Benchmarks) shows integer-array marshalling is a real hotspot; if so,
   the fast-path is added then with its canonical-boundary rule designed
   deliberately, not speculatively now.
+
+## Debug-JSON representation (conformance assertion target)
+
+The debug-JSON form is the **host-neutral abstract value model**: the
+thing every decoder must produce from a given byte sequence, and the
+thing conformance vectors assert against. It is *not* natural JSON —
+plain JSON is lossy for this model (no `NaN`/`Inf`/`-0`, no Null vs
+Undefined distinction, numbers lose f64/BigInt precision). So every
+value is a **single-key tagged object** `{"<Variant>": <body>}`, and
+anywhere JSON's native types would lose information we use a string.
+
+This representation draws the conformance boundary: decoders must agree
+down to *this* form. How a host then maps it to native types
+(`str`/`dict`/`BigInt`/wrapper classes) is host-private and tested by
+each adapter's own suite, never by the shared corpus.
+
+| Variant | Debug-JSON | Notes |
+|---------|-----------|-------|
+| Null | `{"Null": null}` | distinct from Undefined |
+| Undefined | `{"Undefined": null}` | distinct from Null |
+| Bool | `{"Bool": true}` / `{"Bool": false}` | |
+| Number (finite) | `{"Number": "0x3FF0000000000000"}` | **f64 as the 16-hex-digit big-endian bit pattern**, not a JSON number — the only lossless, unambiguous form (covers `-0`, subnormals, full precision). `+0.0` = `"0x0000000000000000"`, `-0.0` = `"0x8000000000000000"`. |
+| Number (NaN) | `{"Number": "0x7FF8000000000000"}` | always exactly canonical quiet NaN; any other NaN pattern is a decode *rejection*, never appears here |
+| Number (±Inf) | `{"Number": "0x7FF0000000000000"}` / `{"Number": "0xFFF0000000000000"}` | |
+| BigInt | `{"BigInt": "-170141183460469231731687303715884105728"}` | canonical decimal string (no leading zeros, `-` only for negatives, `0` not `-0`) |
+| String | `{"String": "hi"}` | JSON string; UTF-8 already validated at decode |
+| Bytes | `{"Bytes": "00FF1A"}` | uppercase hex, no separators; empty = `{"Bytes": ""}` |
+| Array | `{"Array": [ <value>, ... ]}` | ordered |
+| Object | `{"Object": [ ["key", <value>], ... ]}` | **array of [key,value] pairs**, not a JSON object — preserves insertion order and permits the duplicate-key cases the corpus must express (a JSON object would silently dedup) |
+| Handle | `{"Handle": {"context_id": 1, "handle_id": 5, "generation": 2}}` | the identity triple; small u32s so JSON numbers are exact |
+| Error | `{"Error": {"name": "TypeError", "message": "x", "stack": "..."}}` | `stack` is `null` when absent (wire len 0) |
+
+Rejections assert as `{"reject": "<reason_code>"}` against the
+enumerated rejection-reason taxonomy (see Conformance obligations).
+
+Decisions this representation forces (recorded here so they are not
+rediscovered while writing vectors):
+
+- **f64 is hex bits, not a JSON number.** A JSON number cannot represent
+  `NaN`/`Inf`/`-0` and risks precision/rounding drift across three JSON
+  libraries — fatal for an equality oracle. Hex bits are exact and
+  unambiguous. *(Annotate if you'd rather a decimal form with explicit
+  `NaN`/`Inf`/`-0` sentinels; I judge hex strictly safer.)*
+- **Object is a pair-array, not a JSON object.** This preserves order
+  and lets the corpus express duplicate-key inputs (a JSON object would
+  collapse them, hiding the very case we need to test).
+- **Bytes is hex, not a JSON array of ints** — compact and unambiguous.
 
 ## Limits (decoder caps, enforced before/while parsing)
 
@@ -291,6 +340,36 @@ additive feature-flagged changes bump minor. The guest and every host
 fail fast (`abi_mismatch`) on a version they don't support — no
 best-effort cross-version parsing.
 
+## Rejection-reason taxonomy
+
+Every decode rejection maps to one enumerated reason code, so conformance
+vectors can assert *why* a malformed input is rejected (not merely "it
+failed somehow" — which would let three decoders reject for three
+different reasons and falsely pass). Every reason code must have at least
+one corpus vector; a code with no vector means the corpus is incomplete.
+
+```
+unknown_value_tag        # tag byte not in 0x00..=0x0B
+unknown_status           # AbiResponse status not in the defined set
+unknown_response_tag     # tag invalid for the given status
+non_canonical_nan        # NaN-class f64 that is not canonical quiet NaN
+non_canonical_bigint     # leading zero, "-0", "+", non-digit, empty, non-decimal
+invalid_utf8             # String/key/BigInt/Error field not valid UTF-8
+length_exceeds_buffer    # a len/count larger than the remaining bytes
+length_overflow          # ptr+len or offset+len wraps u32
+depth_exceeded           # nesting past the depth cap
+size_exceeded            # payload past the total-size cap
+trailing_bytes           # bytes remain after a complete top-level value
+truncated                # buffer ends mid-value
+non_string_object_key    # object key whose tag is not String
+reserved_flag_set        # envelope flags has a nonzero (reserved) bit
+duplicate_object_key     # only if duplicate keys are decided to be rejected (see Open questions)
+```
+
+This list is part of the contract; adding a rejection condition adds a
+reason code (and at least one vector), under the same ABI-versioning
+discipline as the rest of the format.
+
 ## Conformance / fuzzing obligations
 
 - **Differential fuzz** across the three codecs: identical input → identical
@@ -318,4 +397,19 @@ best-effort cross-version parsing.
 5. ~~`request_id` width~~ **Resolved:** u64 (only `request_id`; other ids
    stay u32). See envelope notes.
 
-All open questions resolved.
+New open question surfaced while pinning the debug-JSON representation:
+
+6. **Duplicate object keys** — when a decoded Object contains the same
+   key twice (the wire format permits it; the pair-array debug form can
+   express it), is that (a) legal and preserved as-is, (b) legal with
+   last-wins/first-wins normalization, or (c) a `duplicate_object_key`
+   rejection? JS object literals last-win; QuickJS won't *produce*
+   duplicates on the guest→host path, so this only matters for
+   host→guest or adversarial input. Leaning **reject** (treat as
+   non-canonical — the encoder should never emit dupes, so receiving one
+   is malformed), which is the strictest and simplest to fuzz. Needs a
+   decision before the corpus freezes its reject vectors.
+
+7. **Debug-JSON f64 form** — hex bit pattern (current) vs a decimal form
+   with `NaN`/`Inf`/`-0` sentinels. Leaning hex (exact, no cross-library
+   rounding). See Debug-JSON representation.
