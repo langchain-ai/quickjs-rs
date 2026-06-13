@@ -773,7 +773,12 @@ Portable timeout model:
 - Guest QuickJS interrupt handler checks a deadline/interrupt flag cooperatively.
 - Eval poll loop returns `Timeout` when deadline expires.
 
-Cooperative checks alone cannot stop a hostile `for(;;);` if the guest never yields, so each supported host must have a named preemption mechanism. This is a V1 requirement, not an optional hardening layer:
+Cooperative checks alone cannot stop a hostile `for(;;);` — but not because the check doesn't run. The QuickJS interpreter polls the interrupt handler on a counter cadence inside the bytecode loop; pure JS cannot dodge it. A cooperative timeout fails on the other two conditions it needs:
+
+- **Delivery:** the handler only reads a flag — someone must be able to *set* it while the host thread is blocked inside the wasm call. On a main-thread JS host nothing can run to set it (event loop blocked). On Wasmtime hosts a second thread cannot safely touch instance memory mid-call (`Store` is not thread-shareable). In both cases the flag is undeliverable without a purpose-built channel.
+- **Coverage and trust:** checks are skipped during long native-builtin stretches (e.g. pathological regex between check points), and a compromised engine simply never consults the handler.
+
+Each supported host must therefore have a named preemption mechanism that fixes at least delivery. This is a V1 requirement, not an optional hardening layer. Epoch interruption fixes all three conditions (thread-safe by design via `Engine.increment_epoch`; checks compiler-inserted at every loop backedge in generated machine code, so neither native-builtin loops nor a compromised engine can skip them). The SAB flag fixes delivery only — coverage and trust gaps remain — which is why JS hosts also require the termination backstop, which needs no guest cooperation at all:
 
 | Host | Required mechanism | Strength |
 |---|---|---|
