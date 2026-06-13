@@ -820,8 +820,15 @@ Controls:
 - Tests for recursion/stack overflow classification.
 
 Phase 1 finding: quickjs-ng **disables its internal stack limit on
-`__wasi__`** (`update_stack_limit` sets `stack_limit = 0`), so
-`JS_SetMaxStackSize` is a no-op inside the guest. On the WASM plane the
+`__wasi__`** (`update_stack_limit` sets `stack_limit = 0`; verified in
+the vendored source at `rquickjs-sys/quickjs/quickjs.c`), so
+`JS_SetMaxStackSize` is a no-op inside the guest. Note `__wasi__` is a
+compile-target define: building for `wasm32-wasip1` sets it even though
+we grant zero WASI capabilities at runtime — the disabled branch is
+compiled in regardless of runtime posture. Upstream disables the check
+because the generic path calibrates against a runtime-sampled stack
+address, and wasm's primary execution stack is not addressable
+(address-of-local yields the linear-memory shadow stack instead). On the WASM plane the
 runtime stack guard is the enforcement layer, and stack overflow is a
 trap that poisons the instance — a documented deviation from native
 semantics, where it is a catchable `InternalError` and the context
