@@ -311,7 +311,7 @@ qrs_module_cache_clear(context_id, request_ptr, request_len, out_response_ptr) -
 
 `qrs_module_provide` settles a pending `ModuleRequest` event from `qrs_eval_poll`:
 
-- `flags = resolve`: `key` is the canonical key for the requested edge. If the key is unregistered, `source` must carry UTF-8 module source — the guest registers, optionally type-strips, compiles, and caches it under that key. If the key is already registered, `source` must be absent and the settlement links the existing instance; a settlement that violates either pairing fails with `invalid_request`.
+- `flags = resolve`: `key` is the canonical key for the requested edge and `source` always carries the module's UTF-8 source. If the key is unregistered, the guest registers, optionally type-strips, compiles, and caches it. If the key is already registered, the settlement links the existing instance; the guest verifies the provided source matches the registered module's source (hash compare) and fails the settlement with `invalid_request` on mismatch.
 - `flags = miss`: the host cannot resolve this edge; the guest raises the import error inside JS.
 
 `qrs_module_cache_clear` invalidates the guest's edge-resolution cache and module cache (all keys, or the keys named in the request payload). It is the host's invalidation lever and part of the V1 ABI — with host-side resolution it is the only way for a host to change a prior resolution answer.
@@ -697,13 +697,13 @@ Its former roles are covered without it:
 `ModuleScope` no longer exists. The current native architecture is a runtime-level dynamic import handler; the WASM design preserves its observable semantics but changes the division of labor (decision 2026-06-12): **resolution is a host concern.** The host resolver is a graph-building algorithm — each import statement is an edge `(referrer, specifier)`, the host resolves it to a canonical node (`canonical_key`), and provides the node's source the first time the node appears. The engine never interprets specifiers; module identity is entirely host-minted.
 
 ```text
-resolver(specifier, referrer_key | none) -> { canonical_key, source? } | miss
+resolver(specifier, referrer_key | none) -> { canonical_key, source } | miss
 ```
 
 - `specifier` is the raw text written in the import statement, untouched.
 - `referrer_key` is the canonical key of the importing module, or none for top-level eval. Every referrer key was itself minted by the host in an earlier resolution, so the host can reconstruct the full import chain from edges it has already seen — the event does not carry a call stack.
 - `canonical_key` is the node identity: the module cache is keyed on it, and it becomes the `referrer_key` for imports inside that module. Aliases/namespaces (e.g. `@module` mapping into a packaged file tree) are expressed by resolving different edges to the same or different canonical keys — edge labels never become identities.
-- `source` must be present iff `canonical_key` is not already registered in the guest; for an already-registered key the settlement links the existing module instance (this is how aliases and import cycles converge).
+- `source` is always present: the resolver is a pure function of the edge and needs no knowledge of guest cache state. The guest decides what to do with it — unregistered key: type-strip, compile, cache; registered key: link the existing module instance (this is how aliases and import cycles converge) and discard the provided source after verifying it matches the registered module's source (hash compare). A mismatch is a determinism violation and fails the settlement with `invalid_request` — consistency is guest-enforced, not honor-system.
 - `miss` raises the import error inside JS, preserving the current error shape.
 - TypeScript keys (`.ts`, `.mts`, `.cts`, `.tsx`) are type-stripped at registration, as before.
 
@@ -713,7 +713,7 @@ Flow through the poll protocol:
 1. Guest QuickJS hits an import edge with no cached resolution (static or dynamic import).
 2. qrs_eval_poll returns ModuleRequest { request_id, specifier, referrer_key | none }.
 3. Host adapter invokes the resolver.
-4. Host calls qrs_module_provide(eval_id, request_id, canonical_key, source | none | miss).
+4. Host calls qrs_module_provide(eval_id, request_id, canonical_key, source | miss).
 5. Guest caches the edge resolution, registers/type-strips/compiles the module if new, links, resumes.
 6. Host continues qrs_eval_poll.
 ```
@@ -726,8 +726,8 @@ Division of responsibility:
 
 Rules and consequences:
 
-- The host is consulted **once per unique edge** per context; repeat edges and repeat nodes are guest-local. Edges ≥ nodes, so first-build round trips slightly exceed the previous once-per-key design; module-heavy startup cost must be benchmarked (see Performance Benchmarks).
-- **Determinism rule:** within a context, the resolver must answer a given edge consistently; the guest's edge cache enforces at-most-once consultation, and `qrs_module_cache_clear` (clears both caches) is the host's only lever to re-resolve. A host that wants different answers over time clears and rebuilds; mid-graph identity changes are not expressible.
+- The host is consulted **once per unique edge** per context; repeat edges and repeat nodes are guest-local. Edges ≥ nodes, so first-build round trips slightly exceed the previous once-per-key design, and every settlement copies full source into guest memory even when the node is already cached (the price of a stateless resolver). Module-heavy startup cost, including redundant-source copies for alias-heavy graphs, must be benchmarked (see Performance Benchmarks).
+- **Determinism rule:** within a context, the resolver must answer a given edge consistently; the guest's edge cache enforces at-most-once consultation per edge, and the always-present source lets the guest enforce content consistency across edges (hash compare on registered keys, `invalid_request` on mismatch). `qrs_module_cache_clear` (clears both caches) is the host's only lever to re-resolve. A host that wants different answers over time clears and rebuilds; mid-graph identity changes are not expressible.
 - `specifier` and `referrer_key` in events are guest-emitted bytes: attacker-controlled under engine compromise. Host adapters must treat both as untrusted strings (no implicit path/URL interpretation), and referrer-based *policy* (e.g. "only `@charts` internals may import `@charts/private`") is advisory — the enforceable security gate is what source the host ever provides, which remains fully host-controlled.
 - An optional batch/prefetch form (host resolves several edges in one settlement) may be added later if round-trip cost shows up in benchmarks; it must not change resolution semantics.
 
@@ -927,7 +927,7 @@ Differential fuzzing across the three codec implementations — the guest/refere
 - Pending IDs cannot collide or be settled across contexts.
 - Module provide settlements cannot target unknown, already-settled, or foreign request IDs.
 - Import specifiers and referrer keys reaching the host resolver are treated as untrusted strings (no implicit path/URL interpretation); referrer-based policy is documented as advisory under engine compromise.
-- `qrs_module_provide` settlements violating the key/source pairing rules (source for a registered key, no source for an unregistered key) are rejected with `invalid_request`.
+- `qrs_module_provide` settlements whose source does not match the already-registered module for that canonical key are rejected with `invalid_request` (guest-enforced resolver determinism).
 - Guest cannot forge host handles.
 - Malformed response descriptors are rejected (including `ptr + len` overflow and out-of-bounds reads).
 - Guest panic/trap tears down runtime cleanly, and the trapped instance is never reused.
