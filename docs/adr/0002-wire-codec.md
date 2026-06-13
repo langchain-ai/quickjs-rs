@@ -101,9 +101,36 @@ Notes / open annotations:
   - **`qrs_handle_type_of` returns a display string, not a security
     signal:** the guest mints it, so hosts must treat it as descriptive
     only and never branch trust/security decisions on it.
-- **Cycles are not representable** and not supported — the value model is
-  a tree. Opaque object graphs use Handle. A guest that produces a cyclic
-  structure for marshaling gets a marshal error, not infinite output.
+- **Marshalling model (path-based).** The value tree cannot encode
+  identity or back-references, so we do not flatten arbitrary object
+  graphs into it. Instead:
+  - `eval_handle` is the total primitive — always returns a Handle, no
+    marshalling, faithful for every JS value (functions, Promises,
+    cyclic/shared graphs).
+  - `eval` is sugar for `eval_handle` then `to_value`; there is exactly
+    **one** marshaller, in `to_value` (`qrs_handle_to_value`).
+  - `to_value` is **path-based**: primitives and tree-shaped containers
+    copy by value; a reference that revisits a node **already on the
+    current ancestor path** is emitted as that node's *existing* Handle
+    (not newly minted, not an error); functions/Promises/exotic objects
+    are Handles.
+  - Consequences:
+    - A true **cycle** terminates: the back-edge becomes the referent's
+      existing Handle — finite output, identity preserved at the cut.
+    - **Shared-but-acyclic** structure (DAGs, `{x: obj, y: obj}`) is
+      **duplicated**, not collapsed, because a node leaves the path once
+      its subtree completes. This matches the current native deep-copy
+      behavior — the reason path-based is the v1 choice. (Visited-based
+      dedup, which would collapse all sharing to Handles, was considered
+      and deferred as a larger behavior change.)
+    - Path tracking is O(depth), bounded by the depth cap above.
+    - Therefore an `eval` value tree **may contain Handle leaves** the
+      host owns and must dispose; the response flags when it carries
+      Handles. The only change vs. native is that a true cycle yields a
+      Handle leaf instead of erroring/looping — strictly an improvement.
+  - The codec itself is unaware of any of this: it only needs
+    Handle-as-a-value (tag `0x0A`). The `eval`/`eval_handle` export
+    contract is ABI-surface, specified separately.
 - **No integer tag.** JS numbers are f64; we do not add an int type. This
   is deliberate (avoids the MessagePack "which int width" ambiguity).
   *Annotate if array-index/length-heavy payloads make a u32 fast-path
