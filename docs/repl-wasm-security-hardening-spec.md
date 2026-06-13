@@ -794,15 +794,13 @@ Rules:
 - Worker termination is a backstop, not a timeout mechanism: it loses all runtime state. Adapters relying on it must document that a tight-loop timeout destroys the instance.
 - **Backstop trigger:** termination fires only on deadline-expiry-without-response — the parent flips the SAB flag at the deadline (graceful attempt), waits a configured grace window, and terminates only if the slice still hasn't ended (cooperative check unreachable: native-builtin loop, compromised engine, or broken flag path). Resource limits never escalate to termination: heap-limit errors, store-memory traps, and stack traps all end the slice on their own and are handled by the normal error/discard rules. Termination exists solely for the one failure that never ends the slice — unbounded CPU.
 
-Trap recovery:
+Trap recovery and reachability:
 
-- A trapped instance is never repaired in place. Recovery is layered: the **ABI provides the primitives** (snapshot create/restore), the **adapter provides the mechanism** (trap classification, cheap re-instantiation from the precompiled module, restore plumbing, a trap event the application can hook), and the **embedding application owns the policy** — including whether to pay for continuity at all. Adapters must not checkpoint by default: with the graceful tier in place, traps are rare/pathological events, and per-eval snapshotting taxes every eval (serialize + boundary-copy proportional to live session state) to insure against them.
-- Application-chosen continuity strategies:
-  - **Disposable sessions (default):** no continuity; a trap ends the session. Matches the `wasm-worker-process` profile, where instances are short-lived by design.
-  - **Eval-log replay (zero steady-state cost):** the host already holds every successful eval's source; on trap, re-run the log on a fresh instance. Recovery time grows with session length; host callbacks re-fire during replay (duplicated side effects — disqualifying where callbacks have external effects); nondeterministic host inputs may diverge.
-  - **Checkpointing (taxed steady state, instant recovery):** snapshot at application-chosen points (every N evals, before risky evals, on idle); on trap, restore the last checkpoint; up to N evals of state lost. If this sees real use, incremental snapshots (changed bindings only) are the cost lever — future work, not v1.
-- Caveats (both continuity strategies): recovered state proves it *behaved* well, not that it is uncompromised — a silently compromised engine checkpoints (or replays) its compromise; recovery stays within the trust domain (see Snapshot Exports). Snapshot v1 covers script-mode top-level bindings, not full engine state (live handles and pending evals do not survive). Continuity is best-effort, not state resurrection.
-- A continuity policy also softens the documented stack-overflow deviation (native: catchable `InternalError`, context survives; wasm: trap, instance dead): a recursion bomb costs the session one eval, not everything.
+- A trapped instance is never repaired in place. The adapter surfaces a trap event and makes re-instantiation cheap; session continuity, if any, is **application policy** built on the existing snapshot primitives or eval-log replay — out of scope for this spec, and adapters must not checkpoint by default.
+- What matters for this spec is **how reachable the trap path is from ordinary guest JS**, because every reachable path converts a recoverable error into instance loss:
+  - **Unbounded recursion** is today the easiest path — a one-line, common bug in agent-generated code — because quickjs-ng disables its internal stack limit on `__wasi__` (see Stack). **Phase 1 must investigate restoring engine-level stack checking on wasi** (address-based checks against the linear-memory shadow stack; locals live there, so `&local` comparison should be viable). If restored, recursion returns to a catchable `InternalError` with a surviving context, and this path closes.
+  - **Compute-bound native builtins** (catastrophic regex backtracking, large BigInt exponentiation, primitive-array sorts, large JSON operations) stall inside C code where the interrupt cadence may not reach, riding out the grace window. The conformance corpus must measure interrupt coverage of these paths; any builtin that does not honor the interrupt handler within the grace window is documented as trap-reachable.
+  - Remaining triggers — store-memory traps (fire only if QuickJS's own accounting failed first: a compromise indicator), guest panics, engine exploits — are not reachable from well-formed guest JS and are the cases discard-on-trap exists for.
 - Choosing a host WASM runtime without epoch-or-equivalent interruption is not acceptable for V1 server-side hosts.
 
 The cooperative interrupt flag has a sharp limitation in single-threaded JS hosts: while wasm executes synchronously, the event loop is blocked and nothing in the same thread can flip the flag. The flag helps only in polled evals, between poll steps. Therefore:
@@ -828,8 +826,10 @@ runtime stack guard is the enforcement layer, and stack overflow is a
 trap that poisons the instance — a documented deviation from native
 semantics, where it is a catchable `InternalError` and the context
 survives. Hosts classify the trap distinctly (e.g. `StackOverflow`, not
-a generic panic). Revisit if upstream enables shadow-stack checking for
-wasi targets.
+a generic panic). Phase 1 investigates restoring the check in our build
+(shadow-stack address comparison — see Trap recovery and reachability)
+rather than waiting on upstream, since unbounded recursion is the most
+agent-reachable trap path.
 
 ## Security Model
 
@@ -1008,6 +1008,7 @@ Exit criteria:
 - The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
 - The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
 - `quickjs-core.wasm` binary size is measured and reviewed against packaging budgets (reference points: v0.2 shipped ~1 MB gzipped; the lost spike artifact was 1.2 MB raw). If rquickjs proves materially heavier than those references, the binding decision is revisited with data.
+- The wasi stack-check restoration is investigated with a verdict: either unbounded recursion surfaces as a catchable `InternalError` with a surviving context (trap path closed), or the limitation is confirmed and recursion is documented as trap-reachable.
 
 ### Phase 2: Value Protocol And Errors
 
