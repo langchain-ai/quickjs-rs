@@ -13,7 +13,7 @@ verdict is folded back into the spec.
 |---|---|
 | rustc | 1.95.0 (2026-04-14) |
 | target | `wasm32-wasip1` |
-| rquickjs | 0.11.0 (0.12.0 available; pin deferred to Phase 1) |
+| rquickjs | **0.12.0** (vendors quickjs-ng 0.15) — pinned after 0.11→0.12 reconciliation; spikes C/D first run on 0.11.0 and re-validated on 0.12 |
 | wasmtime-py | 45.0.0 |
 | Node | 24.6.0 |
 | Python | 3.14.3 |
@@ -206,6 +206,11 @@ from source we control with no surprise toolchain dependency (C); the worst
 agent-reachable trap path is closeable (D); single-threaded hosting is unsafe
 for hostile spins regardless of loop cooperativeness, and worker hosting is
 what makes the timeout story real (E).
+
+**Version note:** spikes C and D were first run on rquickjs 0.11.0, then
+re-validated on 0.12.0 (quickjs-ng 0.15) when the pin was reconciled — both
+verdicts held (feasibility GREEN; stack-check trap-by-default, catchable when
+patched, depth 1635 vs 0.11's 1486). See `../crates/quickjs-core/FEASIBILITY.md`.
 
 **Not in scope (Phase 1 construction):** the full ABI surface, the wire
 codec, host-side module resolution, the Python/TS adapters, and integrating

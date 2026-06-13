@@ -16,8 +16,8 @@ from a fresh `crates/quickjs-core` crate, clean build, current dependencies.
 | `bindgen` / libclang required? | **No** — rquickjs-sys 0.11.0 ships wasip1-compatible bindings; C engine built via bundled `cc` |
 | External wasi-sdk required? | **No** — no `toolchain/` install, no external sysroot |
 | In-module QuickJS actually runs? | **Yes** — `qrs_selftest()` evals `1 + 2` → `3` under zero-capability WASI |
-| Artifact size | **600 KB** (`opt-level="z"`, LTO, strip; minimal feature set, no host-call/ABI machinery yet) |
-| Resolved versions | `rquickjs 0.11.0` (cargo notes 0.12.0 available), `rustc 1.95.0` |
+| Artifact size | **657 KB** on 0.12 (600 KB on 0.11; `opt-level="z"`, LTO, strip; minimal feature set, no host-call/ABI machinery yet) |
+| Resolved versions | **`rquickjs 0.12.0`** (vendors quickjs-ng 0.15), `rustc 1.95.0` — pinned after the 0.11→0.12 reconciliation below |
 
 ## WASI import surface (zero-capability)
 
@@ -84,6 +84,34 @@ adopt the patch; the delivery mechanism (vendored quickjs source vs.
 build-time source rewrite in `quickjs-core-wasm-build`) is a Phase 1
 implementation choice. The spike's vendored copy was removed after the
 verdict; reproduce via the patch described above.
+
+## Version pin: rquickjs 0.12 (reconciled 2026-06-12)
+
+The spike originally inherited `0.11` from the native crate's pin. Bumped to
+`0.12.0` (released 2026-05-26; vendors quickjs-ng 0.15) and re-validated:
+
+- **Feasibility:** builds clean in 10.3s, still no bindgen/wasi-sdk;
+  `qrs_selftest` → 3. Size 657 KB (vs 600 KB on 0.11).
+- **Stack-check verdict holds:** quickjs-ng 0.15 still disables the limit on
+  `__wasi__` (`update_stack_limit` → `stack_limit = 0`, now at line ~2759).
+  Default build still traps; the same one-line patch makes recursion
+  catchable (error at depth 1635 vs 0.11's 1486 — frame-layout difference,
+  same outcome). The fix carries forward.
+
+Decision: **pin 0.12 for `quickjs-core`.** It is a greenfield crate with no
+migration cost, and 0.12 carries fixes and surfaces we want (below). The
+native PyO3 crate keeps its own `0.11` pin independently.
+
+Three 0.12 changes reconciled against the spec:
+
+- **`Loader` trait now takes import attributes.** The guest module
+  resolver/loader builds on this trait; the host-side resolution design must
+  account for import attributes (`with { type: "json" }`) reaching the
+  resolver as part of the edge. Noted in Module Loading.
+- **Promise polling + GC assertion fixes.** Directly relevant to the
+  async/poll eval state machine (Phase 4); a reason to be on 0.12, not 0.11.
+- **`RQUICKJS_SYS_NO_WASI_SDK` env var (new in 0.12).** A wasi build-control
+  knob; relevant to the `quickjs-core-wasm-build` pipeline. Noted in Build.
 
 ## Open (deliberately out of scope for feasibility)
 

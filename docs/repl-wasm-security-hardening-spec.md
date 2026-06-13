@@ -706,6 +706,7 @@ resolver(specifier, referrer_key | none) -> { canonical_key, source } | miss
 - `source` is always present: the resolver is a pure function of the edge and needs no knowledge of guest cache state. The guest decides what to do with it — unregistered key: type-strip, compile, cache; registered key: link the existing module instance (this is how aliases and import cycles converge) and discard the provided source after verifying it matches the registered module's source (hash compare). A mismatch is a determinism violation and fails the settlement with `invalid_request` — consistency is guest-enforced, not honor-system.
 - `miss` raises the import error inside JS, preserving the current error shape.
 - TypeScript keys (`.ts`, `.mts`, `.cts`, `.tsx`) are type-stripped at registration, as before.
+- Import attributes (`import x from "y" with { type: "json" }`) are part of the edge. rquickjs 0.12's `Loader` trait surfaces them, so the `ModuleRequest` event carries the attributes alongside `specifier`/`referrer_key`, and the resolver may use them (and must treat them as untrusted, like the specifier). The default resolver ignores attributes except where it implements a known type (e.g. JSON); unknown attributes are a resolver-policy decision, not a guest capability.
 
 Flow through the poll protocol:
 
@@ -1121,6 +1122,8 @@ Exit criteria:
 ### Build
 
 - Resolved (2026-06-12): the guest binding layer is Rust via `rquickjs` (over quickjs-ng), with per-call drop-down to the re-exported raw sys layer (`rquickjs::qjs`) where `rquickjs` lacks an API — the pattern the native snapshot code already uses. No hand-written C shim layer: the v0.2 retrospective (ADR 0001) forecloses it. Rationale: Javy proves rquickjs on `wasm32-wasip1`; the native semantics layer (marshal, modules, errors, handles) ports rather than being rewritten against raw FFI; the WASM sandbox contains binding bugs either way, so sys-everywhere buys only more unsafe surface. Phase 1 exit measures binary size to confirm; the `qjs` drop-down is the escape hatch if rquickjs fights the poll state machine, not a re-architecture.
+- Resolved (2026-06-12): pin **`rquickjs 0.12`** (vendors quickjs-ng 0.15), not the native crate's 0.11. The guest is greenfield so there is no migration cost, and 0.12 carries promise-polling and GC-assertion fixes relevant to the poll state machine plus the `Loader` import-attributes surface the module design uses. Re-validated on the feasibility crate: builds clean (no bindgen/wasi-sdk), evals `1 + 2`, 657 KB; the stack-check fix carries forward (quickjs-ng 0.15 still disables the wasi limit, same one-line patch restores it). The native PyO3 crate keeps its own pin independently. See `crates/quickjs-core/FEASIBILITY.md`.
+- `rquickjs-sys 0.12` adds `RQUICKJS_SYS_NO_WASI_SDK` to control wasi-sdk setup; `quickjs-core-wasm-build` should set the build's wasi toolchain posture explicitly rather than relying on the default (decide during Phase 1 / Phase 7 build hardening).
 - Can current QuickJS/quickjs-ng build reliably to `wasm32-wasip1`? (The lost Phase 1 spike's artifact suggests yes; re-confirm in Phase 1.)
 - What is the size impact of including TypeScript stripping inside the guest?
 - What allocator should the guest use?
