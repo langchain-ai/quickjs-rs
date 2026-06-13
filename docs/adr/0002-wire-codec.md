@@ -158,10 +158,19 @@ Envelope (request):
 ```
 abi_version : u32
 request_id  : u32        # correlation; debugging + async settlement
-kind        : u32        # which operation (eval, handle_get, ...)
-flags       : u32        # per-kind bitflags (e.g. EVAL_FLAG_HANDLE_RESULT)
+kind        : u32        # which operation (eval, eval_handle, handle_get, ...)
+flags       : u32        # per-kind orthogonal bitflags; reserved, must be 0
 payload     : Value      # operation-specific, encoded per the value model
 ```
+
+`flags` carries *orthogonal, composable* per-kind options only (a future
+example: eval strict-mode). Mutually-exclusive operation choices are
+encoded as distinct `kind`s, not flags — e.g. result-mode is
+`eval` vs `eval_handle` (and `eval_start` vs `eval_handle_start`), never
+a flag bit. No flag bits are defined yet; **reserved bits must be zero**,
+and any nonzero `flags` is rejected with `invalid_request` (canonical-form
+rule). Keeping the field reserved lets the first orthogonal option claim
+a bit without a wire-incompatible ABI bump.
 
 Response payload rides the `AbiResponse` descriptor (below); the decoded
 body is a `Value` (or an `Error` value when `status` indicates a JS

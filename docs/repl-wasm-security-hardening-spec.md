@@ -260,6 +260,7 @@ Context config should include:
 qrs_eval(context_id, request_ptr, request_len, out_response_ptr) -> status
 qrs_eval_handle(context_id, request_ptr, request_len, out_response_ptr) -> status
 qrs_eval_start(context_id, request_ptr, request_len, out_response_ptr) -> status
+qrs_eval_handle_start(context_id, request_ptr, request_len, out_response_ptr) -> status
 qrs_eval_poll(eval_id, out_response_ptr) -> status
 qrs_eval_cancel(eval_id, reason_ptr, reason_len, out_response_ptr) -> status
 ```
@@ -268,7 +269,8 @@ qrs_eval_cancel(eval_id, reason_ptr, reason_len, out_response_ptr) -> status
 
 Result modes — `eval_handle` is the total primitive, `eval` is sugar over it:
 
-- `qrs_eval_handle` always returns the result as a `Value::Handle` — no marshalling, faithful for every JS value (functions, Promises, cyclic/shared graphs). This is the truth source; the same applies to `qrs_eval_start` with `EVAL_FLAG_HANDLE_RESULT`.
+- `qrs_eval_handle` always returns the result as a `Value::Handle` — no marshalling, faithful for every JS value (functions, Promises, cyclic/shared graphs). This is the truth source; the async equivalent is `qrs_eval_handle_start`.
+- Result-mode is encoded as the operation (`kind`), not a flag — consistently across sync and async: `qrs_eval`/`qrs_eval_handle` for sync, `qrs_eval_start`/`qrs_eval_handle_start` for async. It is the only eval axis and is mutually exclusive, so it is a `kind`, not a flag bit; the envelope `flags` word is reserved for future orthogonal options (see Wire Codec) and must be zero today.
 - `qrs_eval` returns a marshalled value tree: it is defined as `eval_handle` followed by `to_value` (`qrs_handle_to_value`) on the result. There is exactly one marshaller, in `to_value`, and it runs guest-side (one boundary crossing, not N), keeping a single semantics layer across hosts.
 - `to_value` is **path-based** (see Wire Codec, Marshalling model): primitives and tree-shaped containers copy by value; a node that is non-copyable (function/Promise/exotic) or that revisits a node already on the current ancestor path (a true cycle) is emitted as that node's *existing* handle — at that node only, never propagated to its container. Shared-but-acyclic structure duplicates (matches native deep-copy).
 - Because of that, an `eval` value tree **may contain handle leaves**. The response descriptor flags this (a bit in `tag`) so the host knows the result carries handles it now **owns and must dispose**. Handle-leaf count is bounded by the configured max-handle-count cap. A pure-primitive/tree result carries no handles and needs no disposal.
@@ -519,7 +521,7 @@ The portable host should drive eval as a state machine:
 
 ```text
 EvalStarted(eval_id)
-EvalPoll -> Completed(Value)        # Value::Handle when started with EVAL_FLAG_HANDLE_RESULT
+EvalPoll -> Completed(Value)        # Value::Handle when started via qrs_eval_handle_start
 EvalPoll -> Threw(ErrorRecord)
 EvalPoll -> HostCallAsync(event)
 EvalPoll -> ModuleRequest(event)    # Phase 5
