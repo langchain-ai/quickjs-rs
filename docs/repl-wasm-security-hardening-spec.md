@@ -770,12 +770,12 @@ Required tests:
 Portable timeout model:
 
 - Host tracks deadlines.
-- Guest QuickJS interrupt handler checks a deadline/interrupt flag cooperatively.
-- Eval poll loop returns `Timeout` when deadline expires.
+- The graceful tier is uniform across hosts: the guest QuickJS interrupt handler calls an imported `host_interrupt() -> i32` on its interpreter cadence. The import reads host-side state the guest cannot touch — an atomic flag in the Python host (host memory, safely settable from any thread), `Atomics.load` on a parent-written `SharedArrayBuffer` in worker-hosted JS. When it returns nonzero, QuickJS unwinds cleanly and the eval returns `TimeoutError`; **the instance survives**, preserving native timeout semantics for the common case. A plain hostile `for(;;);` is caught here, not by a trap.
+- Eval poll loop surfaces `Timeout` when the deadline expires while the eval is suspended.
 
 Cooperative checks alone cannot stop a hostile `for(;;);` — but not because the check doesn't run. The QuickJS interpreter polls the interrupt handler on a counter cadence inside the bytecode loop; pure JS cannot dodge it. A cooperative timeout fails on the other two conditions it needs:
 
-- **Delivery:** the handler only reads a flag — someone must be able to *set* it while the host thread is blocked inside the wasm call. On a main-thread JS host nothing can run to set it (the event loop is blocked, and host microtasks cannot drain while the wasm call holds the stack). On Wasmtime hosts a second thread cannot safely touch instance memory mid-call (`Store` is not thread-shareable). In both cases the flag is undeliverable without a purpose-built channel.
+- **Delivery:** the handler only reads a flag — someone must be able to *set* it while the host thread is blocked inside the wasm call. Instance memory is not writable cross-thread on Wasmtime hosts (`Store` is not thread-shareable), and on a main-thread JS host nothing can run at all (event loop blocked; host microtasks cannot drain while the wasm call holds the stack). The purpose-built channel is the `host_interrupt` import above: it reads *host-side* state, which another host thread can always set safely. Delivery therefore needs (a) the import channel and (b) a second thread to write it — main-thread JS hosting lacks the second thread, hence the worker default.
 - **This applies to polled evals too.** Every `qrs_*` call is a synchronous slice; between slices the host runs freely and checks deadlines, but the guest controls slice length. Guest-internal promise/microtask churn does not end a slice — QuickJS drains its own job queue inside the call, so `while (true) await Promise.resolve();` is one unbounded slice, indistinguishable from `for(;;);`. Only events that need the host (async host call, module request, completion) end a slice. Sync vs. async eval changes typical exposure, not the worst case; the mechanisms below are sized to the worst case.
 - **Placement rule:** a slice blocks the thread that runs it — inherent to wasm (and to the current native engine; `ctx.eval` blocks its thread today). Adapters must place the instance on a thread whose blocking is acceptable: worker-hosted by default in JS (the parent event loop never runs a slice and stays responsive); off the asyncio event loop (executor thread) in the async Python adapter. `wasmtime-py` releases the GIL during slices (verified), so only the calling thread blocks in Python.
 - **Coverage and trust:** checks are skipped during long native-builtin stretches (e.g. pathological regex between check points), and a compromised engine simply never consults the handler.
@@ -784,15 +784,21 @@ Each supported host must therefore have a named preemption mechanism that fixes 
 
 | Host | Required mechanism | Strength |
 |---|---|---|
-| Python (`wasmtime-py`) | Epoch interruption (`Engine.increment_epoch` from a watchdog thread) | Preemptive; traps mid-loop |
-| Node | Worker-hosted instance (default) with `SharedArrayBuffer` interrupt flag, plus worker termination as backstop | Weaker; backstop destroys the instance |
-| Browser | Worker-hosted instance with `SharedArrayBuffer` interrupt flag (requires COOP/COEP), plus Web Worker termination as backstop | Weaker; backstop destroys the instance |
+| Python (`wasmtime-py`) | Graceful: `host_interrupt` import reading a host-side atomic. Escalation: epoch interruption (`Engine.increment_epoch` from a watchdog thread) | Graceful tier preserves the instance; epoch trap is preemptive and discards it |
+| Node | Worker-hosted instance (default); graceful: `host_interrupt` import reading a parent-written `SharedArrayBuffer`. Escalation: worker termination | Graceful tier preserves the instance; termination destroys it |
+| Browser | Same shape via Web Worker (`SharedArrayBuffer` requires COOP/COEP). Escalation: Web Worker termination | Graceful tier preserves the instance; termination destroys it |
 
 Rules:
 
 - An epoch/fuel trap tears down the eval and surfaces `TimeoutError`. A trap leaves the QuickJS heap in an arbitrary mid-mutation state: **the instance is poisoned and must be discarded — always.** "Recover to a verified-consistent state" is not an option; it is not cheaply verifiable and a wrong answer is an isolation failure. Adapter APIs must make post-trap recycling cheap and automatic.
 - Worker termination is a backstop, not a timeout mechanism: it loses all runtime state. Adapters relying on it must document that a tight-loop timeout destroys the instance.
 - **Backstop trigger:** termination fires only on deadline-expiry-without-response — the parent flips the SAB flag at the deadline (graceful attempt), waits a configured grace window, and terminates only if the slice still hasn't ended (cooperative check unreachable: native-builtin loop, compromised engine, or broken flag path). Resource limits never escalate to termination: heap-limit errors, store-memory traps, and stack traps all end the slice on their own and are handled by the normal error/discard rules. Termination exists solely for the one failure that never ends the slice — unbounded CPU.
+
+Trap recovery:
+
+- A trapped instance is never repaired in place. Session continuity is an adapter-level **checkpoint/restore** policy: snapshot the context at known-good points (e.g. after successful evals; cadence configurable), and on trap discard the instance, instantiate fresh (cheap with a precompiled module), and `qrs_snapshot_restore` the last checkpoint. The poisoned eval's effects are lost by design.
+- Caveats: a checkpoint proves the state *behaved* well, not that it is uncompromised — a silently compromised engine checkpoints its compromise; restore stays within the snapshot's trust domain (see Snapshot Exports). Snapshot v1 covers script-mode top-level bindings, not full engine state (live handles and pending evals do not survive). Checkpoint/restore is best-effort session continuity, not state resurrection.
+- The same policy softens the documented stack-overflow deviation (native: catchable `InternalError`, context survives; wasm: trap, instance dead): with checkpoints enabled, a recursion bomb costs the session one eval, not everything.
 - Choosing a host WASM runtime without epoch-or-equivalent interruption is not acceptable for V1 server-side hosts.
 
 The cooperative interrupt flag has a sharp limitation in single-threaded JS hosts: while wasm executes synchronously, the event loop is blocked and nothing in the same thread can flip the flag. The flag helps only in polled evals, between poll steps. Therefore:
@@ -939,6 +945,7 @@ Differential fuzzing across the three codec implementations — the guest/refere
 - Guest cannot forge host handles.
 - Malformed response descriptors are rejected (including `ptr + len` overflow and out-of-bounds reads).
 - Guest panic/trap tears down runtime cleanly, and the trapped instance is never reused.
+- Checkpoint/restore after a trap resumes from the last checkpoint only — no effect of the poisoned eval is observable in the restored instance.
 - Host imports never re-enter guest exports (no-reentrancy invariant).
 - Every required adapter cap (argument size, response size, module source size, handle count, pending count) rejects at its boundary.
 - Adapters refuse a `quickjs-core.wasm` artifact whose hash does not match the pinned value.
@@ -984,7 +991,7 @@ Note: an initial Phase 1 spike was built (`wasm32-wasip1`, ~1.2 MB artifact) and
 Scope:
 
 - Build `quickjs-core.wasm` with QuickJS, bound via `rquickjs` (decision: see Open Questions / Build).
-- Expose ABI version, alloc/free, runtime/context create/close, primitive eval.
+- Expose ABI version, alloc/free, runtime/context create/close, primitive eval, and the `host_interrupt` import channel (graceful timeout tier).
 - No host callbacks, modules, handles, or snapshots.
 
 Exit criteria:
@@ -992,7 +999,8 @@ Exit criteria:
 - Python adapter can run `1 + 2`.
 - Guest-crate unit tests (cargo, no host adapter) cover alloc/free and the version export.
 - Runaway allocation raises `MemoryLimitError` (not host OOM) in the Python host.
-- A hostile infinite loop (`for(;;);`) is terminated via Wasmtime epoch interruption in the Python (`wasmtime-py`) host, surfacing `TimeoutError`, before any callback or handle work begins.
+- A hostile infinite loop (`for(;;);`) is first caught gracefully: the `host_interrupt` import flips at the deadline, the eval returns `TimeoutError`, and the instance survives and accepts further evals (native timeout parity).
+- With the graceful channel disabled (simulating an unreachable cooperative check), the same loop is terminated via Wasmtime epoch interruption in the Python (`wasmtime-py`) host, and the trapped instance is discarded — before any callback or handle work begins.
 - The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
 - The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
 - `quickjs-core.wasm` binary size is measured and reviewed against packaging budgets (reference points: v0.2 shipped ~1 MB gzipped; the lost spike artifact was 1.2 MB raw). If rquickjs proves materially heavier than those references, the binding decision is revisited with data.
