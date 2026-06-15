@@ -68,8 +68,8 @@ catchable error. Can engine-level checking be restored on wasip1?
   stack pointer (`__builtin_frame_address(0)`) against `stack_limit`, and
   `__builtin_frame_address(0)` is valid on wasm (resolves into the
   linear-memory shadow stack — our `quickjs.c` already compiles and uses
-  it). Upstream zeroes the limit out of caution, not because the
-  primitive is unavailable.
+  it). Upstream zeroes the limit because it had no working wasi mechanism,
+  **not** because restoring it is unsafe (see Upstream discovery below).
 - *Fix proven*: patched `update_stack_limit`'s `__wasi__` branch to use
   the normal `stack_top - stack_size` calculation, built via a vendored
   rquickjs-sys (`[patch.crates-io]`), re-ran the same probe. Recursion is
@@ -84,6 +84,35 @@ adopt the patch; the delivery mechanism (vendored quickjs source vs.
 build-time source rewrite in `quickjs-core-wasm-build`) is a Phase 1
 implementation choice. The spike's vendored copy was removed after the
 verdict; reproduce via the patch described above.
+
+### Upstream discovery (2026-06-13): the disable is an acknowledged gap, not a safeguard
+
+Before patching around upstream, we researched *why* `__wasi__` zeroes the
+stack limit. The finding strongly supports patching and gives us an
+upstream contribution path:
+
+- **The disable is not protective.** The `#if defined(__wasi__)` originally
+  bracketed wasi *and* ASan together (PR #778 later split ASan out). It was
+  never a fix for a wasi-specific hazard — it's a workaround for build
+  environments where upstream had no working stack-pointer check.
+- **The maintainer wants exactly our fix.** quickjs-ng issue
+  [#774](https://github.com/quickjs-ng/quickjs/issues/774) ("Memory
+  corruption in WASI build") reduces to a cyclic-array `toString()` that
+  recurses without bound; on wasi it traps / corrupts memory instead of
+  throwing `RangeError`. Maintainer (saghul): *"stack overflow detection
+  is disabled in WASI, **I wonder if there is a way to make it work...**"*
+  Our Spike D is that way: `__builtin_frame_address(0)` works on wasm
+  (shadow stack), so `stack_top - stack_size` is meaningful.
+- **A prior attempt to tidy this area was abandoned.** PR #637 ("Simplify
+  disabling stack checks on WASI and ASAN") was **closed unmerged**
+  ("Aha, maybe not a great idea after all..."), i.e. the area is known-
+  unsatisfying and unresolved upstream.
+
+Therefore: patch locally now (we are implementing the fix the maintainer
+wished for, not overriding a deliberate safeguard), and **open an upstream
+PR to quickjs-ng** restoring the wasi check via the shadow-stack approach —
+which would also resolve #774. The local patch is interim, removable once
+upstream ships; track it with a comment pointing at the upstream PR.
 
 ## Version pin: rquickjs 0.12 (reconciled 2026-06-12)
 
