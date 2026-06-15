@@ -38,7 +38,11 @@ them honest.
    preceded by its `u32` byte length.
 4. **Untrusted input, fail closed.** Every length is bounds-checked
    against the remaining buffer with overflow checks (`offset + len` must
-   not wrap and must not exceed the buffer). Any failure is terminal.
+   not wrap and must not exceed the buffer). Any failure is terminal. The
+   `checked_add` is required unconditionally even though a value-level
+   wrap is unreachable while the max-payload cap (32 MiB) is far below
+   `u32::MAX` — it is one line and becomes reachable the moment a cap is
+   raised or a host decoder is pointed at a larger buffer.
 5. **Bounded.** Nesting depth and total size are capped (see Limits);
    decoders are iterative or depth-counted, never blindly recursive.
 6. **Debug-JSON mode** exists for tests/diagnostics only; it is never the
