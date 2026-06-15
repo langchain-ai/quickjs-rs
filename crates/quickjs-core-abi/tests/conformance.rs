@@ -7,7 +7,10 @@
 //! The debug-JSON -> Value parsing lives here (test-only), keeping the
 //! serde_json dependency out of the shipped library.
 
-use quickjs_core_abi::{decode_value, encode_value, ErrorRecord, Handle, Value};
+use quickjs_core_abi::{
+    decode_envelope, decode_response, decode_value, encode_envelope, encode_value, Envelope,
+    ErrorRecord, Handle, Value,
+};
 use serde::Deserialize;
 use serde_json::Value as J;
 use std::path::PathBuf;
@@ -75,6 +78,110 @@ fn value_from_json(j: &J) -> Value {
     }
 }
 
+fn check_value(name: &str, bytes: &[u8], expect: &J, failures: &mut Vec<String>) {
+    let got = decode_value(bytes);
+    if let Some(ok) = expect.get("ok") {
+        match got {
+            Ok(val) => {
+                let want = value_from_json(ok);
+                if val != want {
+                    failures.push(format!("{name}: decoded {val:?}, expected {want:?}"));
+                } else {
+                    // Bidirectional: OK vectors bind canonical encode too.
+                    match encode_value(&want) {
+                        Ok(re) if re == bytes => {}
+                        Ok(re) => failures.push(format!(
+                            "{name}: encode mismatch\n  got  {}\n  want {}",
+                            hex_upper(&re),
+                            hex_upper(bytes)
+                        )),
+                        Err(r) => failures.push(format!("{name}: encode rejected ({})", r.as_str())),
+                    }
+                }
+            }
+            Err(r) => failures.push(format!("{name}: expected ok, got reject {}", r.as_str())),
+        }
+    } else if let Some(reject) = expect.get("reject").and_then(J::as_str) {
+        match got {
+            Ok(val) => failures.push(format!("{name}: expected reject {reject}, decoded {val:?}")),
+            Err(r) if r.as_str() != reject => {
+                failures.push(format!("{name}: expected reject {reject}, got {}", r.as_str()))
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn check_envelope(name: &str, bytes: &[u8], expect: &J, failures: &mut Vec<String>) {
+    let got = decode_envelope(bytes);
+    if let Some(ok) = expect.get("ok") {
+        match got {
+            Ok(env) => {
+                let want = Envelope {
+                    abi_version: ok["abi_version"].as_u64().unwrap() as u32,
+                    request_id: ok["request_id"].as_u64().unwrap(),
+                    kind: ok["kind"].as_u64().unwrap() as u32,
+                    flags: ok["flags"].as_u64().unwrap() as u32,
+                    payload: value_from_json(&ok["payload"]),
+                };
+                if env != want {
+                    failures.push(format!("{name}: envelope decoded {env:?}, expected {want:?}"));
+                } else {
+                    match encode_envelope(&want) {
+                        Ok(re) if re == bytes => {}
+                        Ok(re) => failures.push(format!(
+                            "{name}: envelope encode mismatch\n  got  {}\n  want {}",
+                            hex_upper(&re),
+                            hex_upper(bytes)
+                        )),
+                        Err(r) => failures.push(format!("{name}: envelope encode rejected ({})", r.as_str())),
+                    }
+                }
+            }
+            Err(r) => failures.push(format!("{name}: expected ok, got reject {}", r.as_str())),
+        }
+    } else if let Some(reject) = expect.get("reject").and_then(J::as_str) {
+        match got {
+            Ok(env) => failures.push(format!("{name}: expected reject {reject}, decoded {env:?}")),
+            Err(r) if r.as_str() != reject => {
+                failures.push(format!("{name}: expected reject {reject}, got {}", r.as_str()))
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn check_response(name: &str, bytes: &[u8], expect: &J, failures: &mut Vec<String>) {
+    let got = decode_response(bytes);
+    if let Some(ok) = expect.get("ok") {
+        match got {
+            Ok(resp) => {
+                let want_status = ok["status"].as_u64().unwrap() as u32;
+                let want_tag = ok["tag"].as_u64().unwrap() as u32;
+                let want_payload = value_from_json(&ok["payload"]);
+                if resp.status as u32 != want_status || resp.tag != want_tag {
+                    failures.push(format!(
+                        "{name}: response status/tag {}/{} expected {}/{}",
+                        resp.status as u32, resp.tag, want_status, want_tag
+                    ));
+                } else if want_payload != Value::Null && resp.payload != want_payload {
+                    // Null-payload statuses carry no real payload (sentinel).
+                    failures.push(format!("{name}: response payload {:?}, expected {:?}", resp.payload, want_payload));
+                }
+            }
+            Err(r) => failures.push(format!("{name}: expected ok, got reject {}", r.as_str())),
+        }
+    } else if let Some(reject) = expect.get("reject").and_then(J::as_str) {
+        match got {
+            Ok(resp) => failures.push(format!("{name}: expected reject {reject}, decoded {resp:?}")),
+            Err(r) if r.as_str() != reject => {
+                failures.push(format!("{name}: expected reject {reject}, got {}", r.as_str()))
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 #[test]
 fn value_vectors_conform() {
     let text = std::fs::read_to_string(corpus_path()).expect("read vectors");
@@ -93,60 +200,35 @@ fn value_vectors_conform() {
         let mut de = serde_json::Deserializer::from_str(line);
         de.disable_recursion_limit();
         let v: J = J::deserialize(&mut de).expect("parse vector line");
-        // V1 covers value-kind vectors; envelope/response kinds are deferred
-        // to their own codec layers. Count them explicitly rather than
-        // silently skipping, so a dropped/mis-kinded vector can't pass unseen.
-        if v["kind"].as_str() != Some("value") {
-            deferred += 1;
-            continue;
-        }
-        total += 1;
         let name = v["name"].as_str().unwrap();
-        let bytes = hex_to_bytes(v["hex"].as_str().unwrap());
         let expect = &v["expect"];
-
-        let got = decode_value(&bytes);
-        if let Some(ok) = expect.get("ok") {
-            match got {
-                Ok(val) => {
-                    let want = value_from_json(ok);
-                    if val != want {
-                        failures.push(format!("{name}: decoded {val:?}, expected {want:?}"));
-                    } else {
-                        // Bidirectional rule: OK vectors bind canonical encode
-                        // too — encode(value) must reproduce the exact bytes.
-                        match encode_value(&want) {
-                            Ok(reencoded) if reencoded == bytes => {}
-                            Ok(reencoded) => failures.push(format!(
-                                "{name}: encode mismatch\n  got  {}\n  want {}",
-                                hex_upper(&reencoded),
-                                hex_upper(&bytes)
-                            )),
-                            Err(r) => failures.push(format!(
-                                "{name}: encode rejected unexpectedly ({})",
-                                r.as_str()
-                            )),
-                        }
-                    }
-                }
-                Err(r) => failures.push(format!("{name}: expected ok, got reject {}", r.as_str())),
+        match v["kind"].as_str() {
+            Some("value") => {
+                total += 1;
+                check_value(name, &hex_to_bytes(v["hex"].as_str().unwrap()), expect, &mut failures);
             }
-        } else if let Some(reject) = expect.get("reject").and_then(J::as_str) {
-            match got {
-                Ok(val) => failures.push(format!("{name}: expected reject {reject}, decoded {val:?}")),
-                Err(r) if r.as_str() != reject => {
-                    failures.push(format!("{name}: expected reject {reject}, got {}", r.as_str()))
-                }
-                Err(_) => {}
+            Some("envelope") => {
+                total += 1;
+                check_envelope(name, &hex_to_bytes(v["hex"].as_str().unwrap()), expect, &mut failures);
+            }
+            Some("response") => {
+                total += 1;
+                // response vectors split descriptor + payload; concatenate.
+                let mut bytes = hex_to_bytes(v["descriptor"].as_str().unwrap());
+                bytes.extend_from_slice(&hex_to_bytes(v["payload"].as_str().unwrap_or("")));
+                check_response(name, &bytes, expect, &mut failures);
+            }
+            other => {
+                deferred += 1;
+                failures.push(format!("{name}: unknown vector kind {other:?}"));
             }
         }
     }
 
-    // Pin the coverage explicitly: if the suite gains/loses value vectors,
-    // this count must be updated deliberately — a silent skip can't inflate
-    // or hide coverage. (67 value, 9 deferred envelope/response = 76 total.)
-    assert_eq!(total, 67, "expected 67 value vectors, saw {total}");
-    assert_eq!(deferred, 9, "expected 9 deferred (envelope/response) vectors, saw {deferred}");
-    assert!(failures.is_empty(), "{} of {} value vectors failed:\n{}", failures.len(), total, failures.join("\n"));
-    eprintln!("conformance: {total} value vectors passed; {deferred} envelope/response vectors deferred (not yet exercised)");
+    // Pin coverage: every vector is now exercised (no silent skip, no
+    // deferral). 76 total = 67 value + 3 envelope + 6 response.
+    assert_eq!(deferred, 0, "no vectors should be deferred now; saw {deferred}");
+    assert_eq!(total, 76, "expected 76 exercised vectors, saw {total}");
+    assert!(failures.is_empty(), "{} of {} vectors failed:\n{}", failures.len(), total, failures.join("\n"));
+    eprintln!("conformance: all {total} vectors passed (value + envelope + response)");
 }

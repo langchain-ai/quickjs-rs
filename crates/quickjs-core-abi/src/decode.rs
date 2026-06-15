@@ -9,7 +9,9 @@ use crate::value::{is_nan_bits, CANONICAL_NAN_BITS};
 use crate::{limits, ErrorRecord, Handle, Reason, Value};
 
 /// A bounds-checked, overflow-safe cursor over an untrusted byte slice.
-struct Cursor<'a> {
+/// Crate-visible so the envelope/response codec can decode an embedded value
+/// payload through the same hardened primitives.
+pub(crate) struct Cursor<'a> {
     buf: &'a [u8],
     pos: usize,
     /// Cap a single length-prefixed field is validated against (the total
@@ -18,11 +20,11 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(buf: &'a [u8], max_bytes: usize) -> Self {
+    pub(crate) fn new(buf: &'a [u8], max_bytes: usize) -> Self {
         Cursor { buf, pos: 0, max_bytes }
     }
 
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }
 
@@ -32,7 +34,7 @@ impl<'a> Cursor<'a> {
     /// `LengthExceedsBuffer` / `SizeExceeded` reasons belong only to
     /// length-prefixed reads (see `take_len_prefixed`), where a *declared*
     /// length is validated before any bytes are consumed.
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Reason> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], Reason> {
         let end = self.pos.checked_add(n).ok_or(Reason::LengthOverflow)?;
         if end > self.buf.len() {
             return Err(Reason::Truncated);
@@ -46,9 +48,14 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
 
-    fn take_u32(&mut self) -> Result<u32, Reason> {
+    pub(crate) fn take_u32(&mut self) -> Result<u32, Reason> {
         let b = self.take(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub(crate) fn take_u64(&mut self) -> Result<u64, Reason> {
+        let b = self.take(8)?;
+        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
     }
 
     /// Read a `u32` length and then that many bytes, treating the length as
@@ -82,6 +89,12 @@ pub fn decode_value(buf: &[u8]) -> Result<Value, Reason> {
         return Err(Reason::TrailingBytes);
     }
     Ok(v)
+}
+
+/// Decode one value from a cursor (depth 0), for embedded payloads
+/// (envelope / response). The caller owns trailing-bytes policy.
+pub(crate) fn decode_value_from(cur: &mut Cursor) -> Result<Value, Reason> {
+    decode_one(cur, 0)
 }
 
 fn decode_one(cur: &mut Cursor, depth: usize) -> Result<Value, Reason> {

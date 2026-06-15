@@ -6,30 +6,36 @@
 //! rquickjs, no wasm — so the guest, every host adapter, and the conformance
 //! tests can share one definition of "what the bytes mean."
 //!
-//! **V1 scope: the value-level codec.** `encode_value`/`decode_value` cover
-//! the 67 value-kind conformance vectors, validated by
-//! `tests/conformance.rs`. The envelope and `AbiResponse` codec layers are
-//! not yet implemented — the 9 envelope/response conformance vectors are
-//! counted-and-deferred by the runner, not exercised. Some types here ship
-//! ahead of their codec layer for that reason and currently have no producer:
-//! `Status::from_u32`, `OkShape`, and the envelope/response reason codes
-//! (`ReservedFlagSet`, `UnknownStatus`, `UnknownResponseTag`). They land with
-//! the envelope/response layers.
+//! **Scope: the full wire codec.** `encode_value`/`decode_value` for values,
+//! `encode_envelope`/`decode_envelope` for request frames, and
+//! `decode_response`/`encode_descriptor` for the `AbiResponse` frame — all
+//! validated against every one of the 76 conformance vectors (value +
+//! envelope + response) by `tests/conformance.rs`, nothing deferred.
 //!
 //! Built up in layers (see git history): types → value decode → value encode
-//! → conformance runner → (next) envelope/response codec.
+//! → conformance runner → envelope/response framing + ABI version.
 
 mod decode;
 mod encode;
+mod frame;
 mod reason;
 mod status;
 mod value;
 
 pub use decode::decode_value;
 pub use encode::encode_value;
+pub use frame::{
+    decode_envelope, decode_response, encode_descriptor, encode_envelope,
+    invalid_request_descriptor, DecodedResponse, Envelope,
+};
 pub use reason::Reason;
 pub use status::{AbiResponse, OkShape, Status};
 pub use value::{is_nan_bits, ErrorRecord, Handle, Value, CANONICAL_NAN_BITS};
+
+/// The wire ABI version. Both the guest's `qrs_abi_version` export and every
+/// host check this; a mismatch fails fast (`AbiMismatch`) — no best-effort
+/// cross-version parsing (spec → Versioning rule).
+pub const ABI_VERSION: u32 = 1;
 
 /// Caps enforced by the codec, mirroring the spec's Limits table.
 pub mod limits {
