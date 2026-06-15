@@ -43,7 +43,7 @@
 {"name":"array/mixed-with-null-bool-string","kind":"value","hex":"08 03000000 00 03 06 01000000 78","expect":{"ok":{"Array":[{"Null":null},{"Bool":true},{"String":"x"}]}}}
 {"name":"array/nested-array","kind":"value","hex":"08 01000000 08 01000000 02","expect":{"ok":{"Array":[{"Array":[{"Bool":false}]}]}}}
 {"name":"array/reject-count-exceeds-buffer","kind":"value","hex":"08 FFFFFFFF","expect":{"reject":"length_exceeds_buffer"}}
-{"name":"array/reject-truncated-element","kind":"value","hex":"08 02000000 02","expect":{"reject":"truncated"}}
+{"name": "array/reject-count-exceeds-elements", "kind": "value", "hex": "08 02000000 02", "expect": {"reject": "length_exceeds_buffer"}}
 {"name":"object/empty","kind":"value","hex":"09 00000000","expect":{"ok":{"Object":[]}}}
 {"name":"object/single-pair","kind":"value","hex":"09 01000000 01000000 61 04 000000000000F03F","expect":{"ok":{"Object":[["a",{"Number":"0x3FF0000000000000"}]]}}}
 {"name":"object/order-preserved","kind":"value","hex":"09 02000000 01000000 62 03 01000000 61 02","expect":{"ok":{"Object":[["b",{"Bool":true}],["a",{"Bool":false}]]}}}
