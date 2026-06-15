@@ -144,16 +144,21 @@ fn decode_one(cur: &mut Cursor, depth: usize) -> Result<Value, Reason> {
                 return Err(Reason::LengthExceedsBuffer);
             }
             // Same: no pre-reservation from the untrusted count.
+            // Duplicate detection via a HashSet — O(1) per key, not the O(n^2)
+            // of a linear scan over `pairs` (a within-cap object can hold many
+            // keys; the quadratic scan was a CPU amplification sibling to the
+            // allocation one). Set size is bounded by total key bytes ~= input.
             let mut pairs: Vec<(String, Value)> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for _ in 0..count {
                 // Key is a String BODY (len + utf8), no value tag.
                 let kb = cur.take_len_prefixed()?;
-                let key = std::str::from_utf8(kb).map_err(|_| Reason::InvalidUtf8)?;
-                if pairs.iter().any(|(k, _)| k == key) {
+                let key = std::str::from_utf8(kb).map_err(|_| Reason::InvalidUtf8)?.to_owned();
+                if !seen.insert(key.clone()) {
                     return Err(Reason::DuplicateObjectKey);
                 }
                 let val = decode_one(cur, depth + 1)?;
-                pairs.push((key.to_owned(), val));
+                pairs.push((key, val));
             }
             Ok(Value::Object(pairs))
         }
@@ -229,5 +234,18 @@ mod tests {
         let buf = [0x08, 0x03, 0x00, 0x00, 0x00, 0x00]; // count 3, one Null
         // count(3) > remaining(1) -> LengthExceedsBuffer before any decode.
         assert_eq!(decode_value(&buf), Err(Reason::LengthExceedsBuffer));
+    }
+
+    /// Duplicate-key detection still works after switching the linear scan to
+    /// a HashSet (the O(n^2) -> O(n) fix). Object count=2, key "a" twice.
+    #[test]
+    fn object_duplicate_key_still_rejected() {
+        // 09 | count 2 | (len1 "a") 02 | (len1 "a") 03
+        let buf = [
+            0x09, 0x02, 0x00, 0x00, 0x00, // Object, count 2
+            0x01, 0x00, 0x00, 0x00, b'a', 0x02, // "a": false
+            0x01, 0x00, 0x00, 0x00, b'a', 0x03, // "a": true (dup)
+        ];
+        assert_eq!(decode_value(&buf), Err(Reason::DuplicateObjectKey));
     }
 }
