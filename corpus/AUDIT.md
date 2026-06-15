@@ -85,11 +85,11 @@ for the same value?"
 
 | ID | Row | Finding | Status |
 |----|-----|---------|--------|
-| S3.1 | **Comparison semantics undefined** | The spec never says whether `output == expect` is *textual* JSON equality or *structural* (parse both, compare as values). It MUST be structural — else String escaping (`é` vs literal, `/` escaping) and JSON-object key order (Handle/Error) cause false failures. Foundational; subsumes several row nits. | 🔴 |
-| S3.2 | Number / Bytes hex format | The hex string's own canonical form is unspecified: case (`0x3FF` vs `0x3ff`), `0x` prefix mandatory?, zero-padded to exactly 16 (Number)/2N (Bytes) digits? Vectors use uppercase/`0x`/fixed-width but the spec doesn't require it. Under structural compare these are compared as *string values*, so case matters → must pin. (Bytes says "uppercase, no separators"; Number says neither.) | 🔴 |
-| S3.3 | String | Must be compared structurally (JSON escaping is non-canonical: ` ` forced for NUL, optional `/` escaping, `\uXXXX` case). Covered once S3.1 is stated. | 🟡 |
-| S3.4 | Object pair-array | Comparison must be **order-sensitive list equality** (we assert key order via `object/order-preserved`), not set equality. State it. | 🟡 |
-| S3.5 | Handle / Error JSON objects | Three-key / three-key JSON objects — under structural compare, JSON-object key order is irrelevant (good); under textual it would matter. Resolved by S3.1=structural. | 🟡 |
+| S3.1 | Comparison semantics | **Resolved 2026-06-15:** added "Comparison semantics (structural)" subsection — parse both as JSON, compare as values, never byte-compare text. Three sub-rules pinned: JSON arrays order-sensitive (load-bearing for Array element + Object pair-array key order; with a "don't simplify Object to a JSON map" warning), JSON objects order-insensitive (wrapper, Handle/Error maps), string values exact-codepoint (which mandates S3.2). | 🟢 |
+| S3.2 | Number / Bytes hex format | **Resolved 2026-06-15:** pinned canonical hex — Number: `0x` + uppercase + exactly 16 big-endian digits; Bytes: uppercase, no prefix, 2 digits/byte, no separators. Verified all existing Number/Bytes vectors already conform. Coupled to S3.1 (structural compare treats hex as case-sensitive strings). | 🟢 |
+| S3.3 | String | **Resolved (subsumed by S3.1):** structural comparison neutralizes JSON escaping differences. | 🟢 |
+| S3.4 | Object pair-array | **Resolved (S3.1):** JSON arrays compare order-sensitively, so pair-array key order is semantic (as `object/order-preserved` requires). | 🟢 |
+| S3.5 | Handle / Error JSON objects | **Resolved (S3.1):** JSON objects compare order-insensitively, so field order is irrelevant. | 🟢 |
 | S3.6 | Null/Undefined/Bool/Array/BigInt | One unambiguous form each. | ✓ |
 
 ### Section 3 theme

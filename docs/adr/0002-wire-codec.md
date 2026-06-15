@@ -207,14 +207,45 @@ each adapter's own suite, never by the shared corpus.
 Rejections assert as `{"reject": "<reason_code>"}` against the
 enumerated rejection-reason taxonomy (see Conformance obligations).
 
+### Comparison semantics (structural)
+
+A conformance check compares the decoder's output to `expect`
+**structurally** — parse both as JSON values and compare the parsed
+values; **never** byte-compare the JSON text. Textual comparison would
+produce false failures on JSON string escaping (`é` vs `é`, optional
+`/` escaping, `\uXXXX` case) and on JSON-object key order, none of which
+are semantic. Structural comparison follows JSON's own value model:
+
+- **JSON arrays compare order-sensitively.** This is load-bearing and
+  intentional: it makes `Array` element order *and* `Object` pair-array
+  key order semantic — which is exactly why `Object` is a pair-array, not
+  a JSON object. (Do not "simplify" `Object` to a JSON map: that would
+  silently make key order untestable.)
+- **JSON objects compare order-insensitively.** The `{"Variant": …}`
+  wrapper and the Handle/Error field maps carry no order semantics, so
+  field order is irrelevant.
+- **String values compare by exact Unicode codepoints.** Structural
+  comparison does *not* normalize string case or form — so the hex
+  strings (`Number`, `Bytes`) are compared as case-sensitive string
+  values. This is why their canonical form must be pinned (next item):
+  `"0x3ff…"` ≠ `"0x3FF…"` under structural compare.
+
 Decisions this representation forces (recorded here so they are not
 rediscovered while writing vectors):
 
 - **f64 is hex bits, not a JSON number.** A JSON number cannot represent
   `NaN`/`Inf`/`-0` and risks precision/rounding drift across three JSON
   libraries — fatal for an equality oracle. Hex bits are exact and
-  unambiguous. *(Annotate if you'd rather a decimal form with explicit
-  `NaN`/`Inf`/`-0` sentinels; I judge hex strictly safer.)*
+  unambiguous.
+- **Hex string canonical form (Number and Bytes).** Because structural
+  comparison treats these as case-sensitive string values, their form is
+  pinned exactly, and a non-conforming form is a decoder bug:
+  - `Number`: `"0x"` prefix, **uppercase** A–F, exactly **16** hex digits
+    (the full 8-byte f64, zero-padded), written **big-endian**
+    (most-significant byte first) for readability regardless of the
+    little-endian wire order. Example: 1.0 → `"0x3FF0000000000000"`.
+  - `Bytes`: **uppercase** A–F, **no** `0x` prefix, **no** separators,
+    exactly **2 digits per byte** (zero-padded), empty = `""`.
 - **Object is a pair-array, not a JSON object.** This preserves order
   and lets the corpus express duplicate-key inputs (a JSON object would
   collapse them, hiding the very case we need to test).
