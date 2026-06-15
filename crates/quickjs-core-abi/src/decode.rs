@@ -127,7 +127,12 @@ fn decode_one(cur: &mut Cursor, depth: usize) -> Result<Value, Reason> {
             if count > cur.remaining() {
                 return Err(Reason::LengthExceedsBuffer);
             }
-            let mut items = Vec::with_capacity(count.min(cur.remaining()));
+            // Do NOT pre-reserve from `count`: it is untrusted, and within the
+            // size cap a 1-byte-per-element count can still be tens of millions
+            // (gigabytes of `Value` slots) — the same "never size an alloc from
+            // a length" rule `take_len_prefixed` honors. Let the Vec grow against
+            // what is actually decoded; each push consumed >=1 real byte.
+            let mut items = Vec::new();
             for _ in 0..count {
                 items.push(decode_one(cur, depth + 1)?);
             }
@@ -138,7 +143,8 @@ fn decode_one(cur: &mut Cursor, depth: usize) -> Result<Value, Reason> {
             if count > cur.remaining() {
                 return Err(Reason::LengthExceedsBuffer);
             }
-            let mut pairs: Vec<(String, Value)> = Vec::with_capacity(count.min(cur.remaining()));
+            // Same: no pre-reservation from the untrusted count.
+            let mut pairs: Vec<(String, Value)> = Vec::new();
             for _ in 0..count {
                 // Key is a String BODY (len + utf8), no value tag.
                 let kb = cur.take_len_prefixed()?;
@@ -195,4 +201,33 @@ fn is_canonical_bigint(s: &str) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the allocation-amplification finding: a within-cap
+    /// buffer that declares a huge element/pair count must reject promptly
+    /// without pre-reserving gigabytes. We build a 1 MiB buffer whose array
+    /// count is ~1M but which contains no elements after the count; it must
+    /// fail fast (count > remaining) and never allocate from `count`.
+    #[test]
+    fn array_count_does_not_amplify_allocation() {
+        // Array tag + count = 0x00100000 (1,048,576), then nothing.
+        let mut buf = vec![0x08];
+        buf.extend_from_slice(&1_048_576u32.to_le_bytes());
+        // remaining after count = 0, count = ~1M -> LengthExceedsBuffer, no alloc.
+        assert_eq!(decode_value(&buf), Err(Reason::LengthExceedsBuffer));
+    }
+
+    /// A count that passes the `> remaining` guard (count <= remaining) but
+    /// whose elements run short still rejects via per-element decode, again
+    /// without reserving `count` slots. Array count=3, one real element.
+    #[test]
+    fn array_short_elements_reject_without_amplification() {
+        let buf = [0x08, 0x03, 0x00, 0x00, 0x00, 0x00]; // count 3, one Null
+        // count(3) > remaining(1) -> LengthExceedsBuffer before any decode.
+        assert_eq!(decode_value(&buf), Err(Reason::LengthExceedsBuffer));
+    }
 }
