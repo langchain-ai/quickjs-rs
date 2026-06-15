@@ -1,10 +1,10 @@
-# Codec Conformance Corpus
+# ABI Codec Conformance Suite
 
 `codec_vectors.jsonl` is the **single standard test set every host decoder
 must pass.** One file, language-neutral. Rust, Python, and TypeScript host
 codecs each run their own decoder against every vector and must agree with
 it. It is the executable form of the wire codec spec
-(`../docs/adr/0002-wire-codec.md`) and the thing that holds three
+(`../../docs/adr/0002-wire-codec.md`) and the thing that holds three
 independently-written decoders to one behavior.
 
 ## The contract
@@ -114,4 +114,7 @@ generated from a matrix and is complete only when:
    duplicated; envelope round-trip incl. u64 `request_id`; `AbiResponse`
    `value` / `value_with_handles` / error shapes.
 
-`coverage.md` (future) will track the matrix cells against vector names.
+The conformance runner (the Rust `quickjs-core-abi` reference codec, and
+later the Python/TS harnesses) is the mechanical coverage check: it loads
+this file, runs decode + canonical-encode round-trip, and asserts every
+vector — including that every taxonomy reason code is exercised.
