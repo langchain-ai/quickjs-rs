@@ -10,7 +10,7 @@ Run: python spikes/guest_eval_run.py <path-to quickjs_core.wasm>
 import struct
 import sys
 
-from wasmtime import Engine, Linker, Module, Store, WasiConfig
+from wasmtime import Engine, Func, FuncType, Linker, Module, Store, ValType, WasiConfig
 
 
 def u32(n):
@@ -56,6 +56,11 @@ def main():
     store.set_wasi(wasi)
     linker = Linker(engine)
     linker.define_wasi()
+    # host_interrupt: never interrupt in this happy-path harness.
+    linker.define(
+        store, "env", "host_interrupt",
+        Func(store, FuncType([], [ValType.i32()]), lambda *a: 0),
+    )
     inst = linker.instantiate(store, module)
     ex = inst.exports(store)
     mem = ex["memory"]

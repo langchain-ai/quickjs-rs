@@ -38,6 +38,9 @@ pub(crate) fn runtime_new(memory_limit: usize) -> Option<u32> {
     if memory_limit != 0 {
         rt.set_memory_limit(memory_limit);
     }
+    // Graceful timeout channel: poll the host's interrupt flag on the
+    // interpreter's cadence. Returning true unwinds the running eval.
+    rt.set_interrupt_handler(Some(Box::new(|| crate::host::poll_interrupt())));
     let id = next_id();
     RUNTIMES.with(|m| m.borrow_mut().insert(id, RuntimeEntry { rt }));
     Some(id)

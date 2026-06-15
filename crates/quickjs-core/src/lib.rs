@@ -11,6 +11,7 @@
 //! the thing on the trusted side of a copied-bytes boundary, but a panic that
 //! crossed it would poison the instance.
 
+mod host;
 mod marshal;
 mod mem;
 mod registry;
@@ -139,6 +140,7 @@ pub extern "C" fn qrs_eval(context_id: u32, req_ptr: u32, req_len: u32, out: u32
             _ => return invalid(Reason::UnknownValueTag),
         };
 
+        host::clear_interrupted();
         let result = registry::with_context(context_id, |ctx| {
             ctx.with(|c| {
                 match c.eval::<rquickjs::Value, _>(source.as_bytes()) {
@@ -146,6 +148,11 @@ pub extern "C" fn qrs_eval(context_id: u32, req_ptr: u32, req_len: u32, out: u32
                         Ok(av) => EvalOutcome::Value(av),
                         Err(_) => EvalOutcome::Value(Value::Undefined),
                     },
+                    // rquickjs surfaces both interrupts and JS throws as
+                    // Error::Exception; our handler's flag distinguishes the
+                    // host's graceful timeout (instance survives) from a real
+                    // thrown error.
+                    Err(_) if host::was_interrupted() => EvalOutcome::Timeout,
                     Err(e) => EvalOutcome::Threw(marshal::js_error_to_abi(&c, e)),
                 }
             })
@@ -161,6 +168,7 @@ pub extern "C" fn qrs_eval(context_id: u32, req_ptr: u32, req_len: u32, out: u32
                 Ok(bytes) => guest_error_response(&bytes),
                 Err(_) => bare(Status::ResourceExhausted),
             },
+            Some(EvalOutcome::Timeout) => bare(Status::Timeout),
         }
     });
 }
@@ -168,6 +176,7 @@ pub extern "C" fn qrs_eval(context_id: u32, req_ptr: u32, req_len: u32, out: u32
 enum EvalOutcome {
     Value(Value),
     Threw(Value),
+    Timeout,
 }
 
 // --- helpers ----------------------------------------------------------------
