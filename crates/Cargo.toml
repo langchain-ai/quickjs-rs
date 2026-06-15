@@ -8,3 +8,10 @@
 [workspace]
 resolver = "2"
 members = ["quickjs-core", "quickjs-core-abi"]
+
+# Size-optimized release for the wasm guest artifact (quickjs-core).
+# Workspace-level because cargo ignores per-package profiles in a workspace.
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

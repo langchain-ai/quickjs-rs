@@ -10,4 +10,20 @@
 //! Built up in layers (see git history): types → decode → encode →
 //! debug-JSON → conformance runner.
 
-// Layers land in subsequent commits.
+mod reason;
+mod status;
+mod value;
+
+pub use reason::Reason;
+pub use status::{AbiResponse, OkShape, Status};
+pub use value::{is_nan_bits, ErrorRecord, Handle, Value, CANONICAL_NAN_BITS};
+
+/// Caps enforced by the codec, mirroring the spec's Limits table.
+pub mod limits {
+    /// Max nesting depth (matches the native `MAX_MARSHAL_DEPTH`).
+    pub const MAX_DEPTH: usize = 128;
+    /// Max total payload for a response.
+    pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+    /// Max total payload for a host-call argument.
+    pub const MAX_HOST_CALL_ARG_BYTES: usize = 8 * 1024 * 1024;
+}

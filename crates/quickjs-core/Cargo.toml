@@ -19,8 +19,7 @@ rquickjs = { version = "0.12", default-features = false }
 # stack-limit fix end-to-end (see FEASIBILITY.md, Stack-check verdict).
 # Reverted after the verdict; the real patch-delivery mechanism is a
 # Phase 1 decision.
-
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true
+#
+# Note: the size-optimized release profile (opt-level=z, lto, strip) for the
+# wasm artifact lives at the workspace root (crates/Cargo.toml) — cargo
+# ignores per-package profiles in a workspace.
