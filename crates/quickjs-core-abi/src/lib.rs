@@ -1,14 +1,23 @@
 //! `quickjs-core-abi` — the shared ABI value model and wire codec for the
 //! WASM execution plane.
 //!
-//! This crate is the **reference codec**: the spec
-//! (`docs/adr/0002-wire-codec.md`) made executable, validated against the
-//! conformance suite (`conformance/abi/codec_vectors.jsonl`). It is pure host
-//! Rust — no rquickjs, no wasm — so the guest, every host adapter, and the
-//! conformance tests can share one definition of "what the bytes mean."
+//! This crate is the **reference codec** for the wire format the spec
+//! (`docs/adr/0002-wire-codec.md`) defines. It is pure host Rust — no
+//! rquickjs, no wasm — so the guest, every host adapter, and the conformance
+//! tests can share one definition of "what the bytes mean."
 //!
-//! Built up in layers (see git history): types → decode → encode →
-//! debug-JSON → conformance runner.
+//! **V1 scope: the value-level codec.** `encode_value`/`decode_value` cover
+//! the 67 value-kind conformance vectors, validated by
+//! `tests/conformance.rs`. The envelope and `AbiResponse` codec layers are
+//! not yet implemented — the 9 envelope/response conformance vectors are
+//! counted-and-deferred by the runner, not exercised. Some types here ship
+//! ahead of their codec layer for that reason and currently have no producer:
+//! `Status::from_u32`, `OkShape`, and the envelope/response reason codes
+//! (`ReservedFlagSet`, `UnknownStatus`, `UnknownResponseTag`). They land with
+//! the envelope/response layers.
+//!
+//! Built up in layers (see git history): types → value decode → value encode
+//! → conformance runner → (next) envelope/response codec.
 
 mod decode;
 mod encode;

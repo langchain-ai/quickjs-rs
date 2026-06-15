@@ -79,6 +79,7 @@ fn value_from_json(j: &J) -> Value {
 fn value_vectors_conform() {
     let text = std::fs::read_to_string(corpus_path()).expect("read vectors");
     let mut total = 0;
+    let mut deferred = 0; // non-value vectors not yet exercised (envelope/response)
     let mut failures = Vec::new();
 
     for line in text.lines() {
@@ -92,9 +93,11 @@ fn value_vectors_conform() {
         let mut de = serde_json::Deserializer::from_str(line);
         de.disable_recursion_limit();
         let v: J = J::deserialize(&mut de).expect("parse vector line");
-        // Only the `value`-kind vectors decode through decode_value here;
-        // envelope/response kinds are exercised by their own layers later.
+        // V1 covers value-kind vectors; envelope/response kinds are deferred
+        // to their own codec layers. Count them explicitly rather than
+        // silently skipping, so a dropped/mis-kinded vector can't pass unseen.
         if v["kind"].as_str() != Some("value") {
+            deferred += 1;
             continue;
         }
         total += 1;
@@ -139,7 +142,11 @@ fn value_vectors_conform() {
         }
     }
 
-    assert!(total > 0, "no value vectors found at {:?}", corpus_path());
+    // Pin the coverage explicitly: if the suite gains/loses value vectors,
+    // this count must be updated deliberately — a silent skip can't inflate
+    // or hide coverage. (67 value, 9 deferred envelope/response = 76 total.)
+    assert_eq!(total, 67, "expected 67 value vectors, saw {total}");
+    assert_eq!(deferred, 9, "expected 9 deferred (envelope/response) vectors, saw {deferred}");
     assert!(failures.is_empty(), "{} of {} value vectors failed:\n{}", failures.len(), total, failures.join("\n"));
-    eprintln!("conformance: {total} value vectors passed");
+    eprintln!("conformance: {total} value vectors passed; {deferred} envelope/response vectors deferred (not yet exercised)");
 }
