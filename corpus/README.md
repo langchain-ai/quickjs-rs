@@ -23,10 +23,13 @@ independently-written decoders to one behavior.
   (spec → Debug-JSON representation), not in native types. A host's test
   harness decodes the bytes into that host-neutral tagged form (and
   encodes from it) and compares to `expect`. This is what lets one file
-  serve all three languages. Comparison is **structural** (parse both
-  sides, compare as values) — see the spec's debug-JSON rules; this
-  matters for string escaping and JSON object key order. *(The structural-
-  comparison rule itself is being pinned in the spec — audit S3.1.)*
+  serve all three languages. Comparison is **structural value equality**
+  (equal variant, recursively equal contents — not a textual compare of
+  any serialized form): ordered contents (Array elements, Object keys)
+  order-sensitive, field sets order-insensitive, strings exact-codepoint.
+  A harness may compare via the debug-JSON serialization or via native
+  decoded values; JSON is the corpus's notation, not the comparison
+  mechanism. See the spec's "Comparison semantics" section.
 - **Native-type mapping is out of scope.** Whether a decoded `{"String":
   "hi"}` becomes a Python `str`, a JS `string`, or a Rust `String`, and
   whether an `{"Object": ...}` becomes a dict or a wrapper, is each

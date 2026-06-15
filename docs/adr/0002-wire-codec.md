@@ -209,26 +209,30 @@ enumerated rejection-reason taxonomy (see Conformance obligations).
 
 ### Comparison semantics (structural)
 
-A conformance check compares the decoder's output to `expect`
-**structurally** — parse both as JSON values and compare the parsed
-values; **never** byte-compare the JSON text. Textual comparison would
-produce false failures on JSON string escaping (`é` vs `é`, optional
-`/` escaping, `\uXXXX` case) and on JSON-object key order, none of which
-are semantic. Structural comparison follows JSON's own value model:
+This concerns conformance *testing* only — JSON is not part of the wire
+protocol; it is just how the corpus writes down expected values. A
+conformance check compares the decoder's output to `expect` as
+**abstract values** (the value model), structurally: equal variant, and
+recursively equal contents — **never** a textual comparison of any
+serialized form. The substantive rules:
 
-- **JSON arrays compare order-sensitively.** This is load-bearing and
-  intentional: it makes `Array` element order *and* `Object` pair-array
-  key order semantic — which is exactly why `Object` is a pair-array, not
-  a JSON object. (Do not "simplify" `Object` to a JSON map: that would
-  silently make key order untestable.)
-- **JSON objects compare order-insensitively.** The `{"Variant": …}`
-  wrapper and the Handle/Error field maps carry no order semantics, so
-  field order is irrelevant.
-- **String values compare by exact Unicode codepoints.** Structural
-  comparison does *not* normalize string case or form — so the hex
-  strings (`Number`, `Bytes`) are compared as case-sensitive string
-  values. This is why their canonical form must be pinned (next item):
-  `"0x3ff…"` ≠ `"0x3FF…"` under structural compare.
+- **Ordered contents compare order-sensitively.** `Array` element order
+  and `Object` key order are both semantic. (This is why `Object` is a
+  list of pairs in the model, not a map — do not collapse it to a map, or
+  key order becomes untestable.)
+- **Field sets compare order-insensitively.** The variant wrapper and the
+  Handle/Error field sets carry no order, so field order is irrelevant.
+- **Strings compare by exact Unicode codepoints** — no case or form
+  normalization. So the hex *strings* (`Number`, `Bytes`) compare
+  case-sensitively, which is why their canonical form must be pinned
+  (next item): `0x3ff…` ≠ `0x3FF…`.
+
+Note for harness authors: if a harness happens to use the corpus's
+debug-JSON serialization as its comparison medium, these rules fall out
+of JSON's own semantics (JSON arrays ordered, JSON objects unordered,
+JSON strings exact) — but a harness comparing native decoded values
+directly (e.g. Rust enums) satisfies the same rules without any JSON. The
+requirement is structural value equality; JSON is incidental.
 
 Decisions this representation forces (recorded here so they are not
 rediscovered while writing vectors):
