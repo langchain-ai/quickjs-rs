@@ -13,6 +13,9 @@ crate-type = ["cdylib"]
 # no pre-generated bindings for wasm32-wasip1 the build will fail loudly,
 # which is itself a verdict (we then add "bindgen" and record the cost).
 rquickjs = { version = "0.12", default-features = false }
+# The shared wire codec + value model — one definition of "what the bytes
+# mean" across guest and hosts.
+quickjs-core-abi = { path = "../quickjs-core-abi" }
 
 # Note: the stack-check spike temporarily added a [patch.crates-io]
 # redirect to a vendored+patched rquickjs-sys to prove the wasi
