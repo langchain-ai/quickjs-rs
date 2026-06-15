@@ -1,0 +1,10 @@
+# Workspace for the WASM execution-plane crates. Deliberately separate from
+# the repo-root `quickjs-rs-python` PyO3 crate's build graph:
+#   - quickjs-core-abi : pure host Rust — shared ABI structs + wire codec,
+#                        the reference codec validated against
+#                        conformance/abi/codec_vectors.jsonl. No wasm/rquickjs.
+#   - quickjs-core     : the wasm guest (rquickjs, wasm32-wasip1). Depends on
+#                        quickjs-core-abi.
+[workspace]
+resolver = "2"
+members = ["quickjs-core", "quickjs-core-abi"]

@@ -1,0 +1,18 @@
+[package]
+name = "quickjs-core-abi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Pure host Rust: the shared ABI value model + wire codec, and the reference
+# codec implementation. No rquickjs, no wasm dependency — builds and tests on
+# the host in milliseconds. The wasm guest (quickjs-core) depends on this.
+[lib]
+
+[dependencies]
+
+[dev-dependencies]
+# Test-only: the conformance runner parses conformance/abi/codec_vectors.jsonl.
+# Never ships in any artifact. (serde_json is among the most-vetted Rust
+# crates; Apache-2.0/MIT, maintained by dtolnay.)
+serde_json = "1"

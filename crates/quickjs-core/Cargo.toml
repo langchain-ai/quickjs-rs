@@ -1,7 +1,3 @@
-# Standalone workspace: keeps this feasibility spike independent of the
-# root native PyO3 crate's build graph and target dir.
-[workspace]
-
 [package]
 name = "quickjs-core"
 version = "0.0.0"
