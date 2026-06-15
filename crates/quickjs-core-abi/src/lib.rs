@@ -11,11 +11,13 @@
 //! debug-JSON → conformance runner.
 
 mod decode;
+mod encode;
 mod reason;
 mod status;
 mod value;
 
 pub use decode::decode_value;
+pub use encode::encode_value;
 pub use reason::Reason;
 pub use status::{AbiResponse, OkShape, Status};
 pub use value::{is_nan_bits, ErrorRecord, Handle, Value, CANONICAL_NAN_BITS};

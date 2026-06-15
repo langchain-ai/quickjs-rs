@@ -7,7 +7,7 @@
 //! The debug-JSON -> Value parsing lives here (test-only), keeping the
 //! serde_json dependency out of the shipped library.
 
-use quickjs_core_abi::{decode_value, ErrorRecord, Handle, Value};
+use quickjs_core_abi::{decode_value, encode_value, ErrorRecord, Handle, Value};
 use serde::Deserialize;
 use serde_json::Value as J;
 use std::path::PathBuf;
@@ -16,6 +16,10 @@ fn corpus_path() -> PathBuf {
     // CARGO_MANIFEST_DIR = crates/quickjs-core-abi ; suite is at repo-root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../conformance/abi/codec_vectors.jsonl")
+}
+
+fn hex_upper(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect()
 }
 
 fn hex_to_bytes(h: &str) -> Vec<u8> {
@@ -105,6 +109,17 @@ fn value_vectors_conform() {
                     let want = value_from_json(ok);
                     if val != want {
                         failures.push(format!("{name}: decoded {val:?}, expected {want:?}"));
+                    } else {
+                        // Bidirectional rule: OK vectors bind canonical encode
+                        // too — encode(value) must reproduce the exact bytes.
+                        let reencoded = encode_value(&want);
+                        if reencoded != bytes {
+                            failures.push(format!(
+                                "{name}: encode mismatch\n  got  {}\n  want {}",
+                                hex_upper(&reencoded),
+                                hex_upper(&bytes)
+                            ));
+                        }
                     }
                 }
                 Err(r) => failures.push(format!("{name}: expected ok, got reject {}", r.as_str())),
