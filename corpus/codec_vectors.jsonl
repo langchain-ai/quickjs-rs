@@ -72,3 +72,5 @@
 {"name": "response/reject-unknown-tag-for-status", "kind": "response", "descriptor": "00000000090000001000000000000000", "payload": "", "expect": {"reject": "unknown_response_tag"}}
 {"name": "response/reject-ptr-len-overflow", "kind": "response", "descriptor": "0000000000000000F0FFFFFFFFFFFFFF", "payload": "", "expect": {"reject": "length_overflow"}}
 {"name":"string/reject-size-exceeded","kind":"value","hex":"06 00000003 00","expect":{"reject":"size_exceeded"}}
+{"name":"object/null-as-value","kind":"value","hex":"09 01000000 01000000 6E 00","expect":{"ok":{"Object":[["n",{"Null":null}]]}}}
+{"name":"array/bodyless-elems","kind":"value","hex":"08 02000000 01 00","expect":{"ok":{"Array":[{"Undefined":null},{"Null":null}]}}}

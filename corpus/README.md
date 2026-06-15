@@ -88,8 +88,18 @@ The harness converts; the `hex` field is always little-endian wire bytes.
 The corpus claims exhaustiveness by construction, not by taste. It is
 generated from a matrix and is complete only when:
 
-1. **Every value variant** appears as: top-level, array element, object
-   value, and (where only String is legal) object key.
+1. **Every value variant** appears at least **top-level**. Container
+   positions (array element, object value) are exercised with a
+   representative mix rather than exhaustively per variant — the format
+   is uniformly recursive (a container holds "any encoded value" by the
+   same code path regardless of variant), so placing all variants in all
+   positions would be ~40 near-identical cells. The one genuinely
+   distinct nested case — a **body-less variant** (Null/Undefined, which
+   have no body, unlike bodied variants like Handle) decoded in a nested
+   position — is covered explicitly (`object/null-as-value`,
+   `array/bodyless-elems`); broader nested coverage is left to the
+   differential fuzzer, which hammers nested positions far harder than a
+   hand matrix. String-as-object-key is covered (every object vector).
 2. **Every per-type boundary** has a vector: string empty/1-byte/multibyte
    UTF-8/embedded NUL; f64 ±0, ±Inf, canonical NaN, subnormal, normal
    extremes; BigInt 0 / negative / beyond u64 / huge; empty containers;
