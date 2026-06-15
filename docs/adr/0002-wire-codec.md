@@ -28,8 +28,10 @@ them honest.
 
 1. **One canonical encoding per value.** There is exactly one valid byte
    sequence for any value. Decoders MUST reject non-canonical input
-   (e.g. a length that could have been shorter, trailing bytes, an
-   unknown tag) with `invalid_request` — not best-effort parse it.
+   (e.g. a non-canonical NaN bit pattern, a non-canonical BigInt string,
+   trailing bytes, an unknown tag) rather than best-effort parse it.
+   (Lengths are fixed-width u32 per rule 2, so there is no
+   shorter-length non-canonical form to worry about.)
 2. **Little-endian**, fixed-width integers (no varints — varints add a
    second canonicalization concern; fixed width is simpler to validate).
 3. **Length-prefixed**, never delimited. Every variable-length field is
