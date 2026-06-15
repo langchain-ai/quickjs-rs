@@ -286,13 +286,16 @@ are per-`kind`). Defined values today:
 | `ok` | 1 | `value_with_handles` — a value tree carrying handle leaves the host owns and must dispose (the disposal signal, modeled as a shape, not a flag bit) |
 | `guest_error_response` | 0 | `GuestErrorRecord` |
 | `guest_error_response` | 1 | `HostDiagnosticRecord` *(reserved slot; defined when diagnostics land)* |
-| no-payload statuses (`invalid_*`, `timeout`, `stack_overflow`, …) | 0 | empty; `len = 0` |
+| `invalid_request` | *reason code* | `tag` carries the decode-failure **reason** (the taxonomy enum: `unknown_value_tag`, `non_canonical_nan`, …) for a request the guest could not decode. The reason is mutually exclusive (a decode fails for one reason), so it is an enum in `tag`, not a `flags` bit. `len = 0`; optional failure *detail* (e.g. byte offset) may ride the payload later under a distinct shape. |
+| other no-payload statuses (`invalid_runtime/context/handle`, `timeout`, `stack_overflow`, `deadlock`, …) | 0 | empty; `len = 0` |
 
 Rules:
 
-- An unknown `tag` for the given `status` is rejected (`invalid_request`
-  / poison) — never best-effort. This canonical-form rule is what makes
-  "enum now, split later" safe.
+- An unknown `tag` for the given `status` is rejected with the
+  `unknown_response_tag` reason — never best-effort. (A host decoding a
+  response raises locally; this is not itself an `invalid_request`
+  status.) This canonical-form rule is what makes "enum now, split later"
+  safe.
 - **Enum now, split later (decided 2026-06-12).** `tag` stays a pure
   shape enum while handle-leaves is the only orthogonal response signal.
   If a *second* signal appears that must *combine* with handle-leaves
@@ -308,12 +311,41 @@ does not wrap and `ptr + len <= memory size`, fail closed on either.
 The descriptor's own 16-byte size is fixed and never guest-controlled,
 so reading it is always safe; only what it points to needs validation.
 
+## Two failure concepts (do not conflate)
+
+The format has two distinct notions of failure that the rest of this doc
+keeps separate:
+
+1. **Decode-failure reasons** — the *rejection-reason taxonomy*
+   (`unknown_value_tag`, `non_canonical_nan`, `length_overflow`, …).
+   These are raised by **whichever codec is reading bytes**, and that is
+   usually the **host** decoding guest output. A decoder that hits
+   malformed/non-canonical bytes **rejects locally** (raises in its own
+   language) — there is no round-trip and *no wire status* in that
+   direction. A reason code is a decoder-side classification, not a value
+   that travels on the wire. The conformance corpus's `{"reject":
+   <reason>}` vectors test exactly this — direction-agnostic decoder
+   behavior (same bytes → same rejection whether host or guest decodes).
+
+2. **Operation-outcome statuses** — the `AbiResponse.status` enum
+   (`ok`, `invalid_request`, `invalid_handle`, `timeout`, …). These *are*
+   wire values: the guest writes one to report how an *operation* turned
+   out.
+
+`invalid_request` is the **bridge**: it is the status the *guest* writes
+when *it* fails to decode the *host's* request. So the same taxonomy
+applies in both directions, but only the guest→host direction surfaces as
+a wire status (carrying the reason in `tag`, see AbiResponse); the
+host-decoding-guest direction is always a local raise. When you read
+"reject" in the rules above, it means "a decoder rejects, classified by a
+reason code" — not "emit the `invalid_request` status."
+
 ## Status codes
 
 ```
 0  ok
 1  guest_error_response   # JS threw; payload is an Error value
-2  invalid_request        # malformed/non-canonical wire input, bad request_id
+2  invalid_request        # guest could not decode the host's request; tag = decode-failure reason
 3  invalid_runtime
 4  invalid_context
 5  invalid_handle
@@ -349,11 +381,15 @@ best-effort cross-version parsing.
 
 ## Rejection-reason taxonomy
 
-Every decode rejection maps to one enumerated reason code, so conformance
-vectors can assert *why* a malformed input is rejected (not merely "it
-failed somehow" — which would let three decoders reject for three
-different reasons and falsely pass). Every reason code must have at least
-one corpus vector; a code with no vector means the corpus is incomplete.
+Every decode rejection maps to one enumerated reason code (a decoder-side
+classification — see Two failure concepts; not a wire status), so
+conformance vectors can assert *why* a malformed input is rejected (not
+merely "it failed somehow" — which would let three decoders reject for
+three different reasons and falsely pass). When the guest is the rejecting
+decoder, the reason also rides `AbiResponse.tag` under the
+`invalid_request` status; when the host is the rejecting decoder it raises
+locally. Every reason code must have at least one corpus vector; a code
+with no vector means the corpus is incomplete.
 
 ```
 unknown_value_tag        # tag byte not in 0x00..=0x0B
@@ -387,6 +423,15 @@ discipline as the rest of the format.
 - **Round-trip**: `decode(encode(v)) == v` for the full value model,
   including BigInt edge values, empty containers, and deep (depth-128)
   nesting.
+- **Bidirectional corpus**: every `{"ok": value}` vector binds **both**
+  directions — `decode(hex) == value` *and* `encode(value) == hex`. The
+  bytes in the corpus are *the* canonical encoding, so a conformant
+  encoder must reproduce them exactly (this is what "one canonical
+  encoding per value" buys: encode is testable by equality). Reject
+  vectors are decode-only (an invalid value cannot be encoded). The
+  encoder under test takes the *abstract* value and must emit canonical
+  bytes; the native-type → abstract-value step is host-private and out of
+  scope, same boundary as decode.
 
 ## Open questions for annotation
 

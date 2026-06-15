@@ -13,10 +13,20 @@ independently-written decoders to one behavior.
   variant. A vector a host cannot pass is a bug in that host's decoder
   (or, if all hosts fail it identically, a bug in the vector — the bytes
   are hand-derived from the spec, so the spec is the authority).
-- **Decode is asserted in the debug-JSON abstract value model** (spec →
-  Debug-JSON representation), not in native types. A host's test harness
-  decodes the bytes into that host-neutral tagged form and compares it to
-  `expect`. This is what lets one file serve all three languages.
+- **OK vectors are bidirectional.** Each `{"ok": value}` vector binds
+  both `decode(hex) == value` *and* `encode(value) == hex` — the corpus
+  bytes are *the* canonical encoding, so a conformant encoder must
+  reproduce them exactly. Reject vectors are decode-only (an invalid
+  value cannot be encoded). This gives encoder conformance for free from
+  the same file.
+- **Decode/encode is asserted in the debug-JSON abstract value model**
+  (spec → Debug-JSON representation), not in native types. A host's test
+  harness decodes the bytes into that host-neutral tagged form (and
+  encodes from it) and compares to `expect`. This is what lets one file
+  serve all three languages. Comparison is **structural** (parse both
+  sides, compare as values) — see the spec's debug-JSON rules; this
+  matters for string escaping and JSON object key order. *(The structural-
+  comparison rule itself is being pinned in the spec — audit S3.1.)*
 - **Native-type mapping is out of scope.** Whether a decoded `{"String":
   "hi"}` becomes a Python `str`, a JS `string`, or a Rust `String`, and
   whether an `{"Object": ...}` becomes a dict or a wrapper, is each
