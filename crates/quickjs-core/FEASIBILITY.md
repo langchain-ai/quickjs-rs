@@ -79,11 +79,19 @@ catchable error. Can engine-level checking be restored on wasip1?
 
 Consequence for the spec: the most agent-reachable trap path
 (unbounded recursion) **can be closed**, returning it to a catchable
-`InternalError` with a surviving context — native parity. Phase 1 should
-adopt the patch; the delivery mechanism (vendored quickjs source vs.
-build-time source rewrite in `quickjs-core-wasm-build`) is a Phase 1
-implementation choice. The spike's vendored copy was removed after the
-verdict; reproduce via the patch described above.
+`InternalError` with a surviving context — native parity.
+
+**Decision (2026-06-13): deferred upstream, not patched locally in V1.**
+The fix is a one-line change to vendored quickjs-ng C, and rquickjs-sys
+exposes no build-time hook to toggle the `#if defined(__wasi__)` branch
+(no `-D` guard exists). The only local mechanisms are vendoring a forked
+rquickjs-sys via `[patch.crates-io]` or mutating the registry cache —
+both disproportionate for a one-line change. So V1 ships **no local
+patch** and treats this as a known gap: unbounded recursion traps and
+the instance is discarded (contained by discard-on-trap, not graceful).
+The path to close it is upstream (quickjs-ng #774). The spike's vendored
+copy was removed after the verdict; reproduce via the patch described
+above.
 
 ### Upstream discovery (2026-06-13): the disable is an acknowledged gap, not a safeguard
 

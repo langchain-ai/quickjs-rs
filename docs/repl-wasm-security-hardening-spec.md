@@ -815,7 +815,7 @@ Trap recovery and reachability:
 
 - A trapped instance is never repaired in place. The adapter surfaces a trap event and makes re-instantiation cheap; session continuity, if any, is **application policy** built on the existing snapshot primitives or eval-log replay — out of scope for this spec, and adapters must not checkpoint by default.
 - What matters for this spec is **how reachable the trap path is from ordinary guest JS**, because every reachable path converts a recoverable error into instance loss:
-  - **Unbounded recursion** was the easiest path — a one-line, common bug in agent-generated code — because quickjs-ng disables its internal stack limit on `__wasi__` (see Stack). **Resolved: a spike restored engine-level checking** (patched `update_stack_limit`; catchable error at depth 1486, instance survives). Phase 1 adopts the patch, which closes this path: recursion returns to a catchable `InternalError` with a surviving context.
+  - **Unbounded recursion** is the easiest trap path — a one-line, common bug in agent-generated code — because quickjs-ng disables its internal stack limit on `__wasi__` (see Stack). A spike proved engine-level checking is **restorable** (patched `update_stack_limit`; catchable error at depth 1486, instance survives), but the fix lives in vendored quickjs-ng C with no clean build-time hook, so V1 does **not** carry a local patch — it is **deferred upstream** (quickjs-ng issue #774; the maintainer wants the same fix). **Known gap in V1:** unbounded recursion traps and discards the instance (contained — discard-on-trap — but not graceful). Closes when upstream restores the wasi check or we add a compile-guard hook upstream.
   - **Compute-bound native builtins** (catastrophic regex backtracking, large BigInt exponentiation, primitive-array sorts, large JSON operations) stall inside C code where the interrupt cadence may not reach, riding out the grace window. The conformance corpus must measure interrupt coverage of these paths; any builtin that does not honor the interrupt handler within the grace window is documented as trap-reachable.
   - Remaining triggers — store-memory traps (fire only if QuickJS's own accounting failed first: a compromise indicator), guest panics, engine exploits — are not reachable from well-formed guest JS and are the cases discard-on-trap exists for.
 - Choosing a host WASM runtime without epoch-or-equivalent interruption is not acceptable for V1 server-side hosts.
@@ -850,17 +850,19 @@ runtime stack guard is the enforcement layer, and stack overflow is a
 trap that poisons the instance — a documented deviation from native
 semantics, where it is a catchable `InternalError` and the context
 survives. Hosts classify the trap distinctly (e.g. `StackOverflow`, not
-a generic panic). **Resolved (2026-06-12): the check is restorable.** A
+a generic panic). **Restorable, but a V1 gap (deferred upstream).** A
 spike patched `update_stack_limit`'s `__wasi__` branch back to the normal
 `stack_top - stack_size` calculation and demonstrated catchable recursion
 (error at depth 1486, instance survives) — `__builtin_frame_address(0)`
-is valid on wasm (shadow stack), so the disabled-on-wasi limit is
-caution, not a platform constraint. Phase 1 adopts the patch; delivery
-(vendored source vs. build-time rewrite in `quickjs-core-wasm-build`) is
-an implementation choice. With it, unbounded recursion — the most
-agent-reachable trap path — returns to a catchable `InternalError` with
-a surviving context, regaining native parity. See
-`crates/quickjs-core/FEASIBILITY.md`.
+is valid on wasm (shadow stack), so the disable is an upstream gap, not a
+platform constraint (quickjs-ng issue #774; the maintainer wants the
+same fix). But the change lives in vendored quickjs-ng C with no clean
+build-time hook, and forking the C for a one-line change is
+disproportionate, so **V1 ships no local patch**: unbounded recursion
+traps and the instance is discarded (contained via discard-on-trap, not
+graceful). The path to close it is upstream — either quickjs-ng restoring
+the wasi check, or a small upstream PR adding a compile-guard so we can
+enable it via a cflag. See `crates/quickjs-core/FEASIBILITY.md`.
 
 ## Security Model
 
@@ -1042,7 +1044,7 @@ Exit criteria:
 - The Python epoch demonstration explicitly verifies the GIL interaction: the trap must fire while the main Python thread is blocked inside the eval call. If `wasmtime-py` holds the GIL across wasm execution, the watchdog thread can never increment the epoch and the entire Python preemption story is fiction — in that case the Python runtime choice is re-opened. **This is a go/no-go gate for the Python host.**
 - The Node interruption story (worker-hosted instance + `SharedArrayBuffer` flag + worker-termination backstop) is documented with its limitations.
 - `quickjs-core.wasm` binary size is measured and reviewed against packaging budgets (reference points: v0.2 shipped ~1 MB gzipped; the lost spike artifact was 1.2 MB raw). If rquickjs proves materially heavier than those references, the binding decision is revisited with data.
-- The wasi stack-check patch is integrated (verdict reached pre-Phase-1: restorable — see Stack): unbounded recursion surfaces as a catchable `InternalError` with a surviving context in the Python host.
+- The wasi stack-check is a **documented V1 gap, not integrated**: a spike proved it restorable (see Stack), but the fix is a vendored-C change with no clean build-time hook, so it is deferred upstream (quickjs-ng #774). V1 behavior: unbounded recursion traps and the instance is discarded (contained, not graceful). The exit criterion is the *honest acknowledgment* of this gap plus the upstream path, not a shipped patch.
 
 ### Phase 2: Value Protocol And Errors
 
