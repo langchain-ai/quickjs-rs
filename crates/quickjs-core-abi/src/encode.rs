@@ -9,16 +9,26 @@
 //! can't produce non-canonical bytes.
 
 use crate::value::{is_nan_bits, CANONICAL_NAN_BITS};
-use crate::Value;
+use crate::{limits, Reason, Value};
 
 /// Encode a value to its canonical wire bytes.
-pub fn encode_value(v: &Value) -> Vec<u8> {
+///
+/// Fallible and depth-counted (spec rule 5: "never blindly recursive"),
+/// symmetric with the decoder. A `Value` nested deeper than the depth cap is
+/// rejected with `DepthExceeded` rather than overflowing the host stack — the
+/// marshaller should never construct one, but the reference codec must not
+/// depend on its caller for memory safety, since the Python/TS encoders
+/// mirror it.
+pub fn encode_value(v: &Value) -> Result<Vec<u8>, Reason> {
     let mut out = Vec::new();
-    encode_into(v, &mut out);
-    out
+    encode_into(v, &mut out, 0)?;
+    Ok(out)
 }
 
-fn encode_into(v: &Value, out: &mut Vec<u8>) {
+fn encode_into(v: &Value, out: &mut Vec<u8>, depth: usize) -> Result<(), Reason> {
+    if depth > limits::MAX_DEPTH {
+        return Err(Reason::DepthExceeded);
+    }
     match v {
         Value::Null => out.push(0x00),
         Value::Undefined => out.push(0x01),
@@ -47,7 +57,7 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) {
             out.push(0x08);
             out.extend_from_slice(&(items.len() as u32).to_le_bytes());
             for it in items {
-                encode_into(it, out);
+                encode_into(it, out, depth + 1)?;
             }
         }
         Value::Object(pairs) => {
@@ -56,7 +66,7 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) {
             for (k, val) in pairs {
                 // Key is a String body (len + utf8), no tag.
                 write_len_prefixed(k.as_bytes(), out);
-                encode_into(val, out);
+                encode_into(val, out, depth + 1)?;
             }
         }
         Value::Handle(h) => {
@@ -75,6 +85,7 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) {
             }
         }
     }
+    Ok(())
 }
 
 fn write_len_prefixed(bytes: &[u8], out: &mut Vec<u8>) {
@@ -93,7 +104,7 @@ mod tests {
     #[test]
     fn encode_normalizes_noncanonical_nan() {
         let signaling_nan = Value::Number(0x7FF0_0000_0000_0001);
-        let bytes = encode_value(&signaling_nan);
+        let bytes = encode_value(&signaling_nan).unwrap();
         // bytes 1..9 are the f64 LE; should be the canonical pattern.
         let mut want = vec![0x04];
         want.extend_from_slice(&CANONICAL_NAN_BITS.to_le_bytes());
@@ -110,7 +121,7 @@ mod tests {
             ("d".into(), Value::BigInt("-12345678901234567890".into())),
             ("e".into(), Value::Bytes(vec![0x00, 0xFF, 0x1A])),
         ]);
-        assert_eq!(decode_value(&encode_value(&v)).unwrap(), v);
+        assert_eq!(decode_value(&encode_value(&v).unwrap()).unwrap(), v);
     }
 
     /// Signed zero is preserved distinctly through a round trip.
@@ -119,7 +130,24 @@ mod tests {
         let pos = Value::number(0.0);
         let neg = Value::number(-0.0);
         assert_ne!(pos, neg);
-        assert_eq!(decode_value(&encode_value(&pos)).unwrap(), pos);
-        assert_eq!(decode_value(&encode_value(&neg)).unwrap(), neg);
+        assert_eq!(decode_value(&encode_value(&pos).unwrap()).unwrap(), pos);
+        assert_eq!(decode_value(&encode_value(&neg).unwrap()).unwrap(), neg);
+    }
+
+    /// Encoder is depth-bounded (spec rule 5), symmetric with the decoder: a
+    /// Value nested past the cap is rejected, not a stack overflow. Build a
+    /// tree just over MAX_DEPTH and confirm DepthExceeded.
+    #[test]
+    fn encode_rejects_over_depth() {
+        use crate::limits::MAX_DEPTH;
+        // depth at cap encodes fine; cap+1 rejects.
+        let mut at_cap = Value::Null;
+        for _ in 0..MAX_DEPTH {
+            at_cap = Value::Array(vec![at_cap]);
+        }
+        assert!(encode_value(&at_cap).is_ok());
+
+        let over = Value::Array(vec![at_cap]); // one deeper than the ok case
+        assert_eq!(encode_value(&over), Err(Reason::DepthExceeded));
     }
 }

@@ -112,13 +112,17 @@ fn value_vectors_conform() {
                     } else {
                         // Bidirectional rule: OK vectors bind canonical encode
                         // too — encode(value) must reproduce the exact bytes.
-                        let reencoded = encode_value(&want);
-                        if reencoded != bytes {
-                            failures.push(format!(
+                        match encode_value(&want) {
+                            Ok(reencoded) if reencoded == bytes => {}
+                            Ok(reencoded) => failures.push(format!(
                                 "{name}: encode mismatch\n  got  {}\n  want {}",
                                 hex_upper(&reencoded),
                                 hex_upper(&bytes)
-                            ));
+                            )),
+                            Err(r) => failures.push(format!(
+                                "{name}: encode rejected unexpectedly ({})",
+                                r.as_str()
+                            )),
                         }
                     }
                 }
