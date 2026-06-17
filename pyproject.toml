@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "quickjs-rs"
 version = "0.2.0"
-description = "Sandboxed JavaScript execution for Python, via a WASM-compiled quickjs-ng (rquickjs) guest driven by wasmtime."
+description = "Sandboxed JavaScript execution for Python, via wasmtime + rquickjs."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -21,10 +21,6 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Interpreters",
 ]
-# wasmtime-py is the wasm runtime that drives the guest module — it IS the
-# sandbox boundary. Bytecode Alliance's official binding; Apache-2.0 WITH
-# LLVM-exception. Ships platform-specific runtime wheels, so our wheel stays
-# pure-Python + a universal (platform-independent) `.wasm`.
 dependencies = ["wasmtime>=45"]
 
 [project.optional-dependencies]
@@ -34,8 +30,6 @@ bench = ["pytest-codspeed>=4.3.0", "matplotlib>=3.8"]
 [project.urls]
 Homepage = "https://github.com/langchain-ai/quickjs-rs"
 Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
-
-# --- Build: pure-Python wheel + a bundled guest `.wasm` (built fresh) --------
 
 [tool.hatch.build.targets.wheel]
 packages = ["quickjs_rs"]
