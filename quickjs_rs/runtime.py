@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
@@ -185,9 +185,9 @@ class Runtime:
         """Capture a whole-memory snapshot of ``ctx`` (factory form of
         :meth:`Context.create_snapshot`). See it for semantics."""
         _validate_runtime_context(self, ctx)
-        return ctx.create_snapshot()
+        return cast(Snapshot, ctx.create_snapshot())
 
     async def create_snapshot_async(self, ctx: Any, *, timeout: float | None = None) -> Snapshot:
         """Async factory form of :meth:`Context.create_snapshot_async`."""
         _validate_runtime_context(self, ctx)
-        return await ctx.create_snapshot_async(timeout=timeout)
+        return cast(Snapshot, await ctx.create_snapshot_async(timeout=timeout))

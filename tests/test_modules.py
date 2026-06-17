@@ -123,7 +123,9 @@ def test_namespace_exposes_multiple_exports() -> None:
                     assert b.to_python() == 2
                     assert c.to_python() == 3
                 finally:
-                    a.dispose(); b.dispose(); c.dispose()
+                    a.dispose()
+                    b.dispose()
+                    c.dispose()
 
 
 # --- resolution policy is the host's: normalize can sandbox -----------------

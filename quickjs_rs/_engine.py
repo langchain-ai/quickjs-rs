@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import wasmtime
 
@@ -254,9 +254,11 @@ class _Instance:
         # Instantiate the SHARED precompiled module (no recompile — ~0ms).
         self.inst = linker.instantiate(self.store, module)
         e = self.inst.exports(self.store)
-        self.mem: wasmtime.Memory = e["memory"]
+        # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
+        # we know the concrete kinds for these named exports.
+        self.mem = cast(wasmtime.Memory, e["memory"])
         # __stack_pointer global — captured/restored as part of a snapshot (§6).
-        self.sp: wasmtime.Global = e["__stack_pointer"]
+        self.sp = cast(wasmtime.Global, e["__stack_pointer"])
         self._exports = e
         # Set true once a module-mode eval runs — module snapshot is V1-guarded.
         self.module_touched = False
@@ -284,7 +286,10 @@ class _Instance:
 
     # -- raw export call --
     def c(self, name: str, *args: Any) -> Any:
-        return self._exports[name](self.store, *args)
+        # Every named entry here is a function export; wasmtime types the
+        # lookup as a union, so narrow to Func before calling.
+        fn = cast(wasmtime.Func, self._exports[name])
+        return fn(self.store, *args)
 
     # -- memory: bound-checked reads, writes via guest alloc --
     def _mem_size(self) -> int:
@@ -301,23 +306,23 @@ class _Instance:
             raise QuickJSError("qjs_alloc returned null")
         if data:
             self.mem.write(self.store, data, p)
-        return p
+        return int(p)
 
     def free(self, ptr: int, length: int) -> None:
         self.c("qjs_free", ptr, length)
 
     # -- out-param slots --
     def alloc_out(self, size: int = 4) -> int:
-        return self.c("qjs_alloc", size)
+        return int(self.c("qjs_alloc", size))
 
     def read_i32(self, ptr: int) -> int:
-        return struct.unpack("<i", self.read(ptr, 4))[0]
+        return int(struct.unpack("<i", self.read(ptr, 4))[0])
 
     def read_u32(self, ptr: int) -> int:
-        return struct.unpack("<I", self.read(ptr, 4))[0]
+        return int(struct.unpack("<I", self.read(ptr, 4))[0])
 
     def read_u64(self, ptr: int) -> int:
-        return struct.unpack("<Q", self.read(ptr, 8))[0]
+        return int(struct.unpack("<Q", self.read(ptr, 8))[0])
 
     # -- result buffer (one-slot channel for get_string/get_bigint/...) --
     def take_result(self) -> bytes:
@@ -444,7 +449,9 @@ class _Instance:
         return err
 
     # -- module loader imports (host moduleLoader callbacks) --
-    def _host_module_normalize(self, base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> int:
+    def _host_module_normalize(
+        self, base_ptr: int, base_len: int, spec_ptr: int, spec_len: int, out_len_ptr: int
+    ) -> int:
         try:
             base = self.read(base_ptr, base_len).decode() if base_len else ""
             spec = self.read(spec_ptr, spec_len).decode() if spec_len else ""
@@ -461,7 +468,7 @@ class _Instance:
         except Exception:
             return 0
 
-    def _host_module_load(self, name_ptr, name_len, out_len_ptr) -> int:
+    def _host_module_load(self, name_ptr: int, name_len: int, out_len_ptr: int) -> int:
         try:
             name = self.read(name_ptr, name_len).decode()
             if self.module_load is None:
@@ -487,19 +494,19 @@ class _Instance:
         if isinstance(value, QjsHandle):
             return value._require_live()
         if value is None:
-            return self.c("new_null")
+            return int(self.c("new_null"))
         if isinstance(value, Undefined):
-            return self.c("new_undefined")
+            return int(self.c("new_undefined"))
         if isinstance(value, bool):
-            return self.c("new_bool", 1 if value else 0)
+            return int(self.c("new_bool", 1 if value else 0))
         if isinstance(value, int):
             # JS-safe integers cross as numbers; anything wider as BigInt
             # (decimal string — never truncate, the -spec lesson).
             if -(2**53) <= value <= 2**53:
-                return self.c("new_number", _f64_bits(float(value)))
+                return int(self.c("new_number", _f64_bits(float(value))))
             return self._new_bigint(str(value))
         if isinstance(value, float):
-            return self.c("new_number", _f64_bits(value))
+            return int(self.c("new_number", _f64_bits(value)))
         if isinstance(value, str):
             return self._new_string(value)
         if isinstance(value, (bytes, bytearray)):
@@ -512,7 +519,7 @@ class _Instance:
                 self.c("free_value", ih)
                 if st != STATUS_OK:
                     raise MarshalError(f"set_index failed at {i}")
-            return arr
+            return int(arr)
         if isinstance(value, dict):
             obj = self.c("new_object")
             for k, v in value.items():
@@ -521,14 +528,14 @@ class _Instance:
                 vh = self.python_to_handle(v, _depth + 1)
                 self._set_prop(obj, k, vh)
                 self.c("free_value", vh)
-            return obj
+            return int(obj)
         raise MarshalError(f"cannot marshal {type(value).__name__}")
 
     def _new_string(self, s: str) -> int:
         data = s.encode()
         p = self.alloc_write(data)
         try:
-            return self.c("new_string", p, len(data))
+            return int(self.c("new_string", p, len(data)))
         finally:
             self.free(p, len(data))
 
@@ -670,7 +677,7 @@ class _Instance:
             st = self.c("get_number", handle, out)
             if st != STATUS_OK:
                 raise MarshalError(f"get_number status={st}")
-            return struct.unpack("<d", struct.pack("<Q", self.read_u64(out)))[0]
+            return float(struct.unpack("<d", struct.pack("<Q", self.read_u64(out)))[0])
         finally:
             self.free(out, 8)
 
@@ -868,11 +875,11 @@ class _Instance:
             page = 65536
             self.mem.grow(self.store, (mem_size - cur + page - 1) // page)
         self.mem.write(self.store, image, 0)
-        self.sp.value = sp_val
+        self.sp.set_value(self.store, sp_val)
 
 
 def _f64_bits(f: float) -> int:
-    return struct.unpack("<Q", struct.pack("<d", f))[0]
+    return int(struct.unpack("<Q", struct.pack("<d", f))[0])
 
 
 # --------------------------------------------------------------------------
@@ -958,7 +965,7 @@ class QjsRuntime:
             raise QuickJSError(f"compute_memory_usage status={st}")
         raw = inst.take_result()
         values = struct.unpack(f"<{len(_MEMORY_USAGE_FIELDS)}q", raw)
-        return dict(zip(_MEMORY_USAGE_FIELDS, values))
+        return dict(zip(_MEMORY_USAGE_FIELDS, values, strict=True))
 
     def set_module_loader(
         self,
@@ -1160,16 +1167,17 @@ class QjsContext:
         inst = self._inst
         out = inst.alloc_out()
         try:
-            st = inst.c("promise_result", handle._require_live(), out)
+            # The status is intentionally ignored: a rejected promise returns
+            # STATUS_JS_ERROR but the handle IS the rejection reason. The caller
+            # (drive loop) distinguishes resolved vs rejected via promise_state.
+            inst.c("promise_result", handle._require_live(), out)
             rh = inst.read_i32(out)
         finally:
             inst.free(out, 4)
-        # st may be STATUS_JS_ERROR for a rejected promise; the handle is the
-        # reason. The caller (drive loop) distinguishes via promise_state.
         return QjsHandle._adopt(inst, rh, context=self)
 
     def run_pending_jobs(self) -> int:
-        return self._inst.c("execute_pending_jobs")
+        return int(self._inst.c("execute_pending_jobs"))
 
     # -- whole-memory snapshot --
     @property
@@ -1238,6 +1246,14 @@ class QjsHandle:
     """
 
     __slots__ = ("_inst", "_handle", "_context", "_disposed")
+
+    # Slot types (declared so the type checker sees the attributes set in
+    # `_adopt` via object.__new__). These are annotations only — __slots__
+    # above is what actually reserves the storage.
+    _inst: _Instance
+    _handle: int
+    _context: QjsContext | None
+    _disposed: bool
 
     def __init__(self) -> None:  # use _adopt
         raise TypeError("construct via QjsHandle._adopt")
@@ -1358,7 +1374,7 @@ class QjsHandle:
             if argv_len:
                 inst.free(argv_ptr, argv_len)
             inst.free(out, 4)
-            for h, o in zip(arg_handles, owns):
+            for h, o in zip(arg_handles, owns, strict=True):
                 if o:
                     inst.c("free_value", h)
             if owns_this:
@@ -1381,7 +1397,7 @@ class QjsHandle:
             if argv_len:
                 inst.free(argv_ptr, argv_len)
             inst.free(out, 4)
-            for h, o in zip(arg_handles, owns):
+            for h, o in zip(arg_handles, owns, strict=True):
                 if o:
                     inst.c("free_value", h)
         if st == STATUS_JS_ERROR:
