@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import weakref
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -172,11 +173,6 @@ class Undefined:
 UNDEFINED = Undefined()
 
 
-# --------------------------------------------------------------------------
-# Shared compilation domain. The guest wasm is JIT-compiled by Cranelift once
-# (~60ms for the ~1MB module) and the result is reused for EVERY instance.
-# --------------------------------------------------------------------------
-
 _SHARED_ENGINE: wasmtime.Engine | None = None
 _SHARED_MODULE: wasmtime.Module | None = None
 _SHARED_BUILD_ID: bytes | None = None
@@ -205,8 +201,6 @@ class _Instance:
     """A loaded guest wasm instance and the low-level call surface."""
 
     def __init__(self, *, memory_limit: int | None = None, stack_limit: int | None = None) -> None:
-        # Share the Engine + compiled Module across all instances (see above);
-        # only the Store + Linker are per-instance.
         self.engine, module, self.build_id = _shared_engine_and_module()
         self.store = wasmtime.Store(self.engine)
         wasi = wasmtime.WasiConfig()
@@ -224,17 +218,11 @@ class _Instance:
         i32 = wasmtime.ValType.i32
         # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
         linker.define_func(
-            "env",
-            "host_call",
-            wasmtime.FuncType([i32()] * 5, [i32()]),
-            self._host_call,
+            "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), self._host_call
         )
         # env.host_interrupt() -> i32 (nonzero = stop). Hot-loop poll.
         linker.define_func(
-            "env",
-            "host_interrupt",
-            wasmtime.FuncType([], [i32()]),
-            self._host_interrupt,
+            "env", "host_interrupt", wasmtime.FuncType([], [i32()]), self._host_interrupt
         )
         # env.host_module_normalize(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> name_ptr
         linker.define_func(
@@ -251,7 +239,7 @@ class _Instance:
             self._host_module_load,
         )
 
-        # Instantiate the SHARED precompiled module (no recompile — ~0ms).
+        # Instantiate the SHARED precompiled module (no recompile — ~0.3ms).
         self.inst = linker.instantiate(self.store, module)
         e = self.inst.exports(self.store)
         # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
@@ -283,6 +271,27 @@ class _Instance:
         # signal unresolvable / not-found (the guest surfaces a clean JS error).
         self.module_normalize: Callable[[str, str], str | None] | None = None
         self.module_load: Callable[[str], str | None] | None = None
+        self._closed = False
+
+    def close(self) -> None:
+        """Release the wasm instance.
+
+        The `_Instance` is kept alive by a reference cycle through native code:
+        the host-function callbacks (`self._host_call`, …) capture `self` and
+        are stored in wasmtime's host-function table, reachable from `self.inst`
+        — so `_Instance → inst → wasmtime table → bound method → _Instance`.
+        Plain refcounting can't collect that; it would wait on the cyclic GC.
+
+        `wasmtime.Store.close()` is the operation that frees the store's native
+        state (the linear-memory reservation) AND drops those held callbacks,
+        which breaks the cycle so the `_Instance` then collects normally. That's
+        all that's needed — the other handles (`inst`/`mem`/`sp`) become inert
+        (use raises `ValueError`) and are reclaimed with the wrapper. Idempotent.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self.store.close()
 
     # -- raw export call --
     def c(self, name: str, *args: Any) -> Any:
@@ -916,7 +925,7 @@ class QjsRuntime:
         # runtime's contexts. Set via set_module_loader.
         self._module_normalize: Callable[[str, str], str | None] | None = None
         self._module_load: Callable[[str], str | None] | None = None
-        self._instances: list[_Instance] = []
+        self._instances: weakref.WeakSet[_Instance] = weakref.WeakSet()
 
     def _new_instance(self) -> _Instance:
         """Create a fresh, isolated wasm instance for a new context, seeded
@@ -931,7 +940,7 @@ class QjsRuntime:
             inst.c("set_memory_limit", self._memory_limit)
         if self._stack_limit is not None:
             inst.c("set_max_stack_size", self._stack_limit)
-        self._instances.append(inst)
+        self._instances.add(inst)
         return inst
 
     def set_interrupt_handler(self, handler: Callable[[], Any]) -> None:
@@ -946,26 +955,30 @@ class QjsRuntime:
         for inst in self._instances:
             inst.interrupt_handler = None
 
-    def _representative_instance(self) -> _Instance:
-        """A wasm instance to run runtime-level memory ops against. Each context
-        is its own instance (its own QuickJS runtime), so there is no single
-        shared runtime; we report against the first instance, creating a
-        throwaway one if no context exists yet so the API works pre-context."""
-        if not self._instances:
-            self._new_instance()
-        return self._instances[0]
-
     def run_gc(self) -> None:
-        self._representative_instance().c("run_gc")
+        """Run QuickJS cycle GC on every live context's heap. Each context is
+        its own wasm instance with its own heap, so a runtime-level GC fans out
+        across all of them. No-op if no context is live."""
+        for inst in self._instances:
+            inst.c("run_gc")
 
     def memory_usage(self) -> dict[str, int]:
-        inst = self._representative_instance()
-        st = inst.c("compute_memory_usage")
-        if st != STATUS_OK:
-            raise QuickJSError(f"compute_memory_usage status={st}")
-        raw = inst.take_result()
-        values = struct.unpack(f"<{len(_MEMORY_USAGE_FIELDS)}q", raw)
-        return dict(zip(_MEMORY_USAGE_FIELDS, values, strict=True))
+        """Aggregate QuickJS memory counters across every live context's heap.
+
+        Each context is its own wasm instance with its own QuickJS runtime, so
+        there is no single runtime-wide heap; we sum each field across all live
+        instances. An empty runtime (no live context) reports all-zeros — the
+        honest "no heaps allocated yet" answer, with a stable return shape."""
+        sums = [0] * len(_MEMORY_USAGE_FIELDS)
+        for inst in self._instances:
+            st = inst.c("compute_memory_usage")
+            if st != STATUS_OK:
+                raise QuickJSError(f"compute_memory_usage status={st}")
+            raw = inst.take_result()
+            values = struct.unpack(f"<{len(_MEMORY_USAGE_FIELDS)}q", raw)
+            for i, v in enumerate(values):
+                sums[i] += v
+        return dict(zip(_MEMORY_USAGE_FIELDS, sums, strict=True))
 
     def set_module_loader(
         self,
@@ -1226,7 +1239,11 @@ class QjsContext:
         inst.reject_deferred(pending_id, err)
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        if self._inst is not None:
+            self._inst.close()
 
     def is_closed(self) -> bool:
         return self._closed

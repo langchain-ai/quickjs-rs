@@ -70,7 +70,7 @@ commits.
 | `test_eval_async.py` | async pipeline, fan-out, sequential await |
 | `test_snapshot.py` | end-to-end snapshot create/restore costs (small, medium, large payloads) |
 | `test_snapshot_extraction.py` | extraction/registry overhead microbench pairs (short, medium, large) |
-| `test_threaded_stress.py` | Threaded stress: multi-runtime/context isolation under concurrent load + TPS |
+| `test_fleet.py` | Fleet construct + interleaved-run throughput for many runtimes/contexts (single-threaded) |
 | `test_memory.py` | CodSpeed memory mode suite — allocation regression tracking |
 
 ## Naming convention
