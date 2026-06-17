@@ -4,9 +4,15 @@
 # quickjs-wasi-shaped export set using rquickjs. The
 # Python package (quickjs_rs) drives the produced `.wasm` via wasmtime.
 #
-# Standalone crate (its own size-tuned profile + rquickjs 0.12 pin); not a
-# workspace member. Built by `python scripts/build_guest.py` (cargo →
-# quickjs_rs/_guest.wasm).
+# Standalone crate (its own size-tuned profile + rquickjs 0.12 pin). Built by
+# `python scripts/build_guest.py` (cargo → quickjs_rs/_guest.wasm).
+#
+# An empty `[workspace]` makes this crate its OWN workspace root, so cargo never
+# walks UP the directory tree looking for a parent manifest. Without it, a
+# build resolves against whatever `Cargo.toml` happens to sit above (e.g. a
+# stray repo-root manifest), which broke CI once — this pins the boundary.
+[workspace]
+
 [package]
 name = "quickjs-wasm"
 version = "0.0.0"
