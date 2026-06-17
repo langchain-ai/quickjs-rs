@@ -1,5 +1,17 @@
-# Export the LLVM shadow-stack pointer global so the host can capture/restore it
-# as part of the whole-memory snapshot. Without this the global exists
-# internally but is not reachable from the host.
+# wasm link flags for the guest.
+#
+# --export=__stack_pointer: expose the LLVM shadow-stack-pointer global so the
+#   host can capture/restore it as part of the whole-memory snapshot. Without
+#   this the global exists internally but is not reachable from the host.
+#
+# --import-undefined: the guest's `extern "C"` host functions (host_call,
+#   host_interrupt, host_module_normalize, host_module_load) are provided by the
+#   host at instantiation — they are wasm IMPORTS, not link-time-resolvable
+#   symbols. Without this flag some `wasm-ld` versions error with
+#   "undefined symbol: host_*" instead of emitting them as imports. (Local
+#   toolchains may default permissive; CI's did not — pin it explicitly.)
 [target.wasm32-wasip1]
-rustflags = ["-C", "link-arg=--export=__stack_pointer"]
+rustflags = [
+  "-C", "link-arg=--export=__stack_pointer",
+  "-C", "link-arg=--import-undefined",
+]
