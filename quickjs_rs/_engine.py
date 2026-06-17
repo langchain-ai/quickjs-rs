@@ -173,22 +173,112 @@ class Undefined:
 UNDEFINED = Undefined()
 
 
+# --------------------------------------------------------------------------
+# Shared compilation + host-import domain. The guest wasm is JIT-compiled by
+# Cranelift once (~60ms) and the result reused for EVERY instance. The Linker
+# (carrying the 4 host-function imports) is ALSO shared and built exactly once.
+#
+# Why share the Linker — and why the thread-local. wasmtime-py registers every
+# host function in a process-global, UNLOCKED slab (`FUNCTIONS` in
+# wasmtime/_func.py): `define_func` mutates it on registration and `Store.close()`
+# mutates it on teardown, with no synchronization. Registering host functions
+# PER INSTANCE therefore races that slab under concurrent context create/close
+# across threads — corrupting it (spurious `TypeError: list indices must be
+# integers ...` / `WasmtimeError`), and the corruption is process-wide and
+# sticky. The fix is to touch that slab a CONSTANT number of times for the whole
+# process: register the 4 imports ONCE on a shared Linker, then every instance
+# just `instantiate()`s it (instantiate does not touch the slab).
+#
+# A single shared host-function closure cannot capture per-instance `self`, so it
+# must learn which `_Instance` is calling some other way. `_CUR` — a thread-local
+# — names the instance whose export is currently running on this thread.
+# `_Instance.c()` sets `_CUR.inst = self` around every guest call; host imports
+# only ever fire re-entrantly DURING such a call, on the same thread, so the
+# thread-local always resolves to the right instance. Per-thread storage means
+# concurrent instances on different threads never collide.
+# --------------------------------------------------------------------------
+
 _SHARED_ENGINE: wasmtime.Engine | None = None
 _SHARED_MODULE: wasmtime.Module | None = None
+_SHARED_LINKER: wasmtime.Linker | None = None
 _SHARED_BUILD_ID: bytes | None = None
-# Guards the one-time lazy compilation below. Concurrent first-touch from
-# multiple threads (e.g. parallel runtime/context creation) would otherwise
-# race on the global engine/module compilation and corrupt wasmtime state.
+# Guards the one-time lazy compilation + linker build below. Concurrent
+# first-touch from multiple threads would otherwise race on the global
+# engine/module/linker construction and corrupt wasmtime state.
 _SHARED_INIT_LOCK = threading.Lock()
 
+# Per-thread pointer to the `_Instance` whose export is currently executing; the
+# shared host-import trampolines read `_CUR.inst` to route back to it (see the
+# domain note above and `_Instance.c()`).
+_CUR = threading.local()
 
-def _shared_engine_and_module() -> tuple[wasmtime.Engine, wasmtime.Module, bytes]:
-    """Lazily compile the guest module once for the process and cache it.
-    Returns (engine, module, build_id)."""
-    global _SHARED_ENGINE, _SHARED_MODULE, _SHARED_BUILD_ID
-    # Double-checked locking: the fast path (already compiled) avoids the
-    # lock; the slow path serializes the one-time compilation so concurrent
-    # first callers don't race wasmtime's engine/module construction.
+
+# Module-level trampoline shims registered ONCE on the shared Linker. Each
+# forwards to the method on the currently-active instance (`_CUR.inst`), which
+# carries the real per-instance dispatch state (name_to_fn_id, sync/async
+# dispatchers, memory, store). The method bodies (and their bound-checked reads /
+# host-error sanitization) stay on `_Instance`; these shims only route.
+def _tramp_host_call(name_ptr: int, name_len: int, this: int, argc: int, argv_ptr: int) -> int:
+    return cast("_Instance", _CUR.inst)._host_call(name_ptr, name_len, this, argc, argv_ptr)
+
+
+def _tramp_host_interrupt() -> int:
+    return cast("_Instance", _CUR.inst)._host_interrupt()
+
+
+def _tramp_host_module_normalize(
+    base_ptr: int, base_len: int, spec_ptr: int, spec_len: int, out_len_ptr: int
+) -> int:
+    return cast("_Instance", _CUR.inst)._host_module_normalize(
+        base_ptr, base_len, spec_ptr, spec_len, out_len_ptr
+    )
+
+
+def _tramp_host_module_load(name_ptr: int, name_len: int, out_len_ptr: int) -> int:
+    return cast("_Instance", _CUR.inst)._host_module_load(name_ptr, name_len, out_len_ptr)
+
+
+def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
+    """Build the process-shared Linker, registering the 4 host-function imports
+    exactly once (so wasmtime-py's global slab is touched a constant number of
+    times — see the domain note above). Called under `_SHARED_INIT_LOCK`."""
+    linker = wasmtime.Linker(engine)
+    linker.define_wasi()
+    i32 = wasmtime.ValType.i32
+    # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
+    linker.define_func(
+        "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), _tramp_host_call
+    )
+    # env.host_interrupt() -> i32 (nonzero = stop). Hot-loop poll.
+    linker.define_func(
+        "env", "host_interrupt", wasmtime.FuncType([], [i32()]), _tramp_host_interrupt
+    )
+    # env.host_module_normalize(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> name_ptr
+    linker.define_func(
+        "env",
+        "host_module_normalize",
+        wasmtime.FuncType([i32()] * 5, [i32()]),
+        _tramp_host_module_normalize,
+    )
+    # env.host_module_load(name_ptr, name_len, out_len_ptr) -> source_ptr
+    linker.define_func(
+        "env",
+        "host_module_load",
+        wasmtime.FuncType([i32()] * 3, [i32()]),
+        _tramp_host_module_load,
+    )
+    return linker
+
+
+def _shared_engine_and_module() -> tuple[wasmtime.Engine, wasmtime.Module, wasmtime.Linker, bytes]:
+    """Lazily build the process-shared Engine + compiled Module + Linker once and
+    cache them. Returns (engine, module, linker, build_id). Callers
+    `instantiate(store, module)` the shared Linker into their own per-instance
+    Store rather than registering host imports per instance (see domain note)."""
+    global _SHARED_ENGINE, _SHARED_MODULE, _SHARED_LINKER, _SHARED_BUILD_ID
+    # Double-checked locking: the fast path (already built) avoids the lock; the
+    # slow path serializes the one-time construction so concurrent first callers
+    # don't race wasmtime's engine/module/linker construction.
     if _SHARED_MODULE is None:
         with _SHARED_INIT_LOCK:
             if _SHARED_MODULE is None:
@@ -197,8 +287,13 @@ def _shared_engine_and_module() -> tuple[wasmtime.Engine, wasmtime.Module, bytes
                 _SHARED_ENGINE = wasmtime.Engine()
                 # ~60ms, once
                 _SHARED_MODULE = wasmtime.Module(_SHARED_ENGINE, wasm_bytes)
-    assert _SHARED_ENGINE is not None and _SHARED_BUILD_ID is not None
-    return _SHARED_ENGINE, _SHARED_MODULE, _SHARED_BUILD_ID
+                _SHARED_LINKER = _build_shared_linker(_SHARED_ENGINE)
+    assert (
+        _SHARED_ENGINE is not None
+        and _SHARED_LINKER is not None
+        and _SHARED_BUILD_ID is not None
+    )
+    return _SHARED_ENGINE, _SHARED_MODULE, _SHARED_LINKER, _SHARED_BUILD_ID
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +306,12 @@ class _Instance:
     """A loaded guest wasm instance and the low-level call surface."""
 
     def __init__(self, *, memory_limit: int | None = None, stack_limit: int | None = None) -> None:
-        self.engine, module, self.build_id = _shared_engine_and_module()
+        # Share the Engine + compiled Module + Linker (see the domain note
+        # above); only the Store is per-instance. Host imports are registered
+        # ONCE on the shared Linker — we do NOT define_func per instance (that
+        # raced wasmtime-py's global slab). The shared trampolines route back
+        # here via the `_CUR` thread-local set in `c()`.
+        self.engine, module, linker, self.build_id = _shared_engine_and_module()
         self.store = wasmtime.Store(self.engine)
         wasi = wasmtime.WasiConfig()
         wasi.inherit_stdout()
@@ -223,33 +323,8 @@ class _Instance:
         # MUST be O(1) — it fires very frequently during JS execution.
         self.interrupt_handler: Callable[[], bool] | None = None
 
-        linker = wasmtime.Linker(self.engine)
-        linker.define_wasi()
-        i32 = wasmtime.ValType.i32
-        # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
-        linker.define_func(
-            "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), self._host_call
-        )
-        # env.host_interrupt() -> i32 (nonzero = stop). Hot-loop poll.
-        linker.define_func(
-            "env", "host_interrupt", wasmtime.FuncType([], [i32()]), self._host_interrupt
-        )
-        # env.host_module_normalize(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> name_ptr
-        linker.define_func(
-            "env",
-            "host_module_normalize",
-            wasmtime.FuncType([i32()] * 5, [i32()]),
-            self._host_module_normalize,
-        )
-        # env.host_module_load(name_ptr, name_len, out_len_ptr) -> source_ptr
-        linker.define_func(
-            "env",
-            "host_module_load",
-            wasmtime.FuncType([i32()] * 3, [i32()]),
-            self._host_module_load,
-        )
-
-        # Instantiate the SHARED precompiled module (no recompile — ~0.3ms).
+        # Instantiate the SHARED precompiled module via the SHARED linker (no
+        # recompile, no per-instance import registration — ~0.3ms).
         self.inst = linker.instantiate(self.store, module)
         e = self.inst.exports(self.store)
         # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
@@ -308,7 +383,20 @@ class _Instance:
         # Every named entry here is a function export; wasmtime types the
         # lookup as a union, so narrow to Func before calling.
         fn = cast(wasmtime.Func, self._exports[name])
-        return fn(self.store, *args)
+        # Publish THIS instance as the active one for the duration of the guest
+        # call, so the shared Linker's import trampolines (registered once,
+        # process-wide) route their host callbacks back to us via `_CUR`. Host
+        # imports only fire re-entrantly DURING a guest call on this same thread,
+        # so the per-thread `_CUR.inst` always names the right instance. Save +
+        # restore (not just set + clear) because host callbacks re-enter `c()`
+        # (e.g. _host_call → python_to_handle → c("new_null")); restoring the
+        # previous value keeps nested calls correct.
+        prev = getattr(_CUR, "inst", None)
+        _CUR.inst = self
+        try:
+            return fn(self.store, *args)
+        finally:
+            _CUR.inst = prev
 
     # -- memory: bound-checked reads, writes via guest alloc --
     def _mem_size(self) -> int:

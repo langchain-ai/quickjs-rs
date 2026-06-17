@@ -1,19 +1,29 @@
-"""Context isolation under interleaved single-threaded load.
+"""Context isolation under load — interleaved single-thread and concurrent.
 
-quickjs-rs is single-threaded *per Runtime*: a Runtime and its Contexts must be
-created and used from one thread (they are ``!Send`` at the core, and the
-underlying wasmtime-py bindings are explicitly not thread-safe — see
-bytecodealliance/wasmtime-py#254). So this test does NOT spawn threads. Instead
-it stands up many Runtimes × many Contexts and steps them in an interleaved
-round-robin from a single thread, asserting no cross-context value bleed appears.
+A Runtime and its Contexts are ``!Send`` (use one Runtime from one thread), but
+DIFFERENT Runtimes may be created and driven concurrently from different OS
+threads. The host-function imports are registered once on a process-shared
+Linker and routed to the calling instance via a thread-local, so concurrent
+context create/eval/close across threads neither corrupts wasmtime-py's
+process-global host-function table nor misroutes a host call to the wrong
+instance (see ``_engine._CUR`` / the shared-Linker note).
 
-Each context keeps a private owner token + turn counter; every turn re-checks
-both in JS and in Python, and the per-context host callback closes over its own
-token. Any leakage between the many live, interleaved contexts surfaces as an
-owner/turn mismatch.
+Both tests give each context a private owner token + turn counter, re-checked in
+JS and in Python every turn, with the per-context host callback closing over its
+own token. Any cross-context bleed — or a host call routed to the wrong instance
+— surfaces as an owner/turn mismatch.
+
+- ``test_interleaved_context_isolation``: many contexts on ONE thread, stepped
+  round-robin (interleaving exposes shared/leaked state).
+- ``test_threaded_context_isolation``: many threads, each owning its own
+  Runtime+Contexts, running concurrently (exposes the global-table race and
+  thread-local misrouting).
 """
 
 from __future__ import annotations
+
+import queue
+import threading
 
 from quickjs_rs import Context, Runtime
 
@@ -128,3 +138,73 @@ def test_interleaved_context_isolation() -> None:
             rt.close()
 
     assert total_ops == RUNTIME_COUNT * CONTEXTS_PER_RUNTIME * TURNS_PER_CONTEXT
+
+
+# Threaded shape: enough threads and create/close churn to exercise the
+# process-global host-function table under contention.
+THREAD_COUNT = 8
+THREAD_RUNTIMES = 2
+THREAD_CONTEXTS = 3
+THREAD_TURNS = 20
+
+
+def test_threaded_context_isolation() -> None:
+    """Concurrent threads, each owning its own Runtimes+Contexts, keep state
+    private. This guards two thread-safety properties of the shared-Linker +
+    thread-local design: (1) concurrent context create/eval/close does not
+    corrupt wasmtime-py's process-global host-function table, and (2) a host
+    call is always routed to the calling instance, never a peer on another
+    thread (a misroute would show up as an owner-token mismatch)."""
+    failures: queue.Queue[str] = queue.Queue()
+
+    def worker(worker_idx: int) -> None:
+        try:
+            for runtime_idx in range(THREAD_RUNTIMES):
+                with Runtime() as rt:
+                    contexts: list[tuple[Context, str]] = []
+                    for context_idx in range(THREAD_CONTEXTS):
+                        token = f"w={worker_idx};rt={runtime_idx};ctx={context_idx}"
+                        ctx = rt.new_context(timeout=5.0)
+                        ctx.eval(
+                            "globalThis.__owner = "
+                            f"{token!r}; "
+                            "globalThis.__turn = 0; "
+                            "globalThis.__digest = 0;"
+                        )
+
+                        @ctx.function(name="host_mix")
+                        def host_mix(n: int, _token: str = token) -> dict[str, int | str]:
+                            mixed = ((n * 1315423911) ^ 0x9E3779B9) & 0x7FFFFFFF
+                            return {"owner": _token, "mix": mixed}
+
+                        contexts.append((ctx, token))
+
+                    for turn in range(1, THREAD_TURNS + 1):
+                        for ctx, token in contexts:
+                            result = ctx.eval(_turn_source(token))
+                            if not isinstance(result, dict):
+                                raise AssertionError(f"bad result type: {type(result).__name__}")
+                            if result.get("owner") != token:
+                                raise AssertionError(
+                                    f"owner mismatch: expected={token!r} "
+                                    f"got={result.get('owner')!r}"
+                                )
+                            if result.get("turn") != turn:
+                                raise AssertionError(
+                                    f"turn mismatch: expected={turn} got={result.get('turn')!r}"
+                                )
+                    for ctx, _ in contexts:
+                        ctx.close()
+        except BaseException as exc:  # noqa: BLE001 - report any worker failure
+            failures.put(f"worker={worker_idx}: {type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(THREAD_COUNT)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    collected = []
+    while not failures.empty():
+        collected.append(failures.get_nowait())
+    assert not collected, "\n".join(collected)
