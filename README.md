@@ -56,9 +56,7 @@ asyncio.run(main())
 
 ## ES modules
 
-Supply modules through a host loader callback pair (the
-[`quickjs-wasi`](https://github.com/vercel-labs/quickjs-wasi) `moduleLoader`
-shape): `normalize(base, specifier)` resolves an import to a canonical name, and
+Supply modules through a host loader callback pair: `normalize(base, specifier)` resolves an import to a canonical name, and
 `load(name)` returns the source. The host owns all resolution policy — there is
 no built-in scope model.
 

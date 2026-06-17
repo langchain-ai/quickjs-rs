@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import threading
 import weakref
 from collections.abc import Callable
 from typing import Any, cast
@@ -88,8 +89,7 @@ _MEMORY_USAGE_FIELDS = (
 # --------------------------------------------------------------------------
 # Whole-memory snapshot envelope. The header guards a snapshot
 # against the WRONG guest build: build_id = sha256(wasm) catches every
-# layout-affecting rebuild (the guard quickjs-wasi lacks), format_version
-# guards the envelope layout itself.
+# layout-affecting rebuild, format_version guards the envelope layout itself.
 # --------------------------------------------------------------------------
 SNAP_MAGIC = b"QFGS"  # QuickJS Fine-Grained Snapshot
 SNAP_FORMAT_VERSION = 1
@@ -176,17 +176,27 @@ UNDEFINED = Undefined()
 _SHARED_ENGINE: wasmtime.Engine | None = None
 _SHARED_MODULE: wasmtime.Module | None = None
 _SHARED_BUILD_ID: bytes | None = None
+# Guards the one-time lazy compilation below. Concurrent first-touch from
+# multiple threads (e.g. parallel runtime/context creation) would otherwise
+# race on the global engine/module compilation and corrupt wasmtime state.
+_SHARED_INIT_LOCK = threading.Lock()
 
 
 def _shared_engine_and_module() -> tuple[wasmtime.Engine, wasmtime.Module, bytes]:
     """Lazily compile the guest module once for the process and cache it.
     Returns (engine, module, build_id)."""
     global _SHARED_ENGINE, _SHARED_MODULE, _SHARED_BUILD_ID
+    # Double-checked locking: the fast path (already compiled) avoids the
+    # lock; the slow path serializes the one-time compilation so concurrent
+    # first callers don't race wasmtime's engine/module construction.
     if _SHARED_MODULE is None:
-        wasm_bytes = _read_guest_wasm()
-        _SHARED_BUILD_ID = hashlib.sha256(wasm_bytes).digest()
-        _SHARED_ENGINE = wasmtime.Engine()
-        _SHARED_MODULE = wasmtime.Module(_SHARED_ENGINE, wasm_bytes)  # ~60ms, once
+        with _SHARED_INIT_LOCK:
+            if _SHARED_MODULE is None:
+                wasm_bytes = _read_guest_wasm()
+                _SHARED_BUILD_ID = hashlib.sha256(wasm_bytes).digest()
+                _SHARED_ENGINE = wasmtime.Engine()
+                # ~60ms, once
+                _SHARED_MODULE = wasmtime.Module(_SHARED_ENGINE, wasm_bytes)
     assert _SHARED_ENGINE is not None and _SHARED_BUILD_ID is not None
     return _SHARED_ENGINE, _SHARED_MODULE, _SHARED_BUILD_ID
 
@@ -265,10 +275,10 @@ class _Instance:
         # caller raises ConcurrentEvalError instead.
         self.in_sync_eval = False
         self.sync_eval_hit_async = False
-        # Host module loader (quickjs-wasi `moduleLoader` shape), set via
-        # QjsRuntime.set_module_loader. normalize(base, spec) -> canonical name
-        # (default identity); load(name) -> source. Both may return None to
-        # signal unresolvable / not-found (the guest surfaces a clean JS error).
+        # Host module loader, set via QjsRuntime.set_module_loader.
+        # normalize(base, spec) -> canonical name (default identity); load(name)
+        # -> source. Both may return None to signal unresolvable / not-found
+        # (the guest surfaces a clean JS error).
         self.module_normalize: Callable[[str, str], str | None] | None = None
         self.module_load: Callable[[str], str | None] | None = None
         self._closed = False
@@ -510,7 +520,7 @@ class _Instance:
             return int(self.c("new_bool", 1 if value else 0))
         if isinstance(value, int):
             # JS-safe integers cross as numbers; anything wider as BigInt
-            # (decimal string — never truncate, the -spec lesson).
+            # (decimal string — never truncate).
             if -(2**53) <= value <= 2**53:
                 return int(self.c("new_number", _f64_bits(float(value))))
             return self._new_bigint(str(value))
@@ -863,8 +873,6 @@ class _Instance:
                 f"(this build expects {SNAP_FORMAT_VERSION})"
             )
         if build_id != self.build_id:
-            # The guard quickjs-wasi lacks: a snapshot is only valid against the
-            # exact guest build it was taken from.
             raise ValueError(
                 "snapshot build_id mismatch — it was taken from a different "
                 "guest wasm build (rebuilding the guest invalidates snapshots)"
@@ -921,8 +929,6 @@ class QjsRuntime:
         self._stack_limit = stack_limit
         self._closed = False
         self._interrupt_handler: Callable[[], Any] | None = None
-        # Host module loader (quickjs-wasi moduleLoader), shared across this
-        # runtime's contexts. Set via set_module_loader.
         self._module_normalize: Callable[[str, str], str | None] | None = None
         self._module_load: Callable[[str], str | None] | None = None
         self._instances: weakref.WeakSet[_Instance] = weakref.WeakSet()
@@ -986,9 +992,9 @@ class QjsRuntime:
         normalize: Callable[[str, str], str | None] | None = None,
         load: Callable[[str], str | None] | None = None,
     ) -> None:
-        """Install a host module loader (quickjs-wasi `moduleLoader` shape).
-        normalize(base, spec) -> canonical name (default identity); load(name)
-        -> source. Routed to every existing + future instance."""
+        """Install a host module loader. normalize(base, spec) ->
+        canonical name (default identity); load(name) -> source.
+        Routed to every existing + future instance."""
         self._module_normalize = normalize
         self._module_load = load
         for inst in self._instances:

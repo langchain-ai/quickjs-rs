@@ -1,9 +1,8 @@
 //! ES module support — synchronous host-backed Resolver + Loader
 //!
-//! QuickJS resolves *static* imports synchronously at instantiation. The two
-//! env imports below must be synchronous for exactly this reason (async would
-//! fail on any module with static sub-imports). Both quickjs-wasi and the
-//! -spec branch are synchronous for the same reason; we follow suit.
+//! QuickJS resolves *static* imports synchronously at instantiation. The two env imports below must be
+//! synchronous for exactly this reason (async would fail on any module with
+//! static sub-imports).
 //!
 //! ## Host imports
 //!
@@ -26,7 +25,7 @@
 //!
 //! A per-context thread-local `HashMap<(base, specifier), canonical>` avoids
 //! duplicate host round-trips on repeated static import edges (at-most-once per
-//! edge, determinism by construction — -spec ADR-0003).
+//! edge, determinism by construction).
 //!
 //! ## eval_module export
 //!

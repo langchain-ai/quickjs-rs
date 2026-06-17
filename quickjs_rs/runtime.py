@@ -117,8 +117,7 @@ class Runtime:
         load: Callable[[str], str | None],
     ) -> None:
         """Install a host module loader for ES `import`/`export` resolution
-        (quickjs-wasi `moduleLoader` shape). The loader is shared by every
-        context on this runtime.
+        The loader is shared by every context on this runtime.
 
         Args:
             normalize: ``normalize(base, specifier) -> canonical_name``. Given

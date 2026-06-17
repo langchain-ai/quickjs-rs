@@ -52,7 +52,7 @@ const HOST_CALL_ERROR: i32 = -1;
 /// There is no sync/async distinction at registration: the single trampoline
 /// returns whatever handle the host returns from `host_call`. For async, the
 /// host returns a PROMISE handle (obtained via `new_promise`) and settles it
-/// later (resolve_deferred + execute_pending_jobs) — matching quickjs-wasi.
+/// later (resolve_deferred + execute_pending_jobs)
 #[no_mangle]
 pub extern "C" fn new_function(name_ptr: *const u8, name_len: usize) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {

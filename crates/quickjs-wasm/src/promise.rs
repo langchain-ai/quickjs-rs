@@ -1,8 +1,8 @@
 //! Async: deferred promises + the job pump + the async host-fn path
 //!
-//! Mirrors `quickjs-wasi`'s model: a host fn that needs to be async returns a
-//! **deferred promise**; the host kicks off work; when it settles, the host
-//! calls `resolve_deferred`/`reject_deferred` then `execute_pending_jobs()`
+//! A host fn that needs to be async returns a **deferred promise**; the host
+//! kicks off work; when it settles, the host calls
+//! `resolve_deferred`/`reject_deferred` then `execute_pending_jobs()`
 //! to drain the microtask queue so the JS `await` resumes.
 //!
 //! ## Deferred registry
@@ -255,7 +255,7 @@ pub extern "C" fn execute_pending_jobs() -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
         with_context(|ctx| {
             let mut count = 0i32;
-            // Bound the drain (spec: poll bounded). 100k matches the -spec cap.
+            // Bound the drain (spec: poll bounded).
             while count < 100_000 && ctx.execute_pending_job() {
                 count += 1;
             }

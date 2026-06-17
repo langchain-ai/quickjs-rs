@@ -1,8 +1,8 @@
 //! Handle representation and the value-construction / handle-op exports
 //!
 //! A **handle** is a raw `i32` pointer to a `Box<Persistent<Value>>` on the
-//! guest heap, mirroring `quickjs-wasi`'s raw `JSValue*` but with a
-//! borrow-safe referent (the rquickjs `Persistent`, not a bare `JSValue`).
+//! guest heap, with a borrow-safe referent (the rquickjs `Persistent`, not a
+//! bare `JSValue`).
 //!
 //!   - mint:  `Box::into_raw(Box::new(Persistent::save(&ctx, value))) as i32`
 //!   - use:   `(&*ptr).clone().restore(&ctx)` inside `ctx.with` → a `Value`
@@ -173,10 +173,9 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// eval_code — the sole SYNC eval (quickjs-wasi's `evalCode`). Returns a
+// eval_code — the sole SYNC eval. Returns a
 // HANDLE to the result; the host reads it via the typed accessors below
-// (get_number/get_string/...). There is no value-returning eval variant (that
-// was the removed `-spec` sugar).
+// (get_number/get_string/...).
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
@@ -502,7 +501,7 @@ fn read_argv<'js>(
 }
 
 // ===========================================================================
-// Typed value extraction (guest → host) — `quickjs-wasi`-style typed accessors.
+// Typed value extraction (guest → host)
 //
 // The host already knows (via `type_of`) what it expects and asks for exactly
 // that, getting STATUS_BAD_INPUT if the value isn't that type. Scalars write to

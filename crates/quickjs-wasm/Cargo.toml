@@ -1,7 +1,6 @@
 # quickjs-wasm — the guest crate of the WASM execution plane.
 #
 # Compiled to wasm32-wasip1 (reactor mode). Implements the flat,
-# quickjs-wasi-shaped export set using rquickjs. The
 # Python package (quickjs_rs) drives the produced `.wasm` via wasmtime.
 #
 # Standalone crate (its own size-tuned profile + rquickjs 0.12 pin). Built by

@@ -101,8 +101,7 @@ def test_restore_snapshot_unknown_format_version_rejected() -> None:
 
 
 def test_restore_snapshot_build_id_mismatch_rejected() -> None:
-    """A snapshot from a DIFFERENT guest build is rejected fail-closed — the
-    build-identity guard quickjs-wasi lacks (catches version skew on rebuild)."""
+    """A snapshot from a DIFFERENT guest build is rejected fail-closed"""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             ctx.eval("const x = 1;")

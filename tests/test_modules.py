@@ -1,5 +1,4 @@
-"""ES module resolution via a host loader callback pair (quickjs-wasi
-``moduleLoader`` shape).
+"""ES module resolution via a host loader callback pair.
 
 Module *capability* (``eval(module=True)``, ``import``/``export``) is intact;
 the host supplies modules through ``rt.set_module_loader(normalize=, load=)``
@@ -45,9 +44,7 @@ def test_bare_specifier_resolves() -> None:
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)
         with rt.new_context() as ctx:
-            with _eval_module(
-                ctx, "import { add } from 'math'; export const r = add(3, 4);"
-            ) as ns:
+            with _eval_module(ctx, "import { add } from 'math'; export const r = add(3, 4);") as ns:
                 r = ns.get("r")
                 try:
                     assert r.to_python() == 7
@@ -65,9 +62,7 @@ def test_relative_specifier_resolves_via_host_normalize() -> None:
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)
         with rt.new_context() as ctx:
-            with _eval_module(
-                ctx, "import { msg } from 'pkg/main'; export const out = msg;"
-            ) as ns:
+            with _eval_module(ctx, "import { msg } from 'pkg/main'; export const out = msg;") as ns:
                 out = ns.get("out")
                 try:
                     assert out.to_python() == "hi world"
@@ -85,9 +80,7 @@ def test_re_exports_resolve() -> None:
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)
         with rt.new_context() as ctx:
-            with _eval_module(
-                ctx, "import { x, y } from 'mid'; export const sum = x + y;"
-            ) as ns:
+            with _eval_module(ctx, "import { x, y } from 'mid'; export const sum = x + y;") as ns:
                 s = ns.get("sum")
                 try:
                     assert s.to_python() == 30
@@ -114,9 +107,7 @@ def test_namespace_exposes_multiple_exports() -> None:
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)
         with rt.new_context() as ctx:
-            with _eval_module(
-                ctx, "export { A, B } from 'consts'; export const C = 3;"
-            ) as ns:
+            with _eval_module(ctx, "export { A, B } from 'consts'; export const C = 3;") as ns:
                 a, b, c = ns.get("A"), ns.get("B"), ns.get("C")
                 try:
                     assert a.to_python() == 1
@@ -134,8 +125,10 @@ def test_namespace_exposes_multiple_exports() -> None:
 def test_host_normalize_can_reject_to_sandbox() -> None:
     """Sandboxing is the host's job in normalize() — e.g. refuse a specifier
     that escapes a prefix. The engine imposes no scope model."""
-    sources = {"app/main": "import { x } from '../secret'; export const r = x;",
-               "secret": "export const x = 'leaked';"}
+    sources = {
+        "app/main": "import { x } from '../secret'; export const r = x;",
+        "secret": "export const x = 'leaked';",
+    }
 
     def normalize(base: str, spec: str) -> str | None:
         if not spec.startswith("."):
@@ -264,8 +257,7 @@ def test_ts_interfaces_and_type_aliases_erase() -> None:
         with rt.new_context() as ctx:
             with _eval_module(
                 ctx,
-                "import { label } from 'model.ts';"
-                "export const r = label({name: 'a', age: 1}, 7);",
+                "import { label } from 'model.ts';export const r = label({name: 'a', age: 1}, 7);",
             ) as ns:
                 r = ns.get("r")
                 try:
@@ -277,8 +269,7 @@ def test_ts_interfaces_and_type_aliases_erase() -> None:
 def test_ts_enum_is_transformed() -> None:
     """Enums aren't pure erasure — oxidase transforms them to runtime objects."""
     normalize, load = _flat_loader(
-        {"colors.ts": "export enum Color { Red, Green, Blue } "
-                      "export const g = Color.Green;"}
+        {"colors.ts": "export enum Color { Red, Green, Blue } export const g = Color.Green;"}
     )
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)
@@ -296,8 +287,10 @@ def test_tsx_module_is_stripped() -> None:
     JSX elements — they'd need a runtime — and the `<T>` arrow-generic, which is
     genuinely ambiguous with JSX in .tsx and must be written `<T,>`.)"""
     normalize, load = _flat_loader(
-        {"util.tsx": "export function pick(o: {n: number}): number { return o.n; } "
-                     "export const v = pick({n: 42});"}
+        {
+            "util.tsx": "export function pick(o: {n: number}): number { return o.n; } "
+            "export const v = pick({n: 42});"
+        }
     )
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)

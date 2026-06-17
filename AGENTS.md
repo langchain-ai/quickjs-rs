@@ -36,7 +36,7 @@ Repository conventions for coding agents and contributors.
   - Cancellation must reject pending host-call promises with `HostCancellationError`.
 - Module rules:
   - ES modules resolve via a host loader callback pair:
-    `rt.set_module_loader(normalize=, load=)` (quickjs-wasi `moduleLoader` shape).
+    `rt.set_module_loader(normalize=, load=)`.
   - The host owns ALL resolution policy in `normalize` — there is no built-in
     scope tree / sandbox.
   - `.ts`/`.mts`/`.cts`/`.tsx` module sources are type-stripped in the guest
