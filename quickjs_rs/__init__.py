@@ -20,7 +20,7 @@ from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
 from quickjs_rs.threading import ThreadWorker
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 __all__ = [
     "Runtime",
