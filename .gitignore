@@ -9,15 +9,6 @@ target/
 # from source on every build; never committed.
 quickjs_rs/_guest.wasm
 
-# Legacy PyO3/maturin build artifact (PyO3 backend retired in favor of wasm).
-quickjs_rs/_engine*.so
-quickjs_rs/_engine*.pyd
-quickjs_rs/_engine*.dylib
-
-# Stale wasi-sdk install from the wasm era; left on disk for local
-# users to delete at their leisure. Never committed.
-toolchain/
-
 # Python
 __pycache__/
 *.pyc
