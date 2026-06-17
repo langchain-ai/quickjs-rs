@@ -1,16 +1,16 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
-build-backend = "maturin"
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
 [project]
 name = "quickjs-rs"
-version = "0.1.2"
-description = "Sandboxed JavaScript execution for Python, via PyO3 + rquickjs."
+version = "0.1.1"
+description = "Sandboxed JavaScript execution for Python, via a WASM-compiled quickjs-ng (rquickjs) guest driven by wasmtime."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "LangChain" }]
-keywords = ["quickjs", "javascript", "sandbox", "pyo3", "rust"]
+keywords = ["quickjs", "javascript", "sandbox", "wasm", "wasmtime"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -21,7 +21,11 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Interpreters",
 ]
-dependencies = []
+# wasmtime-py is the wasm runtime that drives the guest module — it IS the
+# sandbox boundary. Bytecode Alliance's official binding; Apache-2.0 WITH
+# LLVM-exception. Ships platform-specific runtime wheels, so our wheel stays
+# pure-Python + a universal (platform-independent) `.wasm`.
+dependencies = ["wasmtime>=45"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-cov", "pytest-asyncio>=0.23", "ruff", "mypy"]
@@ -31,11 +35,29 @@ bench = ["pytest-codspeed>=4.3.0", "matplotlib>=3.8"]
 Homepage = "https://github.com/langchain-ai/quickjs-rs"
 Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 
-[tool.maturin]
-python-source = "."
-module-name = "quickjs_rs._engine"
-features = ["pyo3/extension-module"]
-include = [{ path = "quickjs_rs/py.typed", format = "sdist" }]
+# --- Build: pure-Python wheel + a bundled guest `.wasm` (built fresh) --------
+
+[tool.hatch.build.targets.wheel]
+packages = ["quickjs_rs"]
+# The guest wasm is produced by the build hook (cargo → quickjs_rs/_guest.wasm)
+# and force-included from there; it is gitignored, never committed.
+artifacts = ["quickjs_rs/_guest.wasm"]
+
+[tool.hatch.build.targets.sdist]
+# Ship the guest crate sources so an sdist can rebuild the wasm from source.
+include = [
+  "quickjs_rs",
+  "crates/quickjs-wasm",
+  "scripts/build_guest.py",
+  "hatch_build.py",
+  "README.md",
+  "LICENSE",
+]
+
+[tool.hatch.build.hooks.custom]
+# hatch_build.py:GuestWasmBuildHook — runs scripts/build_guest.py before
+# packaging so the wheel contains quickjs_rs/_guest.wasm.
+path = "hatch_build.py"
 
 [tool.ruff]
 line-length = 100
@@ -55,9 +77,8 @@ filterwarnings = ["error::ResourceWarning"]
 asyncio_mode = "auto"
 # Collect both test_ (correctness) and bench_ (benchmark) functions.
 # Filenames stay `test_*.py` per benchmarks/README.md; function
-# names use `bench_` to visually
-# distinguish benchmarks from correctness tests. Benchmarks live
-# in benchmarks/ (outside testpaths); tests/ has no bench_
-# functions, so the expanded pattern doesn't change correctness-
-# test collection.
+# names use `bench_` to visually distinguish benchmarks from
+# correctness tests. Benchmarks live in benchmarks/ (outside testpaths);
+# tests/ has no bench_ functions, so the expanded pattern doesn't change
+# correctness-test collection.
 python_functions = ["test_*", "bench_*"]

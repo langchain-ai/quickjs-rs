@@ -1,0 +1,5 @@
+# Export the LLVM shadow-stack pointer global so the host can capture/restore it
+# as part of the whole-memory snapshot. Without this the global exists
+# internally but is not reachable from the host.
+[target.wasm32-wasip1]
+rustflags = ["-C", "link-arg=--export=__stack_pointer"]

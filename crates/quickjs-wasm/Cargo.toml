@@ -1,0 +1,60 @@
+# quickjs-wasm — the guest crate of the WASM execution plane.
+#
+# Compiled to wasm32-wasip1 (reactor mode). Implements the flat,
+# quickjs-wasi-shaped export set using rquickjs. The
+# Python package (quickjs_rs) drives the produced `.wasm` via wasmtime.
+#
+# Standalone crate (its own size-tuned profile + rquickjs 0.12 pin); not a
+# workspace member. Built by `python scripts/build_guest.py` (cargo →
+# quickjs_rs/_guest.wasm).
+[package]
+name = "quickjs-wasm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib so the linker produces a wasm module exporting our
+# #[no_mangle] functions. Reactor mode (no _start) is selected via the
+# build flags / target, not here.
+crate-type = ["cdylib"]
+
+[dependencies]
+# rquickjs 0.12 vendors quickjs-ng 0.15. bindgen deliberately omitted —
+# rquickjs-sys ships pre-generated bindings for wasm32-wasip1; enabling
+# bindgen would pull libclang at build time. "loader" enables the
+# Resolver/Loader traits used by the host_module_normalize/load imports.
+rquickjs = { version = "0.12", default-features = false, features = [
+  "classes",
+  "properties",
+  "loader",
+  # array-buffer enables ArrayBuffer + TypedArray — the binary in/out path
+  # (new_arraybuffer/new_uint8array/get_arraybuffer/get_typed_array_buffer, §2.3).
+  "array-buffer",
+] }
+
+# TypeScript type-stripping in the module loader. Same
+# pinned oxidase + oxc deps the repo-root native crate uses (oxidase is not on
+# crates.io). Pinned to a rev, not a branch, so a force-push can't silently
+# break the build. Measured ~400 KiB on the native dylib; similar wasm growth.
+# oxc_* must share oxidase's source identity (branch "ast_alloc") or Cargo
+# resolves two parallel oxc graphs and compiles everything twice.
+oxidase = { git = "https://github.com/branchseer/oxidase", rev = "045ea46b604cee97c65f1eeac05dcdbc5eb0be25" }
+oxc_allocator = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_ast = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_parser = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+oxc_span = { git = "https://github.com/branchseer/oxc", branch = "ast_alloc" }
+
+[profile.release]
+# Size-tuned for the wasm artifact (the spec's Phase-1 exit measures
+# binary size against ~1-1.2 MB reference points).
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# MUST be "unwind", not "abort": every export is catch_unwind-guarded so
+# a Rust panic becomes an error status instead of unwinding across the
+# wasm boundary (UB) or aborting the whole instance. catch_unwind is a
+# no-op under panic=abort. Same rationale as the PyO3 crate's
+# src/reentrance.rs note.
+panic = "unwind"

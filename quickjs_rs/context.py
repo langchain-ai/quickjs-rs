@@ -153,13 +153,23 @@ class Context:
         self._runtime._unregister_context(self)
         self._closed = True
 
-    def _snapshot_registry_names(self) -> tuple[str, ...]:
-        """Test-only helper exposing the ordered snapshot registry."""
-        return tuple(self._engine_ctx.snapshot_registry_names())
-
-    def _debug_snapshot_registry_names(self) -> tuple[str, ...]:
-        """Backward-compatible alias for older tests/callers."""
-        return self._snapshot_registry_names()
+    def _assert_snapshot_quiescent(self) -> None:
+        """A whole-memory snapshot must be taken at a quiescent point — no
+        in-flight eval_async and no pending async host tasks — or the captured
+        heap (mid-suspension, with a half-driven job queue) would be incoherent.
+        Module-mode contexts are V1-unsupported."""
+        if self._closed:
+            raise QuickJSError("context is closed")
+        if self._eval_async_in_flight:
+            raise ConcurrentEvalError(
+                "cannot snapshot while eval_async is in flight on this context"
+            )
+        if self._pending_tasks:
+            raise QuickJSError("cannot snapshot while async host tasks are pending")
+        if self._engine_ctx.module_touched:
+            raise NotImplementedError(
+                "snapshot of a context that ran module=True eval is not supported in V1"
+            )
 
     def eval_handle(
         self,
@@ -269,114 +279,37 @@ class Context:
             raise sync_eval_async_call_error()
         return result
 
-    def create_snapshot(
-        self,
-        *,
-        on_unserializable: str = "tombstone",
-        on_missing_name: str = "skip",
-        allow_bytecode: bool = False,
-        allow_reference: bool = True,
-        allow_sab: bool = False,
-    ) -> Snapshot:
-        """Create a Snapshot V1 payload from this context.
+    def create_snapshot(self) -> Snapshot:
+        """Capture a snapshot of this context.
 
-        Snapshot V1 tracks script-mode top-level declarations across
-        eval calls, resolves those names at snapshot time, and
-        serializes the active values as one aggregate graph so aliasing
-        is preserved across restored names.
+        The entire guest heap — every object, the atom table, the job queue /
+        pending promises, closures, and aliasing — is captured as a flat image.
+        Restoring it into a fresh context reconstitutes the full VM
+        state, which the old selective-value model could not do.
 
-        Args:
-            on_unserializable: Policy for names whose resolved value
-                cannot be serialized. ``"tombstone"`` records the name
-                as unavailable after restore; ``"error"`` fails snapshot
-                creation.
-            on_missing_name: Policy for tracked names that no longer
-                resolve by identifier lookup at snapshot time.
-                ``"skip"`` omits the name entirely, ``"tombstone"``
-                restores a throwing placeholder, and ``"error"`` fails
-                snapshot creation.
-            allow_bytecode: Passed through to QuickJS object
-                serialization. Leave disabled unless bytecode objects
-                are intentionally part of the snapshot boundary.
-            allow_reference: Passed through to QuickJS object
-                serialization. Enabled by default so shared references
-                inside the captured graph can round-trip.
-            allow_sab: Passed through to QuickJS object serialization
-                for SharedArrayBuffer support.
+        Must be taken at a quiescent point (no in-flight ``eval_async``, no
+        pending async host tasks).
 
         Returns:
-            A :class:`quickjs_rs.Snapshot` payload that can be converted
-            to bytes or restored into another context.
+            A :class:`quickjs_rs.Snapshot` wrapping the memory image.
 
         Raises:
-            NotImplementedError: If this context has executed any
-                ``module=True`` eval surface. Module-mode snapshotting is
-                intentionally unsupported in V1.
-            ConcurrentEvalError: If ``eval_async`` is currently in
-                flight on this context.
-            QuickJSError: If the context is closed, async host tasks are
-                pending, or a policy is set to ``"error"`` and a tracked
-                name cannot be captured.
+            NotImplementedError: If this context ran any ``module=True`` eval
+                (module-mode snapshot is unsupported in V1).
+            ConcurrentEvalError: If ``eval_async`` is in flight.
+            QuickJSError: If the context is closed or async host tasks pend.
         """
-        result = self._runtime.create_snapshot(
-            self,
-            on_unserializable=on_unserializable,
-            on_missing_name=on_missing_name,
-            allow_bytecode=allow_bytecode,
-            allow_reference=allow_reference,
-            allow_sab=allow_sab,
-        )
-        return result
+        self._assert_snapshot_quiescent()
+        return Snapshot(self._engine_ctx.create_snapshot())
 
-    async def create_snapshot_async(
-        self,
-        *,
-        on_unserializable: str = "tombstone",
-        on_missing_name: str = "skip",
-        allow_bytecode: bool = False,
-        allow_reference: bool = True,
-        allow_sab: bool = False,
-        timeout: float | None = None,
-    ) -> Snapshot:
-        """Create a Snapshot V1 payload with async identifier resolution.
-
-        This follows the same snapshot model as
-        :meth:`create_snapshot`, but resolves each tracked name through
-        :meth:`eval_handle_async` so contexts whose identifier lookup
-        path can touch async host functions remain snapshot-capable.
-
-        Args:
-            on_unserializable: See :meth:`create_snapshot`.
-            on_missing_name: See :meth:`create_snapshot`.
-            allow_bytecode: See :meth:`create_snapshot`.
-            allow_reference: See :meth:`create_snapshot`.
-            allow_sab: See :meth:`create_snapshot`.
-            timeout: Optional per-name timeout override passed to
-                ``eval_handle_async`` while resolving tracked
-                identifiers. ``None`` uses the context's cumulative
-                async budget rules.
-
-        Returns:
-            A :class:`quickjs_rs.Snapshot` payload.
-
-        Raises:
-            NotImplementedError: If this context has executed any
-                ``module=True`` eval surface.
-            ConcurrentEvalError: If ``eval_async`` is currently in
-                flight on this context.
-            QuickJSError: If the context is closed, async host tasks are
-                pending, or a policy is set to ``"error"`` and a tracked
-                name cannot be captured.
+    async def create_snapshot_async(self, *, timeout: float | None = None) -> Snapshot:
+        """Async-compatible snapshot. Same capture as
+        :meth:`create_snapshot`; provided so callers in async code can snapshot
+        without dropping to the sync API. The capture itself is synchronous (a
+        memory copy) — the quiescence guard ensures no async work is mid-flight.
         """
-        return await self._runtime.create_snapshot_async(
-            self,
-            on_unserializable=on_unserializable,
-            on_missing_name=on_missing_name,
-            allow_bytecode=allow_bytecode,
-            allow_reference=allow_reference,
-            allow_sab=allow_sab,
-            timeout=timeout,
-        )
+        self._assert_snapshot_quiescent()
+        return Snapshot(self._engine_ctx.create_snapshot())
 
     def _raise_classified(
         self,
