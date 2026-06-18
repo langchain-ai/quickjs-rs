@@ -1,86 +1,23 @@
-"""Snapshot V1 tracking groundwork tests."""
+"""Whole-memory snapshot/restore
+
+This plane uses a WHOLE-MEMORY snapshot: the entire guest linear memory +
+__stack_pointer is captured as a flat image, so closures, pending promises,
+full object graphs, and aliasing all survive — a strict superset of what the
+old selective-value model could do. The old model's surface (registry tracking,
+on_missing_name/on_unserializable policies, tombstones, dump_handle/load_handle)
+is intentionally gone; these tests target the whole-memory contract.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import struct
 from contextlib import suppress
 
 import pytest
 
-from quickjs_rs import ConcurrentEvalError, JSError, QuickJSError, Runtime, Snapshot
-from quickjs_rs.handle import Handle
+from quickjs_rs import ConcurrentEvalError, QuickJSError, Runtime, Snapshot
 
-
-def test_registry_tracks_top_level_decls_and_destructuring() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval(
-                """
-                const { a, b: c, ...rest } = { a: 1, b: 2, d: 3 };
-                let [x, , y = 3, ...z] = [1, 2, 3, 4];
-                function f() {}
-                class K {}
-                """
-            )
-            assert ctx._snapshot_registry_names() == (
-                "a",
-                "c",
-                "rest",
-                "x",
-                "y",
-                "z",
-                "f",
-                "K",
-            )
-
-
-def test_registry_dedupes_first_seen_across_evals() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval("var a = 1; var b = 2;")
-            ctx.eval("var b = 3; var c = 4;")
-            assert ctx._snapshot_registry_names() == ("a", "b", "c")
-
-
-def test_registry_ignores_nested_declarations() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval(
-                """
-                if (true) {
-                    const hidden = 1;
-                    function nope() {}
-                }
-                const top = 1;
-                """
-            )
-            assert ctx._snapshot_registry_names() == ("top",)
-
-
-def test_parser_error_does_not_corrupt_registry() -> None:
-    from quickjs_rs import JSError
-
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval("const ok = 1;")
-            with pytest.raises(JSError):
-                ctx.eval("const =")
-            assert ctx._snapshot_registry_names() == ("ok",)
-
-
-def test_eval_handle_and_eval_handle_async_update_registry() -> None:
-    async def run() -> tuple[str, ...]:
-        with Runtime() as rt:
-            with rt.new_context() as ctx:
-                with ctx.eval_handle("const fromHandle = 1; fromHandle;"):
-                    pass
-                with await ctx.eval_handle_async("const fromHandleAsync = 2; fromHandleAsync;"):
-                    pass
-                return ctx._snapshot_registry_names()
-
-    assert asyncio.run(run()) == ("fromHandle", "fromHandleAsync")
+# --- basic roundtrip + the capabilities the old model couldn't do -----------
 
 
 def test_create_snapshot_roundtrip() -> None:
@@ -92,7 +29,7 @@ def test_create_snapshot_roundtrip() -> None:
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
             snap = Snapshot.from_bytes(data)
-            rt2.restore_snapshot(snap, ctx2, inject_globals=True)
+            rt2.restore_snapshot(snap, ctx2)
             assert ctx2.eval("test") == 123
 
 
@@ -106,54 +43,30 @@ def test_snapshot_restore_preserves_aliasing() -> None:
         with rt2.new_context() as ctx2:
             rt2.restore_snapshot(snap, ctx2)
             assert ctx2.eval("a === b") is True
+            # And the shared object is genuinely shared after restore:
+            ctx2.eval("a.n = 99")
+            assert ctx2.eval("b.n") == 99
 
 
-def test_snapshot_missing_name_policies() -> None:
+def test_snapshot_preserves_closure_state() -> None:
+    """A closure's captured variable survives — the headline whole-memory
+    capability the selective-value model could not express."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            with pytest.raises(JSError):
-                ctx.eval("throw new Error('boom'); const late = 1;")
-            skip_snap = ctx.create_snapshot(on_missing_name="skip")
-            tomb_snap = ctx.create_snapshot(on_missing_name="tombstone")
-            assert isinstance(skip_snap, Snapshot)
-            assert isinstance(tomb_snap, Snapshot)
-            with pytest.raises(JSError):
-                ctx.create_snapshot(on_missing_name="error")
-
-    with Runtime() as rt2:
-        with rt2.new_context() as ctx2:
-            rt2.restore_snapshot(tomb_snap, ctx2)
-            assert ctx2.eval("Object.prototype.hasOwnProperty.call(globalThis, 'late')") is True
-            with pytest.raises(
-                JSError,
-                match="Value for 'late' was not captured because the identifier was not resolvable",
-            ):
-                ctx2.eval("late")
-
-    with Runtime() as rt3:
-        with rt3.new_context() as ctx3:
-            rt3.restore_snapshot(skip_snap, ctx3)
-            assert ctx3.eval("Object.prototype.hasOwnProperty.call(globalThis, 'late')") is False
-            with pytest.raises(JSError, match="late is not defined"):
-                ctx3.eval("late")
-
-
-def test_snapshot_unserializable_policies() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval("const fn = () => 1;")
-            snap = ctx.create_snapshot(on_unserializable="tombstone")
-            with pytest.raises(QuickJSError, match="not serializable"):
-                ctx.create_snapshot(on_unserializable="error")
+            ctx.eval(
+                """
+                globalThis.makeCounter = () => { let n = 0; return () => ++n; };
+                globalThis.inc = globalThis.makeCounter();
+                globalThis.inc(); globalThis.inc();  // n is now 2
+                """
+            )
+            snap = ctx.create_snapshot()
 
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
             rt2.restore_snapshot(snap, ctx2)
-            with pytest.raises(
-                JSError,
-                match="Value for 'fn' was not restored because it is not serializable",
-            ):
-                ctx2.eval("fn")
+            assert ctx2.eval("globalThis.inc()") == 3
+            assert ctx2.eval("globalThis.inc()") == 4
 
 
 def test_restore_snapshot_overwrites_existing_globals() -> None:
@@ -170,12 +83,16 @@ def test_restore_snapshot_overwrites_existing_globals() -> None:
             assert ctx2.eval("keep") == 7
 
 
-def test_restore_snapshot_unknown_version_rejected() -> None:
+# --- fail-closed header validation (build identity + format version) --------
+
+
+def test_restore_snapshot_unknown_format_version_rejected() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
             ctx.eval("const x = 1;")
             data = bytearray(ctx.create_snapshot().to_bytes())
 
+    # format_version is the u32 right after the 4-byte magic.
     data[4] = 2
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
@@ -183,36 +100,64 @@ def test_restore_snapshot_unknown_version_rejected() -> None:
                 rt2.restore_snapshot(Snapshot.from_bytes(bytes(data)), ctx2)
 
 
-def test_restore_snapshot_rquickjs_version_rejected() -> None:
+def test_restore_snapshot_build_id_mismatch_rejected() -> None:
+    """A snapshot from a DIFFERENT guest build is rejected fail-closed"""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             ctx.eval("const x = 1;")
-            data = _rewrite_snapshot_header(
-                ctx.create_snapshot().to_bytes(),
-                {"rquickjs_version": "0.0.0-test"},
-            )
+            data = bytearray(ctx.create_snapshot().to_bytes())
+
+    # Corrupt a byte inside the build_id field (offset 8..40).
+    data[10] ^= 0xFF
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            with pytest.raises(ValueError, match="build_id"):
+                rt2.restore_snapshot(Snapshot.from_bytes(bytes(data)), ctx2)
+            # The instance was NOT mutated (fail before write).
+            assert ctx2.eval("typeof x") == "undefined"
+
+
+def test_restore_snapshot_bad_magic_rejected() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const x = 1;")
+            data = bytearray(ctx.create_snapshot().to_bytes())
+    data[0:4] = b"XXXX"
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            with pytest.raises(ValueError, match="magic"):
+                rt2.restore_snapshot(Snapshot.from_bytes(bytes(data)), ctx2)
+
+
+def test_restore_snapshot_truncated_image_rejected() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const x = 1;")
+            data = ctx.create_snapshot().to_bytes()
+    truncated = data[: len(data) - 1000]  # image shorter than header memory_size
+    with Runtime() as rt2:
+        with rt2.new_context() as ctx2:
+            with pytest.raises(ValueError, match="memory_size|length"):
+                rt2.restore_snapshot(Snapshot.from_bytes(truncated), ctx2)
+
+
+def test_restore_snapshot_no_inject_globals_validates_only() -> None:
+    """inject_globals=False validates the header but does NOT write the image
+    — the destination is left untouched."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const noInject = 77;")
+            snap = ctx.create_snapshot()
 
     with Runtime() as rt2:
         with rt2.new_context() as ctx2:
-            with pytest.raises(ValueError, match="rquickjs version"):
-                rt2.restore_snapshot(Snapshot.from_bytes(data), ctx2)
+            rt2.restore_snapshot(snap, ctx2, inject_globals=False)
+            assert (
+                ctx2.eval("Object.prototype.hasOwnProperty.call(globalThis, 'noInject')") is False
+            )
 
 
-def test_create_snapshot_module_mode_guard_sync() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with ctx.eval_handle("globalThis.modTouched = 1", module=True):
-                pass
-            with pytest.raises(NotImplementedError, match="module=True"):
-                ctx.create_snapshot()
-
-
-async def test_create_snapshot_module_mode_guard_async() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            await ctx.eval_async("globalThis.modTouched = 1", module=True)
-            with pytest.raises(NotImplementedError, match="module=True"):
-                ctx.create_snapshot()
+# --- async + eval_async-binding survival ------------------------------------
 
 
 async def test_create_snapshot_async_roundtrip() -> None:
@@ -245,71 +190,37 @@ async def test_create_snapshot_async_roundtrip() -> None:
         "predeclared-then-await-assign",
     ],
 )
-async def test_snapshot_roundtrip_preserves_eval_async_bindings(
-    setup: str, probe: str
-) -> None:
+async def test_snapshot_roundtrip_preserves_eval_async_bindings(setup: str, probe: str) -> None:
     with Runtime(memory_limit=64 * 1024 * 1024) as runtime:
         with runtime.new_context(timeout=5.0) as ctx:
             await ctx.eval_async(setup, timeout=5.0)
             before = await ctx.eval_async(probe, timeout=5.0)
             payload = ctx.create_snapshot().to_bytes()
         with runtime.new_context(timeout=5.0) as ctx2:
-            runtime.restore_snapshot(Snapshot.from_bytes(payload), ctx2, inject_globals=True)
+            runtime.restore_snapshot(Snapshot.from_bytes(payload), ctx2)
             after = await ctx2.eval_async(probe, timeout=5.0)
     assert before == "hi"
     assert after == "hi"
 
 
-async def test_create_snapshot_async_missing_name_tombstone() -> None:
+# --- quiescence guards (snapshot at a coherent point only) ------------------
+
+
+def test_create_snapshot_module_mode_guard_sync() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
-            with pytest.raises(JSError):
-                await ctx.eval_async("throw new Error('boom'); const late = 1;")
-            snap = await ctx.create_snapshot_async(on_missing_name="tombstone")
-
-    with Runtime() as rt2:
-        with rt2.new_context() as ctx2:
-            rt2.restore_snapshot(snap, ctx2)
-            with pytest.raises(
-                JSError,
-                match="Value for 'late' was not captured because the identifier was not resolvable",
-            ):
-                ctx2.eval("late")
+            with ctx.eval_handle("globalThis.modTouched = 1", module=True):
+                pass
+            with pytest.raises(NotImplementedError, match="module"):
+                ctx.create_snapshot()
 
 
-async def test_create_snapshot_async_missing_name_error() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with pytest.raises(JSError):
-                await ctx.eval_async("throw new Error('boom'); const late = 1;")
-            with pytest.raises(JSError, match="late is not initialized"):
-                await ctx.create_snapshot_async(on_missing_name="error")
-
-
-async def test_create_snapshot_async_unserializable_policies() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            await ctx.eval_async("const fnAsync = () => 1;")
-            snap = await ctx.create_snapshot_async(on_unserializable="tombstone")
-            with pytest.raises(QuickJSError, match="not serializable"):
-                await ctx.create_snapshot_async(on_unserializable="error")
-
-    with Runtime() as rt2:
-        with rt2.new_context() as ctx2:
-            rt2.restore_snapshot(snap, ctx2)
-            with pytest.raises(
-                JSError,
-                match="Value for 'fnAsync' was not restored because it is not serializable",
-            ):
-                ctx2.eval("fnAsync")
-
-
-async def test_create_snapshot_async_module_guard() -> None:
+async def test_create_snapshot_module_mode_guard_async() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
             await ctx.eval_async("globalThis.modTouched = 1", module=True)
-            with pytest.raises(NotImplementedError, match="module=True"):
-                await ctx.create_snapshot_async()
+            with pytest.raises(NotImplementedError, match="module"):
+                ctx.create_snapshot()
 
 
 async def test_create_snapshot_rejects_in_flight_eval_async() -> None:
@@ -335,11 +246,8 @@ async def test_create_snapshot_rejects_in_flight_eval_async() -> None:
 
 
 async def test_create_snapshot_rejects_when_pending_host_tasks_exist() -> None:
-    """Guard the quiescence check directly.
-
-    Public APIs usually pair pending host tasks with an in-flight eval guard.
-    This test forces the pending-task state to cover the dedicated branch.
-    """
+    """Guard the quiescence check directly: a pending async host task means the
+    job queue is mid-flight, so the captured heap would be incoherent."""
     with Runtime() as rt:
         with rt.new_context() as ctx:
             sleeper = asyncio.create_task(asyncio.sleep(60))
@@ -356,6 +264,9 @@ async def test_create_snapshot_rejects_when_pending_host_tasks_exist() -> None:
                     await sleeper
 
 
+# --- runtime factory forms --------------------------------------------------
+
+
 def test_runtime_create_snapshot_sync() -> None:
     with Runtime() as rt:
         with rt.new_context() as ctx:
@@ -370,86 +281,3 @@ async def test_runtime_create_snapshot_async() -> None:
             await ctx.eval_async("const viaRuntimeAsync = 20;")
             snap = await rt.create_snapshot_async(ctx)
             assert isinstance(snap, Snapshot)
-
-
-def test_restore_snapshot_no_inject_globals() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            ctx.eval("const noInject = 77;")
-            snap = ctx.create_snapshot()
-
-    with Runtime() as rt2:
-        with rt2.new_context() as ctx2:
-            rt2.restore_snapshot(snap, ctx2, inject_globals=False)
-            assert (
-                ctx2.eval("Object.prototype.hasOwnProperty.call(globalThis, 'noInject')") is False
-            )
-            with pytest.raises(JSError, match="noInject is not defined"):
-                ctx2.eval("noInject")
-
-
-def test_create_snapshot_invalid_options_sync() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with pytest.raises(ValueError, match="on_unserializable"):
-                ctx.create_snapshot(on_unserializable="bad")  # type: ignore[arg-type]
-            with pytest.raises(ValueError, match="on_missing_name"):
-                ctx.create_snapshot(on_missing_name="bad")  # type: ignore[arg-type]
-
-
-async def test_create_snapshot_invalid_options_async() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with pytest.raises(ValueError, match="on_unserializable"):
-                await ctx.create_snapshot_async(on_unserializable="bad")  # type: ignore[arg-type]
-            with pytest.raises(ValueError, match="on_missing_name"):
-                await ctx.create_snapshot_async(on_missing_name="bad")  # type: ignore[arg-type]
-
-
-def test_engine_dump_load_handle_roundtrip() -> None:
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with ctx.eval_handle("({ n: 7, items: [1, 2, 3] })") as h:
-                blob = ctx._engine_ctx.dump_handle(h._require_live())
-            loaded_engine = ctx._engine_ctx.load_handle(blob)
-            loaded = Handle(ctx, loaded_engine)
-            try:
-                assert loaded.get("n").to_python() == 7
-                items = loaded.get("items")
-                try:
-                    assert items.get_index(2).to_python() == 3
-                finally:
-                    items.dispose()
-            finally:
-                loaded.dispose()
-
-
-def test_engine_dump_load_invalid_bytes_raises() -> None:
-    import quickjs_rs._engine as _engine
-
-    with Runtime() as rt:
-        with rt.new_context() as ctx:
-            with pytest.raises((_engine.JSError, _engine.QuickJSError)):
-                ctx._engine_ctx.load_handle(b"not-valid-qjs-blob")
-
-
-def _rewrite_snapshot_header(data: bytes, updates: dict[str, str]) -> bytes:
-    if len(data) < 9:
-        raise ValueError("snapshot payload too short")
-    magic = data[:4]
-    version = data[4:5]
-    header_len = struct.unpack("<I", data[5:9])[0]
-    header_start = 9
-    header_end = header_start + header_len
-    header = json.loads(data[header_start:header_end].decode("utf-8"))
-    header.update(updates)
-    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    return b"".join(
-        [
-            magic,
-            version,
-            struct.pack("<I", len(header_bytes)),
-            header_bytes,
-            data[header_end:],
-        ]
-    )

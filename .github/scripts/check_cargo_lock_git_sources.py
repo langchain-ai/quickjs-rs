@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-LOCKFILE = Path("Cargo.lock")
+LOCKFILE = Path("crates/quickjs-wasm/Cargo.lock")
 SOURCE_PREFIX = 'source = "'
 GIT_PREFIX = "git+"
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")

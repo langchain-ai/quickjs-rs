@@ -4,15 +4,22 @@ Repository conventions for coding agents and contributors.
 
 ## Project shape
 
-- `quickjs_rs._engine` is a Rust extension built with PyO3 + rquickjs.
-- `quickjs_rs/` is the public Python API (`Runtime`, `Context`, `Handle`, `ModuleScope`).
-- Keep behavior consistent with tests and docs in this repository.
+- The engine is a **guest WASM module** (`crates/quickjs-wasm/` — rquickjs /
+  quickjs-ng compiled to `wasm32-wasip1`) driven by **wasmtime-py**.
+- `quickjs_rs/_engine.py` is the wasmtime-backed host adapter (`QjsRuntime`,
+  `QjsContext`, `QjsHandle`, marshalling, the env imports).
+- `quickjs_rs/` is the public Python API (`Runtime`, `Context`, `Handle`,
+  `Snapshot`).
+- The guest `.wasm` is built fresh from source and bundled into the package as
+  `quickjs_rs/_guest.wasm` (gitignored, never committed); the wheel build hook
+  (`hatch_build.py`) produces it via `scripts/build_guest.py`.
 
 ## Build and verification
 
-- Dev build: `maturin develop --release`
+- Build the guest wasm + bundle it: `python scripts/build_guest.py`
+  (needs the Rust toolchain + `rustup target add wasm32-wasip1`).
 - Install dev deps: `pip install -e ".[dev]"`
-- Tests: `pytest`
+- Tests: `pytest`  (run async files per-file under a timeout; never wedge the suite)
 - Lint: `ruff check .`
 - Types: `mypy quickjs_rs`
 - Benchmarks: `pytest benchmarks/ --codspeed`
@@ -22,20 +29,25 @@ Repository conventions for coding agents and contributors.
 - Handles are context-bound and must error on cross-context use.
 - Disposed handles must fail fast with `InvalidHandleError`.
 - Public operations should either succeed or raise a `QuickJSError` subclass.
+- Each `Context` is its own isolated wasm instance; `Runtime` is a config/factory.
 - Async rules:
   - At most one `eval_async` in flight per context.
   - Sync eval must raise `ConcurrentEvalError` if an async host call is triggered.
   - Cancellation must reject pending host-call promises with `HostCancellationError`.
 - Module rules:
-  - `ModuleScope` is recursive and self-contained.
-  - `str` entries are scope-local files addressed by relative imports.
-  - `ModuleScope` entries are named dependencies addressed by bare imports.
-  - A scope with `str` entries must include an `index.<ext>` entry-point.
-  - `Context.install()` is additive; already-imported modules remain cached by QuickJS.
+  - ES modules resolve via a host loader callback pair:
+    `rt.set_module_loader(normalize=, load=)`.
+  - The host owns ALL resolution policy in `normalize` — there is no built-in
+    scope tree / sandbox.
+  - `.ts`/`.mts`/`.cts`/`.tsx` module sources are type-stripped in the guest
+    loader (via oxidase) before evaluation.
+- Snapshots are whole-memory (entire guest heap; closures + pending promises
+  survive); restore validates a fail-closed header incl. `build_id`.
 
 ## Engineering guardrails
 
-- Do not add runtime dependencies casually; keep the wheel self-contained.
-- Prefer rquickjs safe APIs over raw QuickJS C calls.
-- Keep tests green before merge.
-- Add or update tests when behavior changes.
+- Do not add runtime dependencies casually; keep the package self-contained.
+- Prefer rquickjs safe APIs over raw QuickJS C calls in the guest.
+- Keep one source of truth across the host/guest boundary — no duplicated
+  enums/tags/marshalling between `_engine.py` and the guest.
+- Keep tests green before merge. Add or update tests when behavior changes.

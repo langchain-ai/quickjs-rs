@@ -3,15 +3,15 @@ name: dependency-security
 on:
   pull_request:
     paths:
-      - Cargo.toml
-      - Cargo.lock
+      - crates/quickjs-wasm/Cargo.toml
+      - crates/quickjs-wasm/Cargo.lock
       - .github/scripts/check_cargo_lock_git_sources.py
       - .github/workflows/dependency-security.yml
   push:
     branches: [main]
     paths:
-      - Cargo.toml
-      - Cargo.lock
+      - crates/quickjs-wasm/Cargo.toml
+      - crates/quickjs-wasm/Cargo.lock
       - .github/scripts/check_cargo_lock_git_sources.py
       - .github/workflows/dependency-security.yml
 
@@ -42,4 +42,6 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run RustSec advisory scan
-        run: cargo audit --deny warnings
+        # The guest crate (crates/quickjs-wasm) is the only Rust crate; its
+        # Cargo.lock is what we audit.
+        run: cargo audit --deny warnings --file crates/quickjs-wasm/Cargo.lock
