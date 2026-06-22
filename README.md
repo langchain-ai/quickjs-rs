@@ -2,7 +2,7 @@
 
 Sandboxed JavaScript execution for Python.
 
-JS runs inside a WebAssembly sandbox: [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork) via [rquickjs](https://github.com/DelSkayn/rquickjs) is compiled to `wasm32-wasip1` and driven by [wasmtime](https://wasmtime.dev/). The package is pure Python - one universal wheel that bundles the guest `.wasm`; the only runtime dependency is `wasmtime`. ES modules resolve through a host loader callback; inline TypeScript is type-stripped via [oxidase](https://github.com/branchseer/oxidase).
+JS runs inside a WebAssembly sandbox: [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork) via [rquickjs](https://github.com/DelSkayn/rquickjs) is compiled to `wasm32-wasip1` and driven by [wasmtime](https://wasmtime.dev/). The package is pure Python - one universal wheel that bundles the guest `.wasm` artifacts; the only runtime dependency is `wasmtime`. ES modules resolve through a host loader callback; inline TypeScript is type-stripped by a separate OXC-backed transform `.wasm` before QuickJS sees it.
 
 > [!WARNING]
 > `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
@@ -92,9 +92,9 @@ with Runtime() as rt:
 ## TypeScript
 
 Module sources whose canonical name ends in `.ts`, `.mts`, `.cts`, or `.tsx` are
-type-stripped (in the guest, via oxidase) before evaluation. Enums, namespaces,
-and parameter properties are transformed; plain type annotations erase. No type
-checking — run `tsc --noEmit` separately for that.
+type-stripped by the host transform adapter before evaluation. Enums,
+namespaces, and parameter properties are transformed; plain type annotations
+erase. No type checking — run `tsc --noEmit` separately for that.
 
 ```python
 # A canonical name ending in .ts/.tsx is stripped before QuickJS sees it.
@@ -194,11 +194,11 @@ rt.restore_snapshot(snap, other_ctx, inject_globals=True)
 ## Development
 
 ```bash
-# Build the guest wasm (needs the Rust toolchain + the wasm target):
+# Build the wasm guests (needs the Rust toolchain + the wasm target):
 #   rustup target add wasm32-wasip1
-python scripts/build_guest.py        # cargo build → quickjs_rs/_guest.wasm
+python scripts/build_guest.py        # cargo build -> quickjs_rs/_guest.wasm + _transform.wasm
 
-# Dev install (pure-Python package; the wasm is bundled above).
+# Dev install (pure-Python package; wasm is bundled above).
 pip install -e ".[dev]"
 
 # Run tests, type-check, lint.

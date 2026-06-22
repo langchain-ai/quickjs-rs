@@ -33,15 +33,16 @@ Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quickjs_rs"]
-# The guest wasm is produced by the build hook (cargo → quickjs_rs/_guest.wasm)
-# and force-included from there; it is gitignored, never committed.
-artifacts = ["quickjs_rs/_guest.wasm"]
+# WASM guests are produced by the build hook and force-included from there;
+# they are gitignored, never committed.
+artifacts = ["quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm"]
 
 [tool.hatch.build.targets.sdist]
 # Ship the guest crate sources so an sdist can rebuild the wasm from source.
 include = [
   "quickjs_rs",
   "crates/quickjs-wasm",
+  "crates/quickjs-wasm-transform",
   "scripts/build_guest.py",
   "hatch_build.py",
   "README.md",
@@ -49,8 +50,8 @@ include = [
 ]
 
 [tool.hatch.build.hooks.custom]
-# hatch_build.py:GuestWasmBuildHook — runs scripts/build_guest.py before
-# packaging so the wheel contains quickjs_rs/_guest.wasm.
+# hatch_build.py:GuestWasmBuildHook runs scripts/build_guest.py before
+# packaging so the wheel contains the bundled wasm guests.
 path = "hatch_build.py"
 
 [tool.ruff]

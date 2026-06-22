@@ -8,6 +8,7 @@ target/
 # (cargo → quickjs_rs/_guest.wasm) and by the wheel build hook. Built fresh
 # from source on every build; never committed.
 quickjs_rs/_guest.wasm
+quickjs_rs/_transform.wasm
 
 # Python
 __pycache__/

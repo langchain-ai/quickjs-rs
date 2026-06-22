@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Build the guest wasm and bundle it into the package.
+"""Build the WASM guests and bundle them into the package.
 
-Runs `cargo build --release --target wasm32-wasip1` in `crates/quickjs-wasm/`, then copies the
-artifact to `quickjs_rs/_guest.wasm` (package data). The wheel build hook calls
-this so the wheel ships the wasm; developers run it directly for the in-tree
-edit→build→test loop:
+Runs `cargo build --release --target wasm32-wasip1` in each guest crate, then
+copies the artifacts into `quickjs_rs/` as package data. The wheel build hook
+calls this so the wheel ships the wasm; developers run it directly for the
+in-tree edit-build-test loop:
 
     python scripts/build_guest.py
 
-Build-fresh: the bundled `quickjs_rs/_guest.wasm` is a build artifact (gitignored),
-reproduced from source on every build — never committed.
+Build-fresh: bundled wasm files are build artifacts (gitignored), reproduced
+from source on every build, and never committed.
 """
 
 from __future__ import annotations
@@ -20,10 +20,21 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
-_GUEST_DIR = _ROOT / "crates" / "quickjs-wasm"
 _TARGET = "wasm32-wasip1"
-_ARTIFACT = _GUEST_DIR / "target" / _TARGET / "release" / "quickjs_wasm.wasm"
-_BUNDLE_DEST = _ROOT / "quickjs_rs" / "_guest.wasm"
+_GUESTS = (
+    (
+        "quickjs guest",
+        _ROOT / "crates" / "quickjs-wasm",
+        "quickjs_wasm.wasm",
+        _ROOT / "quickjs_rs" / "_guest.wasm",
+    ),
+    (
+        "transform guest",
+        _ROOT / "crates" / "quickjs-wasm-transform",
+        "quickjs_wasm_transform.wasm",
+        _ROOT / "quickjs_rs" / "_transform.wasm",
+    ),
+)
 
 
 def _check_toolchain() -> None:
@@ -49,21 +60,26 @@ def _check_toolchain() -> None:
         pass
 
 
-def build() -> Path:
-    """Build the guest wasm and copy it into the package. Returns the dest."""
+def build() -> list[Path]:
+    """Build both wasm guests and copy them into the package."""
     _check_toolchain()
-    print(f"building guest wasm ({_TARGET}) in {_GUEST_DIR} ...", file=sys.stderr)
-    subprocess.run(
-        ["cargo", "build", "--release", "--target", _TARGET],
-        cwd=_GUEST_DIR, check=True,
-    )
-    if not _ARTIFACT.exists():
-        sys.exit(f"error: expected artifact not produced at {_ARTIFACT}")
-    _BUNDLE_DEST.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_ARTIFACT, _BUNDLE_DEST)
-    size_mb = _BUNDLE_DEST.stat().st_size / 1_048_576
-    print(f"bundled → {_BUNDLE_DEST} ({size_mb:.2f} MB)", file=sys.stderr)
-    return _BUNDLE_DEST
+    bundled: list[Path] = []
+    for label, crate_dir, artifact_name, bundle_dest in _GUESTS:
+        artifact = crate_dir / "target" / _TARGET / "release" / artifact_name
+        print(f"building {label} ({_TARGET}) in {crate_dir} ...", file=sys.stderr)
+        subprocess.run(
+            ["cargo", "build", "--release", "--target", _TARGET],
+            cwd=crate_dir,
+            check=True,
+        )
+        if not artifact.exists():
+            sys.exit(f"error: expected artifact not produced at {artifact}")
+        bundle_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact, bundle_dest)
+        size_mb = bundle_dest.stat().st_size / 1_048_576
+        print(f"bundled -> {bundle_dest} ({size_mb:.2f} MB)", file=sys.stderr)
+        bundled.append(bundle_dest)
+    return bundled
 
 
 if __name__ == "__main__":

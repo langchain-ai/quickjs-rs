@@ -218,12 +218,12 @@ def test_loader_shared_across_contexts() -> None:
                         r.dispose()
 
 
-# --- TypeScript type-stripping (guest-side, via oxidase) --------------------
+# --- TypeScript type-stripping (host transform artifact, via OXC) -----------
 
 
 def test_ts_module_is_type_stripped() -> None:
-    """A `.ts` module is type-stripped in the guest loader before QuickJS sees
-    it — type annotations that would be a SyntaxError in plain JS erase away."""
+    """A `.ts` module is type-stripped before QuickJS sees it; type
+    annotations that would be a SyntaxError in plain JS erase away."""
     normalize, load = _flat_loader(
         {"math.ts": "export const add = (a: number, b: number): number => a + b;"}
     )
@@ -267,7 +267,7 @@ def test_ts_interfaces_and_type_aliases_erase() -> None:
 
 
 def test_ts_enum_is_transformed() -> None:
-    """Enums aren't pure erasure — oxidase transforms them to runtime objects."""
+    """Enums aren't pure erasure; OXC transforms them to runtime objects."""
     normalize, load = _flat_loader(
         {"colors.ts": "export enum Color { Red, Green, Blue } export const g = Color.Green;"}
     )
@@ -278,6 +278,43 @@ def test_ts_enum_is_transformed() -> None:
                 r = ns.get("r")
                 try:
                     assert r.to_python() == 1  # Green == 1
+                finally:
+                    r.dispose()
+
+
+def test_ts_namespace_is_transformed() -> None:
+    normalize, load = _flat_loader(
+        {"names.ts": "export namespace Names { export const answer = 42; }"}
+    )
+    with Runtime() as rt:
+        rt.set_module_loader(normalize=normalize, load=load)
+        with rt.new_context() as ctx:
+            with _eval_module(
+                ctx, "import { Names } from 'names.ts'; export const r = Names.answer;"
+            ) as ns:
+                r = ns.get("r")
+                try:
+                    assert r.to_python() == 42
+                finally:
+                    r.dispose()
+
+
+def test_ts_parameter_property_is_transformed() -> None:
+    normalize, load = _flat_loader(
+        {
+            "box.ts": (
+                "export class Box { constructor(public value: number) {} } "
+                "export const v = new Box(9).value;"
+            )
+        }
+    )
+    with Runtime() as rt:
+        rt.set_module_loader(normalize=normalize, load=load)
+        with rt.new_context() as ctx:
+            with _eval_module(ctx, "import { v } from 'box.ts'; export const r = v;") as ns:
+                r = ns.get("r")
+                try:
+                    assert r.to_python() == 9
                 finally:
                     r.dispose()
 

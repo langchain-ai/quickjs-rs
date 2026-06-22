@@ -27,7 +27,6 @@ sentinel). Lengths are capped. The wasm sandbox is the isolation boundary.
 
 from __future__ import annotations
 
-import hashlib
 import struct
 import threading
 import weakref
@@ -35,6 +34,14 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import wasmtime
+
+from quickjs_rs._transform import SourceTransformer, TransformError
+from quickjs_rs._wasmtime import (
+    SharedWasmArtifact,
+    instantiate_wasm_artifact,
+    shared_wasm_artifact,
+    shared_wasmtime_engine,
+)
 
 _BUNDLED_WASM = "_guest.wasm"  # package-data filename inside quickjs_rs/
 
@@ -198,15 +205,6 @@ UNDEFINED = Undefined()
 # concurrent instances on different threads never collide.
 # --------------------------------------------------------------------------
 
-_SHARED_ENGINE: wasmtime.Engine | None = None
-_SHARED_MODULE: wasmtime.Module | None = None
-_SHARED_LINKER: wasmtime.Linker | None = None
-_SHARED_BUILD_ID: bytes | None = None
-# Guards the one-time lazy compilation + linker build below. Concurrent
-# first-touch from multiple threads would otherwise race on the global
-# engine/module/linker construction and corrupt wasmtime state.
-_SHARED_INIT_LOCK = threading.Lock()
-
 # Per-thread pointer to the `_Instance` whose export is currently executing; the
 # shared host-import trampolines read `_CUR.inst` to route back to it (see the
 # domain note above and `_Instance.c()`).
@@ -241,7 +239,7 @@ def _tramp_host_module_load(name_ptr: int, name_len: int, out_len_ptr: int) -> i
 def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
     """Build the process-shared Linker, registering the 4 host-function imports
     exactly once (so wasmtime-py's global slab is touched a constant number of
-    times — see the domain note above). Called under `_SHARED_INIT_LOCK`."""
+    times — see the domain note above)."""
     linker = wasmtime.Linker(engine)
     linker.define_wasi()
     i32 = wasmtime.ValType.i32
@@ -270,30 +268,13 @@ def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
     return linker
 
 
-def _shared_engine_and_module() -> tuple[wasmtime.Engine, wasmtime.Module, wasmtime.Linker, bytes]:
-    """Lazily build the process-shared Engine + compiled Module + Linker once and
-    cache them. Returns (engine, module, linker, build_id). Callers
-    `instantiate(store, module)` the shared Linker into their own per-instance
-    Store rather than registering host imports per instance (see domain note)."""
-    global _SHARED_ENGINE, _SHARED_MODULE, _SHARED_LINKER, _SHARED_BUILD_ID
-    # Double-checked locking: the fast path (already built) avoids the lock; the
-    # slow path serializes the one-time construction so concurrent first callers
-    # don't race wasmtime's engine/module/linker construction.
-    if _SHARED_MODULE is None:
-        with _SHARED_INIT_LOCK:
-            if _SHARED_MODULE is None:
-                wasm_bytes = _read_guest_wasm()
-                _SHARED_BUILD_ID = hashlib.sha256(wasm_bytes).digest()
-                _SHARED_ENGINE = wasmtime.Engine()
-                # ~60ms, once
-                _SHARED_MODULE = wasmtime.Module(_SHARED_ENGINE, wasm_bytes)
-                _SHARED_LINKER = _build_shared_linker(_SHARED_ENGINE)
-    assert (
-        _SHARED_ENGINE is not None
-        and _SHARED_LINKER is not None
-        and _SHARED_BUILD_ID is not None
+def _quickjs_artifact() -> SharedWasmArtifact:
+    """Lazily return the process-shared QuickJS artifact."""
+    return shared_wasm_artifact(
+        "quickjs",
+        _read_guest_wasm,
+        _build_shared_linker,
     )
-    return _SHARED_ENGINE, _SHARED_MODULE, _SHARED_LINKER, _SHARED_BUILD_ID
 
 
 # --------------------------------------------------------------------------
@@ -311,8 +292,9 @@ class _Instance:
         # ONCE on the shared Linker — we do NOT define_func per instance (that
         # raced wasmtime-py's global slab). The shared trampolines route back
         # here via the `_CUR` thread-local set in `c()`.
-        self.engine, module, linker, self.build_id = _shared_engine_and_module()
-        self.store = wasmtime.Store(self.engine)
+        artifact = _quickjs_artifact()
+        self.build_id = artifact.build_id
+        self.store = wasmtime.Store(shared_wasmtime_engine())
         wasi = wasmtime.WasiConfig()
         wasi.inherit_stdout()
         wasi.inherit_stderr()
@@ -325,7 +307,7 @@ class _Instance:
 
         # Instantiate the SHARED precompiled module via the SHARED linker (no
         # recompile, no per-instance import registration — ~0.3ms).
-        self.inst = linker.instantiate(self.store, module)
+        self.inst = instantiate_wasm_artifact(artifact, self.store)
         e = self.inst.exports(self.store)
         # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
         # we know the concrete kinds for these named exports.
@@ -356,6 +338,7 @@ class _Instance:
         # (the guest surfaces a clean JS error).
         self.module_normalize: Callable[[str, str], str | None] | None = None
         self.module_load: Callable[[str], str | None] | None = None
+        self.module_transformer = SourceTransformer()
         self._closed = False
 
     def close(self) -> None:
@@ -376,7 +359,10 @@ class _Instance:
         if self._closed:
             return
         self._closed = True
-        self.store.close()
+        try:
+            self.module_transformer.close()
+        finally:
+            self.store.close()
 
     # -- raw export call --
     def c(self, name: str, *args: Any) -> Any:
@@ -583,10 +569,12 @@ class _Instance:
             source = self.module_load(name)
             if source is None:
                 return 0
-            data = str(source).encode()
+            data = self.module_transformer.transform(name, str(source)).encode()
             p = self.alloc_write(data)
             self.mem.write(self.store, struct.pack("<I", len(data)), out_len_ptr)
             return p
+        except TransformError:
+            return 0
         except Exception:
             return 0
 
@@ -1031,9 +1019,13 @@ class QjsRuntime:
         # Apply resource limits BEFORE any eval (the first eval creates the
         # guest runtime, which reads these). set_*_limit is idempotent.
         if self._memory_limit is not None:
-            inst.c("set_memory_limit", self._memory_limit)
+            st = inst.c("set_memory_limit", self._memory_limit)
+            if st != STATUS_OK:
+                raise QuickJSError(f"set_memory_limit status={st}")
         if self._stack_limit is not None:
-            inst.c("set_max_stack_size", self._stack_limit)
+            st = inst.c("set_max_stack_size", self._stack_limit)
+            if st != STATUS_OK:
+                raise QuickJSError(f"set_max_stack_size status={st}")
         self._instances.add(inst)
         return inst
 
@@ -1054,7 +1046,9 @@ class QjsRuntime:
         its own wasm instance with its own heap, so a runtime-level GC fans out
         across all of them. No-op if no context is live."""
         for inst in self._instances:
-            inst.c("run_gc")
+            st = inst.c("run_gc")
+            if st != STATUS_OK:
+                raise QuickJSError(f"run_gc status={st}")
 
     def memory_usage(self) -> dict[str, int]:
         """Aggregate QuickJS memory counters across every live context's heap.
