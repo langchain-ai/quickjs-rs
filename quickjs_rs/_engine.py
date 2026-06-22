@@ -338,6 +338,7 @@ class _Instance:
         # (the guest surfaces a clean JS error).
         self.module_normalize: Callable[[str, str], str | None] | None = None
         self.module_load: Callable[[str], str | None] | None = None
+        self.module_transform_flags: int | Callable[[str], int] | None = None
         self.module_transformer = SourceTransformer()
         self._closed = False
 
@@ -569,7 +570,11 @@ class _Instance:
             source = self.module_load(name)
             if source is None:
                 return 0
-            data = self.module_transformer.transform(name, str(source)).encode()
+            data = self.module_transformer.transform(
+                name,
+                str(source),
+                flags=self._module_transform_flags(name),
+            ).encode()
             p = self.alloc_write(data)
             self.mem.write(self.store, struct.pack("<I", len(data)), out_len_ptr)
             return p
@@ -577,6 +582,16 @@ class _Instance:
             return 0
         except Exception:
             return 0
+
+    def _module_transform_flags(self, name: str) -> int | None:
+        policy = self.module_transform_flags
+        if policy is None:
+            # SourceTransformer treats None as "use the default module policy";
+            # an explicit 0/SourceTransform.NONE disables transforms.
+            return None
+        if callable(policy):
+            return int(policy(name))
+        return int(policy)
 
     # ----------------------------------------------------------------------
     # Marshalling: Python value -> guest handle.
@@ -1007,6 +1022,7 @@ class QjsRuntime:
         self._interrupt_handler: Callable[[], Any] | None = None
         self._module_normalize: Callable[[str, str], str | None] | None = None
         self._module_load: Callable[[str], str | None] | None = None
+        self._module_transform_flags: int | Callable[[str], int] | None = None
         self._instances: weakref.WeakSet[_Instance] = weakref.WeakSet()
 
     def _new_instance(self) -> _Instance:
@@ -1015,6 +1031,7 @@ class QjsRuntime:
         inst = _Instance(memory_limit=self._memory_limit, stack_limit=self._stack_limit)
         inst.module_normalize = self._module_normalize
         inst.module_load = self._module_load
+        inst.module_transform_flags = self._module_transform_flags
         inst.interrupt_handler = self._interrupt_handler
         # Apply resource limits BEFORE any eval (the first eval creates the
         # guest runtime, which reads these). set_*_limit is idempotent.
@@ -1067,15 +1084,18 @@ class QjsRuntime:
         *,
         normalize: Callable[[str, str], str | None] | None = None,
         load: Callable[[str], str | None] | None = None,
+        transform_flags: int | Callable[[str], int] | None = None,
     ) -> None:
         """Install a host module loader. normalize(base, spec) ->
         canonical name (default identity); load(name) -> source.
         Routed to every existing + future instance."""
         self._module_normalize = normalize
         self._module_load = load
+        self._module_transform_flags = transform_flags
         for inst in self._instances:
             inst.module_normalize = normalize
             inst.module_load = load
+            inst.module_transform_flags = transform_flags
 
     def close(self) -> None:
         self._closed = True

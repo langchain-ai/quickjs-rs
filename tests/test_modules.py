@@ -13,7 +13,7 @@ import posixpath
 
 import pytest
 
-from quickjs_rs import JSError, Runtime
+from quickjs_rs import JSError, Runtime, SourceTransform, default_module_transform_flags
 
 
 def _flat_loader(sources: dict[str, str]):
@@ -351,6 +351,87 @@ def test_js_module_is_not_stripped() -> None:
         with rt.new_context() as ctx:
             with pytest.raises(JSError):
                 ctx.eval("import { add } from 'bad.js'; add", module=True)
+
+
+def test_module_loader_can_apply_public_transform_flags_to_any_name() -> None:
+    """The host can explicitly choose TypeScript parsing independent of name."""
+    normalize, load = _flat_loader(
+        {"typed.js": "export const add = (a: number, b: number): number => a + b;"}
+    )
+    with Runtime() as rt:
+        rt.set_module_loader(
+            normalize=normalize,
+            load=load,
+            transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT,
+        )
+        with rt.new_context() as ctx:
+            with _eval_module(
+                ctx, "import { add } from 'typed.js'; export const r = add(3, 4);"
+            ) as ns:
+                r = ns.get("r")
+                try:
+                    assert r.to_python() == 7
+                finally:
+                    r.dispose()
+
+
+def test_module_loader_can_disable_default_transform_policy() -> None:
+    normalize, load = _flat_loader({"typed.ts": "export const value: number = 5;"})
+    with Runtime() as rt:
+        rt.set_module_loader(
+            normalize=normalize,
+            load=load,
+            transform_flags=SourceTransform.NONE,
+        )
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError):
+                ctx.eval("import { value } from 'typed.ts'; value", module=True)
+
+
+def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch) -> None:
+    seen_flags: list[int] = []
+
+    from quickjs_rs._transform import SourceTransformer
+
+    original_transform = SourceTransformer.transform
+
+    def record_transform(
+        self: SourceTransformer,
+        name: str,
+        source: str,
+        *,
+        flags: int | None = None,
+    ) -> str:
+        assert flags is not None
+        seen_flags.append(flags)
+        return original_transform(self, name, source, flags=flags)
+
+    monkeypatch.setattr("quickjs_rs._engine.SourceTransformer.transform", record_transform)
+
+    normalize, load = _flat_loader({"model.ts": "export const value: number = 5;"})
+
+    def flags_for(name: str) -> SourceTransform:
+        return default_module_transform_flags(name) | SourceTransform.TOP_LEVEL_CONST_TO_VAR
+
+    with Runtime() as rt:
+        rt.set_module_loader(normalize=normalize, load=load, transform_flags=flags_for)
+        with rt.new_context() as ctx:
+            with _eval_module(
+                ctx, "import { value } from 'model.ts'; export const r = value;"
+            ) as ns:
+                r = ns.get("r")
+                try:
+                    assert r.to_python() == 5
+                finally:
+                    r.dispose()
+
+    assert seen_flags == [
+        int(
+            SourceTransform.SOURCE_TS
+            | SourceTransform.STRIP_TYPESCRIPT
+            | SourceTransform.TOP_LEVEL_CONST_TO_VAR
+        )
+    ]
 
 
 def test_malformed_ts_surfaces_as_error() -> None:

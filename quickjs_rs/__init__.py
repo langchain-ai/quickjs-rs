@@ -19,6 +19,11 @@ from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
 from quickjs_rs.threading import ThreadWorker
+from quickjs_rs.transforms import (
+    SourceTransform,
+    default_module_transform_flags,
+    transform_source,
+)
 
 __version__ = "0.2.0"
 
@@ -28,6 +33,9 @@ __all__ = [
     "Handle",
     "Snapshot",
     "ThreadWorker",
+    "SourceTransform",
+    "default_module_transform_flags",
+    "transform_source",
     "Undefined",
     "UNDEFINED",
     "QuickJSError",

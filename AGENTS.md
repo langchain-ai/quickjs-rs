@@ -42,7 +42,8 @@ Repository conventions for coding agents and contributors.
     scope tree / sandbox.
   - `.ts`/`.mts`/`.cts`/`.tsx` module sources are type-stripped by the host
     transform adapter (`quickjs_rs/_transform.py` driving `_transform.wasm`)
-    before the QuickJS guest receives source.
+    before the QuickJS guest receives source. Hosts may override or extend this
+    with public `SourceTransform` flags via `rt.set_module_loader(transform_flags=...)`.
 - Snapshots are whole-memory (entire guest heap; closures + pending promises
   survive); restore validates a fail-closed header incl. `build_id`.
 
