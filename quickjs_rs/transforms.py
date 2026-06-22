@@ -1,4 +1,4 @@
-"""Source transform controls for module loading."""
+"""Source transform controls for eval and module loading."""
 
 from __future__ import annotations
 

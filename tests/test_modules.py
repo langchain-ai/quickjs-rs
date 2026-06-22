@@ -388,6 +388,38 @@ def test_module_loader_can_disable_default_transform_policy() -> None:
                 ctx.eval("import { value } from 'typed.ts'; value", module=True)
 
 
+def test_module_loader_inherits_runtime_transform_policy() -> None:
+    normalize, load = _flat_loader({"typed.js": "export const value: number = 16;"})
+    with Runtime(
+        transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT
+    ) as rt:
+        rt.set_module_loader(normalize=normalize, load=load)
+        with rt.new_context() as ctx:
+            with _eval_module(
+                ctx, "import { value } from 'typed.js'; export const r = value;"
+            ) as ns:
+                r = ns.get("r")
+                try:
+                    assert r.to_python() == 16
+                finally:
+                    r.dispose()
+
+
+def test_module_loader_transform_flags_override_runtime_policy() -> None:
+    normalize, load = _flat_loader({"typed.ts": "export const value: number = 17;"})
+    with Runtime(
+        transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT
+    ) as rt:
+        rt.set_module_loader(
+            normalize=normalize,
+            load=load,
+            transform_flags=SourceTransform.NONE,
+        )
+        with rt.new_context() as ctx:
+            with pytest.raises(JSError):
+                ctx.eval("import { value } from 'typed.ts'; value", module=True)
+
+
 def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch) -> None:
     seen_flags: list[int] = []
 
@@ -402,8 +434,9 @@ def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch)
         *,
         flags: int | None = None,
     ) -> str:
-        assert flags is not None
-        seen_flags.append(flags)
+        if name == "model.ts":
+            assert flags is not None
+            seen_flags.append(flags)
         return original_transform(self, name, source, flags=flags)
 
     monkeypatch.setattr("quickjs_rs._engine.SourceTransformer.transform", record_transform)
