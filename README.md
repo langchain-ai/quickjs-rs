@@ -118,30 +118,57 @@ with Runtime() as rt:
 
 A TypeScript parse error surfaces as a module-load error rather than at eval.
 
-Transform flags are also public for hosts that need a different policy. For
-example, this enables the extra top-level `const` to `var` rewrite while keeping
-the default TypeScript/TSX behavior:
+Transform flags are also public for hosts that need a different policy. Runtime
+flags apply to top-level eval calls and module-loaded sources:
 
 ```python
-from quickjs_rs import (
-    Runtime,
-    SourceTransform,
-    default_module_transform_flags,
-    transform_source,
-)
+from quickjs_rs import Runtime, SourceTransform
+
+with Runtime(transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR) as rt:
+    with rt.new_context() as ctx:
+        ctx.eval("const exposed = 1;")
+        assert ctx.eval("globalThis.exposed") == 1
+```
+
+For TypeScript sources, choose the source kind explicitly:
+
+```python
+from quickjs_rs import Runtime, SourceTransform
+
+with Runtime(transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT) as rt:
+    with rt.new_context() as ctx:
+        assert ctx.eval("const value: number = 2; value") == 2
+```
+
+Eval calls can override the runtime policy:
+
+```python
+ctx.eval("const scoped = 1;", transform_flags=SourceTransform.NONE)
+```
+
+Module loaders can also override the runtime policy per canonical module name.
+For example, this enables the extra top-level `const` to `var` rewrite while
+keeping the default TypeScript/TSX module behavior:
+
+```python
+from quickjs_rs import SourceTransform, default_module_transform_flags
 
 def transform_flags(name):
     return default_module_transform_flags(name) | SourceTransform.TOP_LEVEL_CONST_TO_VAR
 
-with Runtime() as rt:
-    rt.set_module_loader(load=sources.get, transform_flags=transform_flags)
+rt.set_module_loader(load=sources.get, transform_flags=transform_flags)
 ```
 
-Pass `SourceTransform.NONE` to disable transforms explicitly.
+Policy precedence is: per-eval `transform_flags`, then module-loader
+`transform_flags`, then runtime `transform_flags`, then the default module
+TypeScript/TSX policy. Pass `SourceTransform.NONE` to disable transforms
+explicitly.
 
 For one-off transforms outside module loading, use `transform_source()`:
 
 ```python
+from quickjs_rs import SourceTransform, transform_source
+
 js = transform_source(
     "plain.js",
     "export const value = 1;",

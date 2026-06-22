@@ -27,6 +27,7 @@ from quickjs_rs.globals import Globals
 from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
+from quickjs_rs.transforms import TransformFlagsProvider
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
@@ -178,12 +179,14 @@ class Context:
         module: bool = False,
         strict: bool = False,
         filename: str = "<eval>",
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> Handle:
         """Evaluate JS code and return the result as an opaque Handle.
 
         Unlike :meth:`eval`, the result is never marshaled — functions,
         symbols, promises, and other opaque values all come back as
-        Handles.
+        Handles. ``transform_flags`` overrides the runtime transform policy for
+        this call; pass ``SourceTransform.NONE`` to disable transforms.
         """
         if self._closed:
             raise QuickJSError("context is closed")
@@ -200,6 +203,7 @@ class Context:
                 module=module,
                 strict=strict,
                 filename=filename,
+                transform_flags=transform_flags,
             )
         except _engine.JSError as e:
             name, message, stack = e.args
@@ -224,12 +228,15 @@ class Context:
         module: bool = False,
         strict: bool = False,
         filename: str = "<eval>",
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> Any:
         """Evaluate JS code and return the result as a Python value.
 
-        Tthe wall-clock timeout is measured from the start of
+        The wall-clock timeout is measured from the start of
         each call. The runtime's interrupt handler reads the deadline
-        written here and aborts execution when it elapses.
+        written here and aborts execution when it elapses. ``transform_flags``
+        overrides the runtime transform policy for this call; pass
+        ``SourceTransform.NONE`` to disable transforms.
         """
         if self._closed:
             raise QuickJSError("context is closed")
@@ -253,6 +260,7 @@ class Context:
                 module=module,
                 strict=strict,
                 filename=filename,
+                transform_flags=transform_flags,
             )
         except _engine.JSError as e:
             name, message, stack = e.args
@@ -475,6 +483,7 @@ class Context:
         strict: bool = False,
         filename: str = "<eval>",
         timeout: float | None = None,
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> Any:
         """Evaluate code with top-level await + async host-call support.
 
@@ -496,6 +505,8 @@ class Context:
 
         Timeout semantics: ``timeout`` overrides this call's deadline.
         If omitted, the context default timeout is used for this call.
+        ``transform_flags`` overrides the runtime transform policy for this
+        call; pass ``SourceTransform.NONE`` to disable transforms.
 
         Cancellation: if the enclosing asyncio task is cancelled,
         the driving loop rejects in-flight host-call Promises with a
@@ -510,6 +521,7 @@ class Context:
             strict=strict,
             filename=filename,
             timeout=timeout,
+            transform_flags=transform_flags,
         )
         # Settled is a Handle; marshal to Python. Two unwrap paths:
         #
@@ -539,13 +551,16 @@ class Context:
         strict: bool = False,
         filename: str = "<eval>",
         timeout: float | None = None,
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> Handle:
         """Same driving flow as :meth:`eval_async`, but return the
         settled value as a :class:`Handle` rather than marshaling.
 
         Timeout semantics match :meth:`eval_async`: ``timeout``
         overrides this call's deadline, and the context default is
-        used when omitted.
+        used when omitted. ``transform_flags`` overrides the runtime transform
+        policy for this call; pass ``SourceTransform.NONE`` to disable
+        transforms.
 
         ``module=True``: returns a Handle to ``undefined`` (ES
         modules complete with undefined). The module's exports are
@@ -558,6 +573,7 @@ class Context:
             strict=strict,
             filename=filename,
             timeout=timeout,
+            transform_flags=transform_flags,
         )
         if module:
             # The settled promise resolves to undefined; just return
@@ -577,6 +593,7 @@ class Context:
         strict: bool,
         filename: str,
         timeout: float | None,
+        transform_flags: TransformFlagsProvider | None,
     ) -> Handle:
         """Shared prologue + eval + driving loop for eval_async and
         eval_handle_async. Returns a Handle to the settled value
@@ -604,7 +621,14 @@ class Context:
         self._runtime._deadline = deadline
         try:
             settled = await self._run_inside_task_group(
-                lambda: self._eval_for_async(code, module, strict, filename, deadline),
+                lambda: self._eval_for_async(
+                    code,
+                    module,
+                    strict,
+                    filename,
+                    deadline,
+                    transform_flags,
+                ),
                 deadline,
             )
         finally:
@@ -619,6 +643,7 @@ class Context:
         strict: bool,
         filename: str,
         deadline: float,
+        transform_flags: TransformFlagsProvider | None,
     ) -> Handle:
         """Synchronous eval inside an already-open TaskGroup scope.
         Any async host calls dispatched during this eval become
@@ -638,6 +663,7 @@ class Context:
                 inner = self._engine_ctx.eval_module_async(
                     code,
                     filename=filename,
+                    transform_flags=transform_flags,
                 )
             else:
                 inner = self._engine_ctx.eval_handle(
@@ -646,6 +672,7 @@ class Context:
                     strict=strict,
                     promise=True,
                     filename=filename,
+                    transform_flags=transform_flags,
                 )
         except _engine.JSError as e:
             name, message, stack = e.args

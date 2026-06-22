@@ -338,8 +338,9 @@ class _Instance:
         # (the guest surfaces a clean JS error).
         self.module_normalize: Callable[[str, str], str | None] | None = None
         self.module_load: Callable[[str], str | None] | None = None
+        self.runtime_transform_flags: int | Callable[[str], int] | None = None
         self.module_transform_flags: int | Callable[[str], int] | None = None
-        self.module_transformer = SourceTransformer()
+        self.source_transformer = SourceTransformer()
         self._closed = False
 
     def close(self) -> None:
@@ -361,7 +362,7 @@ class _Instance:
             return
         self._closed = True
         try:
-            self.module_transformer.close()
+            self.source_transformer.close()
         finally:
             self.store.close()
 
@@ -570,10 +571,14 @@ class _Instance:
             source = self.module_load(name)
             if source is None:
                 return 0
-            data = self.module_transformer.transform(
+            data = self.source_transformer.transform(
                 name,
                 str(source),
-                flags=self._module_transform_flags(name),
+                flags=self._source_transform_flags(
+                    name,
+                    override=self.module_transform_flags,
+                    use_module_default=True,
+                ),
             ).encode()
             p = self.alloc_write(data)
             self.mem.write(self.store, struct.pack("<I", len(data)), out_len_ptr)
@@ -583,12 +588,35 @@ class _Instance:
         except Exception:
             return 0
 
-    def _module_transform_flags(self, name: str) -> int | None:
-        policy = self.module_transform_flags
+    def transform_eval_source(
+        self,
+        filename: str,
+        source: str,
+        *,
+        transform_flags: int | Callable[[str], int] | None,
+    ) -> str:
+        flags = self._source_transform_flags(
+            filename,
+            override=transform_flags,
+            use_module_default=False,
+        )
+        try:
+            return self.source_transformer.transform(filename, source, flags=flags)
+        except TransformError as e:
+            raise JSError("SyntaxError", str(e), None) from None
+
+    def _source_transform_flags(
+        self,
+        name: str,
+        *,
+        override: int | Callable[[str], int] | None,
+        use_module_default: bool,
+    ) -> int | None:
+        policy = override if override is not None else self.runtime_transform_flags
         if policy is None:
-            # SourceTransformer treats None as "use the default module policy";
-            # an explicit 0/SourceTransform.NONE disables transforms.
-            return None
+            # SourceTransformer treats None as "use the default module policy".
+            # For top-level eval, no policy means no transform.
+            return None if use_module_default else 0
         if callable(policy):
             return int(policy(name))
         return int(policy)
@@ -1015,9 +1043,16 @@ class QjsRuntime:
     it is a deliberate later (user-facing) decision.
     """
 
-    def __init__(self, *, memory_limit: int | None = None, stack_limit: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        memory_limit: int | None = None,
+        stack_limit: int | None = None,
+        transform_flags: int | Callable[[str], int] | None = None,
+    ) -> None:
         self._memory_limit = memory_limit
         self._stack_limit = stack_limit
+        self._transform_flags = transform_flags
         self._closed = False
         self._interrupt_handler: Callable[[], Any] | None = None
         self._module_normalize: Callable[[str, str], str | None] | None = None
@@ -1031,6 +1066,7 @@ class QjsRuntime:
         inst = _Instance(memory_limit=self._memory_limit, stack_limit=self._stack_limit)
         inst.module_normalize = self._module_normalize
         inst.module_load = self._module_load
+        inst.runtime_transform_flags = self._transform_flags
         inst.module_transform_flags = self._module_transform_flags
         inst.interrupt_handler = self._interrupt_handler
         # Apply resource limits BEFORE any eval (the first eval creates the
@@ -1120,9 +1156,20 @@ class QjsContext:
 
     # -- eval --
     def eval(
-        self, code: str, *, module: bool = False, strict: bool = False, filename: str = "<eval>"
+        self,
+        code: str,
+        *,
+        module: bool = False,
+        strict: bool = False,
+        filename: str = "<eval>",
+        transform_flags: int | Callable[[str], int] | None = None,
     ) -> Any:
-        handle = self._eval_to_handle(code, module=module)
+        handle = self._eval_to_handle(
+            code,
+            module=module,
+            filename=filename,
+            transform_flags=transform_flags,
+        )
         try:
             return self._inst.handle_to_python(handle, allow_opaque=False)
         finally:
@@ -1136,17 +1183,33 @@ class QjsContext:
         strict: bool = False,
         promise: bool = False,
         filename: str = "<eval>",
+        transform_flags: int | Callable[[str], int] | None = None,
     ) -> QjsHandle:
         # promise=True → JS_EVAL_FLAG_ASYNC (the guest `eval_async`), which
         # supports top-level await + multi-statement bodies and returns a
         # Promise handle that resolves to the {value} envelope.
         if promise:
-            handle = self._eval_async_to_handle(code)
+            handle = self._eval_async_to_handle(
+                code,
+                filename=filename,
+                transform_flags=transform_flags,
+            )
         else:
-            handle = self._eval_to_handle(code, module=module)
+            handle = self._eval_to_handle(
+                code,
+                module=module,
+                filename=filename,
+                transform_flags=transform_flags,
+            )
         return QjsHandle._adopt(self._inst, handle, context=self)
 
-    def eval_module_async(self, code: str, *, filename: str = "<eval>") -> QjsHandle:
+    def eval_module_async(
+        self,
+        code: str,
+        *,
+        filename: str = "<eval>",
+        transform_flags: int | Callable[[str], int] | None = None,
+    ) -> QjsHandle:
         # Module eval returning a Promise (Module::evaluate). Our guest's
         # eval_module evaluates synchronously and returns the namespace; wrap it
         # as an already-settled promise shape by re-evaluating under async eval
@@ -1154,10 +1217,27 @@ class QjsContext:
         # handle the drive loop treats as settled. context.py expects a Promise;
         # eval_module's result isn't one, so route module-async through the same
         # async eval path which DOES produce a promise.
-        handle = self._eval_async_to_handle(code, module=True)
+        handle = self._eval_async_to_handle(
+            code,
+            module=True,
+            filename=filename,
+            transform_flags=transform_flags,
+        )
         return QjsHandle._adopt(self._inst, handle, context=self)
 
-    def _eval_to_handle(self, code: str, *, module: bool) -> int:
+    def _eval_to_handle(
+        self,
+        code: str,
+        *,
+        module: bool,
+        filename: str,
+        transform_flags: int | Callable[[str], int] | None,
+    ) -> int:
+        code = self._inst.transform_eval_source(
+            filename,
+            code,
+            transform_flags=transform_flags,
+        )
         data = code.encode()
         inst = self._inst
         p = inst.alloc_write(data)
@@ -1183,13 +1263,25 @@ class QjsContext:
             raise JSError("Error", f"eval status={st}", None)
         return handle
 
-    def _eval_async_to_handle(self, code: str, *, module: bool = False) -> int:
+    def _eval_async_to_handle(
+        self,
+        code: str,
+        *,
+        module: bool = False,
+        filename: str = "<eval>",
+        transform_flags: int | Callable[[str], int] | None = None,
+    ) -> int:
         """Return a Promise handle the host drives to completion (settling async
         host calls + draining microtasks). For `module=True` the guest's
         `eval_module_async` compiles+links the module and returns its top-level
         -await promise; otherwise `eval_async` does JS_EVAL_FLAG_ASYNC script
         eval (the {value} envelope)."""
         inst = self._inst
+        code = inst.transform_eval_source(
+            filename,
+            code,
+            transform_flags=transform_flags,
+        )
         data = code.encode()
         p = inst.alloc_write(data)
         out = inst.alloc_out()
