@@ -185,58 +185,8 @@ impl Loader for HostLoader {
             Some(s) => s,
             None => return Err(rquickjs::Error::new_loading(name)),
         };
-        // Transparent TypeScript stripping: a `.ts`/`.mts`/`.cts`/`.tsx`
-        // canonical name is type-stripped before QuickJS sees it. Any
-        // other extension passes through unchanged.
-        let src = match maybe_strip_ts(name, src) {
-            Ok(s) => s,
-            // A TS parse error surfaces as a module-load failure → the eval
-            // returns STATUS_JS_ERROR → host JSError.
-            Err(_) => return Err(rquickjs::Error::new_loading(name)),
-        };
         Module::declare(ctx.clone(), name, src)
     }
-}
-
-/// Transparent TypeScript stripping (mirrors the native crate's
-/// `maybe_strip_ts`). If `name` ends in `.ts`/`.mts`/`.cts` → strip as TS,
-/// `.tsx` → strip as TSX (erases type annotations; transforms enums,
-/// namespaces, and parameter properties — see the oxidase README). Any other
-/// extension passes through unchanged. No type checking.
-///
-/// Import specifiers are NOT rewritten: `import { x } from "./y.ts"` stays
-/// `"./y.ts"` so the resolver still finds the key exactly as written.
-///
-/// `oxidase::transpile` can panic on malformed input, so it runs inside
-/// `catch_unwind` — a parser panic becomes a clean `Err`, never an unwind
-/// across the wasm boundary.
-fn maybe_strip_ts(name: &str, source: String) -> core::result::Result<String, String> {
-    let source_type = if name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts") {
-        oxidase::SourceType::ts()
-    } else if name.ends_with(".tsx") {
-        oxidase::SourceType::tsx()
-    } else {
-        return Ok(source); // .js/.mjs/.cjs/no-ext/anything else — pass through
-    };
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let allocator = oxidase::Allocator::default();
-        let mut buf = source;
-        let ret = oxidase::transpile(&allocator, source_type, &mut buf);
-        let errors: Vec<String> = ret.parser_errors.iter().map(|d| d.to_string()).collect();
-        (buf, ret.parser_panicked, errors)
-    }));
-
-    let (buf, panicked, errors) =
-        outcome.map_err(|_| format!("oxidase panicked while parsing {name}"))?;
-    if panicked {
-        return Err(if errors.is_empty() {
-            format!("oxidase failed to parse {name}")
-        } else {
-            format!("TypeScript parse error in {name}: {}", errors.join("; "))
-        });
-    }
-    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------

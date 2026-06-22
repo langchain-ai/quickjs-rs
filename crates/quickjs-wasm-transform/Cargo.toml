@@ -1,0 +1,30 @@
+# quickjs-wasm-transform - OXC-backed source transform artifact.
+#
+# This crate is intentionally separate from quickjs-wasm. QuickJS execution
+# should not pay for the OXC dependency graph in every trust barrier.
+[workspace]
+
+[package]
+name = "quickjs-wasm-transform"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oxc_allocator = "=0.137.0"
+oxc_ast = "=0.137.0"
+oxc_codegen = { version = "=0.137.0", default-features = false }
+oxc_parser = "=0.137.0"
+oxc_semantic = "=0.137.0"
+oxc_span = "=0.137.0"
+oxc_transformer = "=0.137.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"

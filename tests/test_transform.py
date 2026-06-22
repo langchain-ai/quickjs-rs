@@ -1,0 +1,133 @@
+from quickjs_rs import Runtime
+from quickjs_rs._engine import _quickjs_artifact
+from quickjs_rs._transform import (
+    FLAG_SOURCE_TSX,
+    FLAG_STRIP_TYPESCRIPT,
+    FLAG_TOP_LEVEL_CONST_TO_VAR,
+    SourceTransformer,
+    transform_module_source,
+)
+
+
+def test_source_kind_is_explicit_host_policy_not_filename() -> None:
+    source = "export function pick(o: {n: number}): number { return o.n; }"
+
+    transformed = transform_module_source(
+        "not-a-tsx-extension",
+        source,
+        flags=FLAG_SOURCE_TSX | FLAG_STRIP_TYPESCRIPT,
+    )
+
+    assert "number" not in transformed
+    assert "export function pick(o)" in transformed
+
+
+def test_top_level_const_to_var_rewrites_only_top_level_declarations() -> None:
+    source = """
+const a = 1;
+{
+  const nested = 2;
+}
+export const b = 3;
+function f() {
+  const local = 4;
+}
+"""
+
+    transformed = transform_module_source(
+        "plain.js",
+        source,
+        flags=FLAG_TOP_LEVEL_CONST_TO_VAR,
+    )
+
+    assert "var a = 1;" in transformed
+    assert "export var b = 3;" in transformed
+    assert "const nested = 2;" in transformed
+    assert "const local = 4;" in transformed
+
+
+def test_source_transformer_reuses_owned_instance_and_cache() -> None:
+    transformer = SourceTransformer()
+    source = "export const x: number = 1;"
+    flags = FLAG_SOURCE_TSX | FLAG_STRIP_TYPESCRIPT
+
+    try:
+        assert transformer.transform("same.tsx", source, flags=flags)
+        first_instance = transformer._instance
+        assert first_instance is not None
+
+        assert transformer.transform("same.tsx", source, flags=flags)
+
+        assert transformer._instance is first_instance
+        assert len(transformer._cache) == 1
+    finally:
+        transformer.close()
+
+
+def test_source_transformers_have_distinct_instances() -> None:
+    a = SourceTransformer()
+    b = SourceTransformer()
+    source = "export const x: number = 1;"
+    flags = FLAG_SOURCE_TSX | FLAG_STRIP_TYPESCRIPT
+
+    try:
+        assert a.transform("same.tsx", source, flags=flags)
+        assert b.transform("same.tsx", source, flags=flags)
+
+        assert a._instance is not None
+        assert b._instance is not None
+        assert a._instance is not b._instance
+    finally:
+        a.close()
+        b.close()
+
+
+def test_transform_and_quickjs_artifacts_do_not_store_engine() -> None:
+    transformer = SourceTransformer()
+    quickjs_artifact = _quickjs_artifact()
+    source = "export const x: number = 1;"
+    flags = FLAG_SOURCE_TSX | FLAG_STRIP_TYPESCRIPT
+
+    try:
+        transformer.transform("same.tsx", source, flags=flags)
+
+        assert transformer._artifact is not None
+        assert not hasattr(transformer._artifact, "engine")
+        assert not hasattr(quickjs_artifact, "engine")
+    finally:
+        transformer.close()
+
+
+def test_module_loader_uses_context_owned_transformers(monkeypatch) -> None:
+    seen_transformers: list[int] = []
+    original_transform = SourceTransformer.transform
+
+    def record_transform(
+        self: SourceTransformer,
+        name: str,
+        source: str,
+        *,
+        flags: int = 0,
+    ) -> str:
+        seen_transformers.append(id(self))
+        return original_transform(self, name, source, flags=flags)
+
+    monkeypatch.setattr("quickjs_rs._engine.SourceTransformer.transform", record_transform)
+
+    with Runtime() as rt:
+        rt.set_module_loader(load=lambda name: "export const value: number = 5;")
+        with rt.new_context() as ctx1:
+            with ctx1.eval_handle(
+                "import { value } from 'x.ts'; export const r = value;",
+                module=True,
+            ):
+                pass
+        with rt.new_context() as ctx2:
+            with ctx2.eval_handle(
+                "import { value } from 'x.ts'; export const r = value;",
+                module=True,
+            ):
+                pass
+
+    assert len(seen_transformers) == 2
+    assert seen_transformers[0] != seen_transformers[1]

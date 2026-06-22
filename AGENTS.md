@@ -10,13 +10,14 @@ Repository conventions for coding agents and contributors.
   `QjsContext`, `QjsHandle`, marshalling, the env imports).
 - `quickjs_rs/` is the public Python API (`Runtime`, `Context`, `Handle`,
   `Snapshot`).
-- The guest `.wasm` is built fresh from source and bundled into the package as
-  `quickjs_rs/_guest.wasm` (gitignored, never committed); the wheel build hook
-  (`hatch_build.py`) produces it via `scripts/build_guest.py`.
+- WASM artifacts are built fresh from source and bundled into the package as
+  `quickjs_rs/_guest.wasm` and `quickjs_rs/_transform.wasm` (gitignored, never
+  committed); the wheel build hook (`hatch_build.py`) produces them via
+  `scripts/build_guest.py`.
 
 ## Build and verification
 
-- Build the guest wasm + bundle it: `python scripts/build_guest.py`
+- Build the wasm guests + bundle them: `python scripts/build_guest.py`
   (needs the Rust toolchain + `rustup target add wasm32-wasip1`).
 - Install dev deps: `pip install -e ".[dev]"`
 - Tests: `pytest`  (run async files per-file under a timeout; never wedge the suite)
@@ -39,8 +40,9 @@ Repository conventions for coding agents and contributors.
     `rt.set_module_loader(normalize=, load=)`.
   - The host owns ALL resolution policy in `normalize` — there is no built-in
     scope tree / sandbox.
-  - `.ts`/`.mts`/`.cts`/`.tsx` module sources are type-stripped in the guest
-    loader (via oxidase) before evaluation.
+  - `.ts`/`.mts`/`.cts`/`.tsx` module sources are type-stripped by the host
+    transform adapter (`quickjs_rs/_transform.py` driving `_transform.wasm`)
+    before the QuickJS guest receives source.
 - Snapshots are whole-memory (entire guest heap; closures + pending promises
   survive); restore validates a fail-closed header incl. `build_id`.
 

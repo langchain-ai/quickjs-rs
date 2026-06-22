@@ -1,9 +1,9 @@
-"""Hatchling build hook: build + bundle the guest wasm before packaging.
+"""Hatchling build hook: build + bundle WASM guests before packaging.
 
-Runs `scripts/build_guest.py` (cargo build → copy to quickjs_rs/_guest.wasm) at
-both wheel-build and sdist time, and registers the produced wasm as a force-
-included build artifact so it lands in the wheel. Build-fresh: the wasm is
-reproduced from source on every build; nothing binary is committed.
+Runs `scripts/build_guest.py` at both wheel-build and sdist time, and registers
+the produced wasm files as force-included build artifacts so they land in the
+wheel. Build-fresh: wasm is reproduced from source on every build; nothing
+binary is committed.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 _ROOT = Path(__file__).resolve().parent
-_BUNDLED = "quickjs_rs/_guest.wasm"
+_BUNDLED = ("quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm")
 
 
 class GuestWasmBuildHook(BuildHookInterface):
@@ -26,6 +26,9 @@ class GuestWasmBuildHook(BuildHookInterface):
         import build_guest  # noqa: E402
 
         build_guest.build()
-        # Ensure the produced artifact is included in the build (wheel + sdist).
-        build_data.setdefault("force_include", {})[str(_ROOT / _BUNDLED)] = _BUNDLED
-        build_data.setdefault("artifacts", []).append(_BUNDLED)
+        # Ensure the produced artifacts are included in the build (wheel + sdist).
+        force_include = build_data.setdefault("force_include", {})
+        artifacts = build_data.setdefault("artifacts", [])
+        for bundled in _BUNDLED:
+            force_include[str(_ROOT / bundled)] = bundled
+            artifacts.append(bundled)
