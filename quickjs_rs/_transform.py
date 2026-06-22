@@ -46,7 +46,7 @@ def transform_module_source(
     name: str,
     source: str,
     *,
-    flags: int = 0,
+    flags: int | None = None,
 ) -> str:
     """Transform one source using a temporary isolated transform instance.
 
@@ -103,12 +103,14 @@ class SourceTransformer:
         name: str,
         source: str,
         *,
-        flags: int = 0,
+        flags: int | None = None,
     ) -> str:
         if self._closed:
             raise TransformError("source transformer is closed")
-        if flags == 0:
+        if flags is None:
             flags = module_transform_flags(name)
+        else:
+            flags = int(flags)
         if flags == 0:
             return source
 

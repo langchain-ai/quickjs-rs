@@ -10,6 +10,7 @@ from typing import Any, cast
 import quickjs_rs._engine as _engine
 from quickjs_rs.errors import QuickJSError
 from quickjs_rs.snapshot import Snapshot
+from quickjs_rs.transforms import TransformFlagsProvider
 
 
 def _validate_runtime_context(runtime: Runtime, ctx: Any) -> None:
@@ -115,6 +116,7 @@ class Runtime:
         *,
         normalize: Callable[[str, str], str | None] | None = None,
         load: Callable[[str], str | None],
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> None:
         """Install a host module loader for ES `import`/`export` resolution
         The loader is shared by every context on this runtime.
@@ -130,6 +132,13 @@ class Runtime:
             load: ``load(canonical_name) -> source``. Return the module source
                 (a string) for a canonical name, or ``None`` if not found.
                 Required.
+            transform_flags: Optional source transform policy. ``None`` keeps
+                the default behavior: `.ts`/`.mts`/`.cts`/`.tsx` modules are
+                stripped as TypeScript/TSX based on canonical name and other
+                modules pass through unchanged. Pass a ``SourceTransform`` value
+                to apply fixed flags to every loaded module, or pass
+                ``transform_flags(name) -> SourceTransform`` to choose flags per
+                canonical name.
 
         Static imports are resolved synchronously at module instantiation, so
         these callbacks are invoked synchronously by the guest. They run on the
@@ -137,7 +146,11 @@ class Runtime:
         """
         if self._closed:
             raise QuickJSError("runtime is closed")
-        self._engine_rt.set_module_loader(normalize=normalize, load=load)
+        self._engine_rt.set_module_loader(
+            normalize=normalize,
+            load=load,
+            transform_flags=transform_flags,
+        )
 
     def restore_snapshot(
         self,

@@ -118,6 +118,37 @@ with Runtime() as rt:
 
 A TypeScript parse error surfaces as a module-load error rather than at eval.
 
+Transform flags are also public for hosts that need a different policy. For
+example, this enables the extra top-level `const` to `var` rewrite while keeping
+the default TypeScript/TSX behavior:
+
+```python
+from quickjs_rs import (
+    Runtime,
+    SourceTransform,
+    default_module_transform_flags,
+    transform_source,
+)
+
+def transform_flags(name):
+    return default_module_transform_flags(name) | SourceTransform.TOP_LEVEL_CONST_TO_VAR
+
+with Runtime() as rt:
+    rt.set_module_loader(load=sources.get, transform_flags=transform_flags)
+```
+
+Pass `SourceTransform.NONE` to disable transforms explicitly.
+
+For one-off transforms outside module loading, use `transform_source()`:
+
+```python
+js = transform_source(
+    "plain.js",
+    "export const value = 1;",
+    flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR,
+)
+```
+
 ## Snapshots
 
 A snapshot captures the **entire** guest heap — every object, the atom table,

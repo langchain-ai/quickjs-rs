@@ -1,4 +1,9 @@
-from quickjs_rs import Runtime
+from quickjs_rs import (
+    Runtime,
+    SourceTransform,
+    default_module_transform_flags,
+    transform_source,
+)
 from quickjs_rs._engine import _quickjs_artifact
 from quickjs_rs._transform import (
     FLAG_SOURCE_TSX,
@@ -44,6 +49,32 @@ function f() {
     assert "export var b = 3;" in transformed
     assert "const nested = 2;" in transformed
     assert "const local = 4;" in transformed
+
+
+def test_public_transform_source_exposes_top_level_const_rewriter() -> None:
+    transformed = transform_source(
+        "plain.js",
+        "export const value = 1;",
+        flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR,
+    )
+
+    assert "export var value = 1;" in transformed
+
+
+def test_public_default_module_transform_flags() -> None:
+    assert default_module_transform_flags("plain.js") == SourceTransform.NONE
+    assert default_module_transform_flags("model.ts") == (
+        SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT
+    )
+    assert default_module_transform_flags("view.tsx") == (
+        SourceTransform.SOURCE_TSX | SourceTransform.STRIP_TYPESCRIPT
+    )
+
+
+def test_public_transform_source_none_disables_default_policy() -> None:
+    source = "export const value: number = 1;"
+
+    assert transform_source("model.ts", source, flags=SourceTransform.NONE) == source
 
 
 def test_source_transformer_reuses_owned_instance_and_cache() -> None:
@@ -107,7 +138,7 @@ def test_module_loader_uses_context_owned_transformers(monkeypatch) -> None:
         name: str,
         source: str,
         *,
-        flags: int = 0,
+        flags: int | None = None,
     ) -> str:
         seen_transformers.append(id(self))
         return original_transform(self, name, source, flags=flags)
