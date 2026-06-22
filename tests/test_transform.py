@@ -77,6 +77,60 @@ def test_public_transform_source_none_disables_default_policy() -> None:
     assert transform_source("model.ts", source, flags=SourceTransform.NONE) == source
 
 
+def test_runtime_transform_flags_apply_to_eval() -> None:
+    with Runtime(transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR) as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const runtimeEvalValue = 11;")
+
+            assert ctx.eval("globalThis.runtimeEvalValue") == 11
+
+
+def test_eval_transform_flags_override_runtime_policy() -> None:
+    with Runtime(transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR) as rt:
+        with rt.new_context() as ctx:
+            ctx.eval("const scopedValue = 12;", transform_flags=SourceTransform.NONE)
+
+            assert ctx.eval("'scopedValue' in globalThis") is False
+
+
+def test_eval_handle_transform_flags_apply_to_top_level_eval() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            with ctx.eval_handle(
+                "const handleEvalValue = {answer: 13}; globalThis.handleEvalValue",
+                transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR,
+            ) as handle:
+                answer = handle.get("answer")
+                try:
+                    assert answer.to_python() == 13
+                finally:
+                    answer.dispose()
+
+
+async def test_runtime_transform_flags_apply_to_eval_async() -> None:
+    with Runtime(transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR) as rt:
+        with rt.new_context() as ctx:
+            assert (
+                await ctx.eval_async(
+                    "const asyncEvalValue = 14; globalThis.asyncEvalValue"
+                )
+                == 14
+            )
+
+
+async def test_eval_handle_async_transform_flags_apply_to_top_level_eval() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            handle = await ctx.eval_handle_async(
+                "const asyncHandleValue: number = 15; asyncHandleValue",
+                transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT,
+            )
+            try:
+                assert handle.to_python() == 15
+            finally:
+                handle.dispose()
+
+
 def test_source_transformer_reuses_owned_instance_and_cache() -> None:
     transformer = SourceTransformer()
     source = "export const x: number = 1;"
@@ -140,7 +194,8 @@ def test_module_loader_uses_context_owned_transformers(monkeypatch) -> None:
         *,
         flags: int | None = None,
     ) -> str:
-        seen_transformers.append(id(self))
+        if name == "x.ts":
+            seen_transformers.append(id(self))
         return original_transform(self, name, source, flags=flags)
 
     monkeypatch.setattr("quickjs_rs._engine.SourceTransformer.transform", record_transform)

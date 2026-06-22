@@ -33,7 +33,9 @@ class Runtime:
     Per-eval deadlines are written into ``self._deadline`` by the
     ``Context`` layer before each eval and cleared after; the handler
     reads that slot on every QuickJS interrupt poll and returns True
-    once the deadline has elapsed.
+    once the deadline has elapsed. ``transform_flags`` sets the default
+    source transform policy for top-level eval calls and module-loaded
+    sources.
     """
 
     def __init__(
@@ -41,11 +43,13 @@ class Runtime:
         *,
         memory_limit: int | None = 64 * 1024 * 1024,
         stack_limit: int | None = 1 * 1024 * 1024,
+        transform_flags: TransformFlagsProvider | None = None,
     ) -> None:
         try:
             self._engine_rt = _engine.QjsRuntime(
                 memory_limit=memory_limit,
                 stack_limit=stack_limit,
+                transform_flags=transform_flags,
             )
         except _engine.QuickJSError as e:
             raise QuickJSError(str(e)) from e
@@ -132,13 +136,14 @@ class Runtime:
             load: ``load(canonical_name) -> source``. Return the module source
                 (a string) for a canonical name, or ``None`` if not found.
                 Required.
-            transform_flags: Optional source transform policy. ``None`` keeps
-                the default behavior: `.ts`/`.mts`/`.cts`/`.tsx` modules are
-                stripped as TypeScript/TSX based on canonical name and other
-                modules pass through unchanged. Pass a ``SourceTransform`` value
-                to apply fixed flags to every loaded module, or pass
-                ``transform_flags(name) -> SourceTransform`` to choose flags per
-                canonical name.
+            transform_flags: Optional module source transform policy. ``None``
+                inherits the runtime transform policy; if the runtime has none,
+                `.ts`/`.mts`/`.cts`/`.tsx` modules are stripped as
+                TypeScript/TSX based on canonical name and other modules pass
+                through unchanged. Pass a ``SourceTransform`` value to apply
+                fixed flags to every loaded module, or pass
+                ``transform_flags(name) -> SourceTransform`` to choose flags
+                per canonical name.
 
         Static imports are resolved synchronously at module instantiation, so
         these callbacks are invoked synchronously by the guest. They run on the
