@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quickjs-rs"
-version = "0.2.1"
+version = "0.2.2"
 description = "Sandboxed JavaScript execution for Python, via wasmtime + rquickjs."
 readme = "README.md"
 license = { text = "MIT" }
