@@ -1019,13 +1019,9 @@ class QjsRuntime:
         # Apply resource limits BEFORE any eval (the first eval creates the
         # guest runtime, which reads these). set_*_limit is idempotent.
         if self._memory_limit is not None:
-            st = inst.c("set_memory_limit", self._memory_limit)
-            if st != STATUS_OK:
-                raise QuickJSError(f"set_memory_limit status={st}")
+            inst.c("set_memory_limit", self._memory_limit)
         if self._stack_limit is not None:
-            st = inst.c("set_max_stack_size", self._stack_limit)
-            if st != STATUS_OK:
-                raise QuickJSError(f"set_max_stack_size status={st}")
+            inst.c("set_max_stack_size", self._stack_limit)
         self._instances.add(inst)
         return inst
 
@@ -1046,9 +1042,7 @@ class QjsRuntime:
         its own wasm instance with its own heap, so a runtime-level GC fans out
         across all of them. No-op if no context is live."""
         for inst in self._instances:
-            st = inst.c("run_gc")
-            if st != STATUS_OK:
-                raise QuickJSError(f"run_gc status={st}")
+            inst.c("run_gc")
 
     def memory_usage(self) -> dict[str, int]:
         """Aggregate QuickJS memory counters across every live context's heap.
