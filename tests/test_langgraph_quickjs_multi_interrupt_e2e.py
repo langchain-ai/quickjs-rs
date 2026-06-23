@@ -196,10 +196,14 @@ def test_quickjs_collects_multiple_host_interrupts_before_yielding_once() -> Non
     checkpoint = state_after_first.values["quickjs_checkpoint"]
     assert [call["prompt"] for call in checkpoint["parked_calls"]] == ["human:a", "human:c"]
     event_times = dict(events)
-    assert event_times["park:human:a"] < event_times["auto:start"]
+    # Windows' monotonic clock can have coarse enough resolution that adjacent
+    # events in the same thread compare equal. The important assertions are that
+    # the delayed auto path completes before we park the later request and before
+    # we raise the aggregated interrupts.
+    assert event_times["park:human:a"] <= event_times["auto:start"]
     assert event_times["auto:start"] < event_times["auto:done"]
-    assert event_times["auto:done"] < event_times["park:human:c"]
-    assert event_times["auto:done"] < event_times["raise:interrupts"]
+    assert event_times["auto:done"] <= event_times["park:human:c"]
+    assert event_times["auto:done"] <= event_times["raise:interrupts"]
     assert event_times["auto:done"] - event_times["auto:start"] >= 0.04
 
     resumed = graph.invoke(
