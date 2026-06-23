@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Any, NoReturn
 
 import quickjs_rs._engine as _engine
+from quickjs_rs.driver import ContextDriver, DriverSession, HostRequest
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
@@ -114,10 +115,18 @@ class Context:
         self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
         self._pending_completed: asyncio.Event | None = None
         self._active_task_group: asyncio.TaskGroup | None = None
+        self._driver = ContextDriver(self)
+        self._driver_session: DriverSession | None = None
+        self._driver_requests: list[HostRequest] | None = None
 
         # Wire the Rust-side dispatchers to our Python methods.
         self._engine_ctx.set_host_call_dispatcher(self._dispatch_host_call)
         self._engine_ctx.set_async_host_dispatcher(self._dispatch_async_host_call)
+
+    @property
+    def driver(self) -> ContextDriver:
+        """Low-level manual execution driver API."""
+        return self._driver
 
     @property
     def globals(self) -> Globals:
@@ -143,6 +152,8 @@ class Context:
     def close(self) -> None:
         if self._closed:
             return
+        if self._driver_session is not None:
+            self._driver_session.close()
         # Dispose the globals handle before closing the engine ctx —
         # otherwise the still-alive Persistent<Value> inside it would
         # outlive its runtime and trip QuickJS's gc_obj_list assertion
@@ -913,6 +924,9 @@ class Context:
         fn = self._host_registry.get(fn_id)
         if fn is None:
             return -1
+        if self._driver_requests is not None:
+            self._driver_requests.append(HostRequest(pending_id, fn_id, args))
+            return 0
         # Don't re-check iscoroutinefunction here — the user may have
         # passed is_async=True for a callable class whose __call__ is
         # async, which iscoroutinefunction doesn't see. Trust the
