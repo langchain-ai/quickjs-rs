@@ -79,11 +79,11 @@ export const result = [value, alias, other, ns, keep];
     )
 
     assert (
-        'const { default: value, thing: alias, other } = await import("./file/ts");'
+        'const { default: value, thing: alias, other } = await import("./file.ts");'
         in transformed
     )
-    assert 'const ns = await import("../pkg/view/tsx");' in transformed
-    assert 'await import("./setup/mts");' in transformed
+    assert 'const ns = await import("../pkg/view.tsx");' in transformed
+    assert 'await import("./setup.mts");' in transformed
     assert 'import { keep } from "pkg.ts";' in transformed
 
 
@@ -94,7 +94,7 @@ def test_ts_extension_import_to_dynamic_import_handles_default_namespace_import(
         flags=SourceTransform.TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
     )
 
-    assert 'const ns = await import("./file/ts");' in transformed
+    assert 'const ns = await import("./file.ts");' in transformed
     assert "const { default: value } = ns;" in transformed
 
 
@@ -109,7 +109,7 @@ def test_ts_extension_import_to_dynamic_import_does_not_restore_type_only_import
         ),
     )
 
-    assert 'import("./types/ts")' not in transformed
+    assert 'import("./types.ts")' not in transformed
     assert "export const value = 1;" in transformed
 
 

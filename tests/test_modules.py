@@ -468,7 +468,7 @@ def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch)
 
 
 async def test_ts_extension_import_to_dynamic_import_uses_module_loader() -> None:
-    normalize, load = _flat_loader({"dep/ts": "export const value = 41;"})
+    normalize, load = _flat_loader({"dep.ts": "export const value = 41;"})
 
     with Runtime() as rt:
         rt.set_module_loader(normalize=normalize, load=load)

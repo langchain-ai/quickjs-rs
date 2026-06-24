@@ -245,7 +245,7 @@ fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
                     ast,
                     &mut rewritten_body,
                     &import,
-                    &dynamic_specifier,
+                    dynamic_specifier,
                 );
             }
             _ => rewritten_body.push(statement),
@@ -255,14 +255,14 @@ fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
     program.body = rewritten_body;
 }
 
-fn ts_extension_dynamic_import_specifier(specifier: &str) -> Option<String> {
+fn ts_extension_dynamic_import_specifier(specifier: &str) -> Option<&str> {
     if !(specifier.starts_with("./") || specifier.starts_with("../")) {
         return None;
     }
 
     for extension in [".tsx", ".mts", ".cts", ".ts"] {
-        if let Some(stem) = specifier.strip_suffix(extension) {
-            return Some(format!("{stem}/{}", &extension[1..]));
+        if specifier.ends_with(extension) {
+            return Some(specifier);
         }
     }
 
