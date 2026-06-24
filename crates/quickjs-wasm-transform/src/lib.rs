@@ -10,12 +10,12 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::{Declaration, Program, Statement, VariableDeclarationKind};
+use oxc_allocator::{Allocator, TakeIn, Vec as ArenaVec};
+use oxc_ast::{ast::*, AstBuilder, NONE};
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::SourceType;
+use oxc_span::{SourceType, Span};
 use oxc_transformer::{TransformOptions, Transformer};
 
 mod mem;
@@ -31,8 +31,11 @@ const FLAG_SOURCE_TS: u32 = 1 << 0;
 const FLAG_SOURCE_TSX: u32 = 1 << 1;
 const FLAG_STRIP_TYPESCRIPT: u32 = 1 << 8;
 const FLAG_TOP_LEVEL_CONST_TO_VAR: u32 = 1 << 9;
+const FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT: u32 = 1 << 10;
 const FLAG_SOURCE_MASK: u32 = FLAG_SOURCE_TS | FLAG_SOURCE_TSX;
-const FLAG_PASS_MASK: u32 = FLAG_STRIP_TYPESCRIPT | FLAG_TOP_LEVEL_CONST_TO_VAR;
+const FLAG_PASS_MASK: u32 = FLAG_STRIP_TYPESCRIPT
+    | FLAG_TOP_LEVEL_CONST_TO_VAR
+    | FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT;
 
 #[no_mangle]
 pub extern "C" fn qjst_transform(
@@ -123,6 +126,9 @@ fn transform_module_source(
     if config.strip_typescript {
         run_typescript_transform(&allocator, name, &mut program)?;
     }
+    if config.ts_extension_import_to_dynamic_import {
+        rewrite_ts_extension_imports_to_dynamic_import(&allocator, &mut program);
+    }
     if config.top_level_const_to_var {
         rewrite_top_level_const_to_var(&mut program);
     }
@@ -134,6 +140,7 @@ struct TransformConfig {
     source_type: SourceType,
     strip_typescript: bool,
     top_level_const_to_var: bool,
+    ts_extension_import_to_dynamic_import: bool,
 }
 
 impl TransformConfig {
@@ -151,6 +158,8 @@ impl TransformConfig {
 
         let strip_typescript = flags & FLAG_STRIP_TYPESCRIPT != 0;
         let top_level_const_to_var = flags & FLAG_TOP_LEVEL_CONST_TO_VAR != 0;
+        let ts_extension_import_to_dynamic_import =
+            flags & FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT != 0;
 
         if strip_typescript && source_flags == 0 {
             return Err(TransformFailure::bad_input(
@@ -170,6 +179,7 @@ impl TransformConfig {
             source_type,
             strip_typescript,
             top_level_const_to_var,
+            ts_extension_import_to_dynamic_import,
         }))
     }
 }
@@ -213,6 +223,217 @@ fn rewrite_top_level_const_to_var(program: &mut Program<'_>) {
             _ => {}
         }
     }
+}
+
+fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+) {
+    let ast = AstBuilder::new(allocator);
+    let mut rewritten_body = ast.vec_with_capacity(program.body.len());
+
+    for statement in program.body.take_in(ast) {
+        match statement {
+            Statement::ImportDeclaration(import) => {
+                let Some(dynamic_specifier) =
+                    ts_extension_dynamic_import_specifier(import.source.value.as_str())
+                else {
+                    rewritten_body.push(Statement::ImportDeclaration(import));
+                    continue;
+                };
+                append_dynamic_import_statements(
+                    ast,
+                    &mut rewritten_body,
+                    &import,
+                    &dynamic_specifier,
+                );
+            }
+            _ => rewritten_body.push(statement),
+        }
+    }
+
+    program.body = rewritten_body;
+}
+
+fn ts_extension_dynamic_import_specifier(specifier: &str) -> Option<String> {
+    if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+        return None;
+    }
+
+    for extension in [".tsx", ".mts", ".cts", ".ts"] {
+        if let Some(stem) = specifier.strip_suffix(extension) {
+            return Some(format!("{stem}/{}", &extension[1..]));
+        }
+    }
+
+    None
+}
+
+fn append_dynamic_import_statements<'a>(
+    ast: AstBuilder<'a>,
+    out: &mut ArenaVec<'a, Statement<'a>>,
+    import: &ImportDeclaration<'a>,
+    dynamic_specifier: &str,
+) {
+    if import.import_kind.is_type() {
+        return;
+    }
+
+    let Some(specifiers) = import.specifiers.as_ref() else {
+        out.push(dynamic_import_expression_statement(
+            ast,
+            import.span,
+            dynamic_specifier,
+        ));
+        return;
+    };
+
+    if specifiers.is_empty() {
+        out.push(dynamic_import_expression_statement(
+            ast,
+            import.span,
+            dynamic_specifier,
+        ));
+        return;
+    }
+
+    let mut namespace_local = None;
+    let mut properties = ast.vec();
+    for specifier in specifiers {
+        match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(default_specifier) => {
+                properties.push(default_import_binding_property(ast, default_specifier));
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace_specifier) => {
+                namespace_local = Some(namespace_specifier.local.clone());
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(import_specifier) => {
+                if import_specifier.import_kind.is_value() {
+                    properties.push(named_import_binding_property(ast, import_specifier));
+                }
+            }
+        }
+    }
+
+    match namespace_local {
+        Some(namespace_local) => {
+            out.push(variable_declaration_statement(
+                ast,
+                import.span,
+                binding_identifier_pattern(ast, &namespace_local),
+                dynamic_import_expression(ast, import.span, dynamic_specifier),
+            ));
+            if !properties.is_empty() {
+                out.push(variable_declaration_statement(
+                    ast,
+                    import.span,
+                    ast.binding_pattern_object_pattern(import.span, properties, NONE),
+                    ast.expression_identifier(namespace_local.span, namespace_local.name.clone()),
+                ));
+            }
+        }
+        None => {
+            if properties.is_empty() {
+                return;
+            }
+            out.push(variable_declaration_statement(
+                ast,
+                import.span,
+                ast.binding_pattern_object_pattern(import.span, properties, NONE),
+                dynamic_import_expression(ast, import.span, dynamic_specifier),
+            ));
+        }
+    }
+}
+
+fn dynamic_import_expression_statement<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    specifier: &str,
+) -> Statement<'a> {
+    ast.statement_expression(span, dynamic_import_expression(ast, span, specifier))
+}
+
+fn dynamic_import_expression<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    specifier: &str,
+) -> Expression<'a> {
+    let source = ast.expression_string_literal(span, ast.str(specifier), None);
+    let import_expression = ast.expression_import(span, source, None, None);
+    ast.expression_await(span, import_expression)
+}
+
+fn variable_declaration_statement<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    id: BindingPattern<'a>,
+    init: Expression<'a>,
+) -> Statement<'a> {
+    let declaration = ast.variable_declarator(
+        span,
+        VariableDeclarationKind::Const,
+        id,
+        NONE,
+        Some(init),
+        false,
+    );
+    Statement::VariableDeclaration(ast.alloc_variable_declaration(
+        span,
+        VariableDeclarationKind::Const,
+        ast.vec1(declaration),
+        false,
+    ))
+}
+
+fn default_import_binding_property<'a>(
+    ast: AstBuilder<'a>,
+    specifier: &ImportDefaultSpecifier<'a>,
+) -> BindingProperty<'a> {
+    ast.binding_property(
+        specifier.span,
+        ast.property_key_static_identifier(specifier.span, "default"),
+        binding_identifier_pattern(ast, &specifier.local),
+        false,
+        false,
+    )
+}
+
+fn named_import_binding_property<'a>(
+    ast: AstBuilder<'a>,
+    specifier: &ImportSpecifier<'a>,
+) -> BindingProperty<'a> {
+    ast.binding_property(
+        specifier.span,
+        module_export_name_to_property_key(ast, &specifier.imported),
+        binding_identifier_pattern(ast, &specifier.local),
+        false,
+        false,
+    )
+}
+
+fn module_export_name_to_property_key<'a>(
+    ast: AstBuilder<'a>,
+    name: &ModuleExportName<'a>,
+) -> PropertyKey<'a> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => {
+            ast.property_key_static_identifier(identifier.span, identifier.name.clone())
+        }
+        ModuleExportName::IdentifierReference(identifier) => {
+            ast.property_key_static_identifier(identifier.span, identifier.name.clone())
+        }
+        ModuleExportName::StringLiteral(literal) => PropertyKey::StringLiteral(
+            ast.alloc_string_literal(literal.span, literal.value.clone(), None),
+        ),
+    }
+}
+
+fn binding_identifier_pattern<'a>(
+    ast: AstBuilder<'a>,
+    local: &BindingIdentifier<'a>,
+) -> BindingPattern<'a> {
+    BindingPattern::BindingIdentifier(ast.alloc(local.clone()))
 }
 
 fn rewrite_const_declaration_kind(kind: &mut VariableDeclarationKind) {

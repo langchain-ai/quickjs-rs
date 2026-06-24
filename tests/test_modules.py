@@ -467,6 +467,21 @@ def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch)
     ]
 
 
+async def test_ts_extension_import_to_dynamic_import_uses_module_loader() -> None:
+    normalize, load = _flat_loader({"dep/ts": "export const value = 41;"})
+
+    with Runtime() as rt:
+        rt.set_module_loader(normalize=normalize, load=load)
+        with rt.new_context() as ctx:
+            await ctx.eval_async(
+                "import { value } from './dep.ts'; globalThis.dynamicImportResult = value + 1;",
+                module=True,
+                transform_flags=SourceTransform.TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
+            )
+
+            assert ctx.eval("globalThis.dynamicImportResult") == 42
+
+
 def test_malformed_ts_surfaces_as_error() -> None:
     normalize, load = _flat_loader(
         {"broken.ts": "export const x: = ;"}  # malformed TS
