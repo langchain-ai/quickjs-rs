@@ -8,9 +8,9 @@ from quickjs_rs._engine import _quickjs_artifact
 from quickjs_rs._transform import (
     FLAG_SOURCE_TS,
     FLAG_SOURCE_TSX,
+    FLAG_STATIC_IMPORT_TO_DYNAMIC_IMPORT,
     FLAG_STRIP_TYPESCRIPT,
     FLAG_TOP_LEVEL_CONST_TO_VAR,
-    FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
     SourceTransformer,
     transform_module_source,
 )
@@ -63,19 +63,20 @@ def test_public_transform_source_exposes_top_level_const_rewriter() -> None:
     assert "export var value = 1;" in transformed
 
 
-def test_ts_extension_import_to_dynamic_import_rewrites_relative_imports() -> None:
+def test_static_import_to_dynamic_import_rewrites_imports_without_changing_specifiers() -> None:
     source = """
 import value, { thing as alias, other } from "./file.ts";
 import * as ns from "../pkg/view.tsx";
 import "./setup.mts";
 import { keep } from "pkg.ts";
-export const result = [value, alias, other, ns, keep];
+import { plain } from "./plain.js";
+export const result = [value, alias, other, ns, keep, plain];
 """
 
     transformed = transform_source(
         "plain.js",
         source,
-        flags=SourceTransform.TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
+        flags=SourceTransform.STATIC_IMPORT_TO_DYNAMIC_IMPORT,
     )
 
     assert (
@@ -84,28 +85,29 @@ export const result = [value, alias, other, ns, keep];
     )
     assert 'const ns = await import("../pkg/view.tsx");' in transformed
     assert 'await import("./setup.mts");' in transformed
-    assert 'import { keep } from "pkg.ts";' in transformed
+    assert 'const { keep } = await import("pkg.ts");' in transformed
+    assert 'const { plain } = await import("./plain.js");' in transformed
 
 
-def test_ts_extension_import_to_dynamic_import_handles_default_namespace_import() -> None:
+def test_static_import_to_dynamic_import_handles_default_namespace_import() -> None:
     transformed = transform_source(
         "plain.js",
         'import value, * as ns from "./file.ts"; export const result = [value, ns];',
-        flags=SourceTransform.TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
+        flags=SourceTransform.STATIC_IMPORT_TO_DYNAMIC_IMPORT,
     )
 
     assert 'const ns = await import("./file.ts");' in transformed
     assert "const { default: value } = ns;" in transformed
 
 
-def test_ts_extension_import_to_dynamic_import_does_not_restore_type_only_imports() -> None:
+def test_static_import_to_dynamic_import_does_not_restore_type_only_imports() -> None:
     transformed = transform_module_source(
         "model.ts",
         'import type { Model } from "./types.ts"; export const value: number = 1;',
         flags=(
             FLAG_SOURCE_TS
             | FLAG_STRIP_TYPESCRIPT
-            | FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT
+            | FLAG_STATIC_IMPORT_TO_DYNAMIC_IMPORT
         ),
     )
 

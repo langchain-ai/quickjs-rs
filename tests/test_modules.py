@@ -467,7 +467,7 @@ def test_module_loader_transform_flags_callback_can_extend_defaults(monkeypatch)
     ]
 
 
-async def test_ts_extension_import_to_dynamic_import_uses_module_loader() -> None:
+async def test_static_import_to_dynamic_import_uses_module_loader() -> None:
     normalize, load = _flat_loader({"dep.ts": "export const value = 41;"})
 
     with Runtime() as rt:
@@ -476,7 +476,7 @@ async def test_ts_extension_import_to_dynamic_import_uses_module_loader() -> Non
             await ctx.eval_async(
                 "import { value } from './dep.ts'; globalThis.dynamicImportResult = value + 1;",
                 module=True,
-                transform_flags=SourceTransform.TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT,
+                transform_flags=SourceTransform.STATIC_IMPORT_TO_DYNAMIC_IMPORT,
             )
 
             assert ctx.eval("globalThis.dynamicImportResult") == 42

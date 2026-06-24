@@ -31,11 +31,10 @@ const FLAG_SOURCE_TS: u32 = 1 << 0;
 const FLAG_SOURCE_TSX: u32 = 1 << 1;
 const FLAG_STRIP_TYPESCRIPT: u32 = 1 << 8;
 const FLAG_TOP_LEVEL_CONST_TO_VAR: u32 = 1 << 9;
-const FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT: u32 = 1 << 10;
+const FLAG_STATIC_IMPORT_TO_DYNAMIC_IMPORT: u32 = 1 << 10;
 const FLAG_SOURCE_MASK: u32 = FLAG_SOURCE_TS | FLAG_SOURCE_TSX;
-const FLAG_PASS_MASK: u32 = FLAG_STRIP_TYPESCRIPT
-    | FLAG_TOP_LEVEL_CONST_TO_VAR
-    | FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT;
+const FLAG_PASS_MASK: u32 =
+    FLAG_STRIP_TYPESCRIPT | FLAG_TOP_LEVEL_CONST_TO_VAR | FLAG_STATIC_IMPORT_TO_DYNAMIC_IMPORT;
 
 #[no_mangle]
 pub extern "C" fn qjst_transform(
@@ -126,8 +125,8 @@ fn transform_module_source(
     if config.strip_typescript {
         run_typescript_transform(&allocator, name, &mut program)?;
     }
-    if config.ts_extension_import_to_dynamic_import {
-        rewrite_ts_extension_imports_to_dynamic_import(&allocator, &mut program);
+    if config.static_import_to_dynamic_import {
+        rewrite_static_imports_to_dynamic_import(&allocator, &mut program);
     }
     if config.top_level_const_to_var {
         rewrite_top_level_const_to_var(&mut program);
@@ -140,7 +139,7 @@ struct TransformConfig {
     source_type: SourceType,
     strip_typescript: bool,
     top_level_const_to_var: bool,
-    ts_extension_import_to_dynamic_import: bool,
+    static_import_to_dynamic_import: bool,
 }
 
 impl TransformConfig {
@@ -158,8 +157,7 @@ impl TransformConfig {
 
         let strip_typescript = flags & FLAG_STRIP_TYPESCRIPT != 0;
         let top_level_const_to_var = flags & FLAG_TOP_LEVEL_CONST_TO_VAR != 0;
-        let ts_extension_import_to_dynamic_import =
-            flags & FLAG_TS_EXTENSION_IMPORT_TO_DYNAMIC_IMPORT != 0;
+        let static_import_to_dynamic_import = flags & FLAG_STATIC_IMPORT_TO_DYNAMIC_IMPORT != 0;
 
         if strip_typescript && source_flags == 0 {
             return Err(TransformFailure::bad_input(
@@ -179,7 +177,7 @@ impl TransformConfig {
             source_type,
             strip_typescript,
             top_level_const_to_var,
-            ts_extension_import_to_dynamic_import,
+            static_import_to_dynamic_import,
         }))
     }
 }
@@ -225,7 +223,7 @@ fn rewrite_top_level_const_to_var(program: &mut Program<'_>) {
     }
 }
 
-fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
+fn rewrite_static_imports_to_dynamic_import<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
 ) {
@@ -235,12 +233,7 @@ fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
     for statement in program.body.take_in(ast) {
         match statement {
             Statement::ImportDeclaration(import) => {
-                let Some(dynamic_specifier) =
-                    ts_extension_dynamic_import_specifier(import.source.value.as_str())
-                else {
-                    rewritten_body.push(Statement::ImportDeclaration(import));
-                    continue;
-                };
+                let dynamic_specifier = import.source.value.as_str();
                 append_dynamic_import_statements(
                     ast,
                     &mut rewritten_body,
@@ -253,20 +246,6 @@ fn rewrite_ts_extension_imports_to_dynamic_import<'a>(
     }
 
     program.body = rewritten_body;
-}
-
-fn ts_extension_dynamic_import_specifier(specifier: &str) -> Option<&str> {
-    if !(specifier.starts_with("./") || specifier.starts_with("../")) {
-        return None;
-    }
-
-    for extension in [".tsx", ".mts", ".cts", ".ts"] {
-        if specifier.ends_with(extension) {
-            return Some(specifier);
-        }
-    }
-
-    None
 }
 
 fn append_dynamic_import_statements<'a>(
