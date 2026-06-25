@@ -35,7 +35,7 @@ _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 def _public_engine_error(exc: BaseException) -> BaseException:
     """Map an internal `_engine.*` exception to its public `errors.*`
     counterpart so a settle failure can leave the eval boundary as part of the
-    public API — the same internal→public conversion `eval_handle` performs
+    public API. The same internal→public conversion `eval_handle` performs
     for sync evals. Non-engine exceptions are returned unchanged.
     """
     if isinstance(exc, _engine.MarshalError):
