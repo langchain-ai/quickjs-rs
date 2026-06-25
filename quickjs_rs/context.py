@@ -32,7 +32,7 @@ from quickjs_rs.transforms import TransformFlagsProvider
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
 
-def _public_engine_error(exc: BaseException) -> BaseException:
+def _public_engine_error(exc: Exception) -> Exception:
     """Map an internal `_engine.*` exception to its public `errors.*`
     counterpart so a settle failure can leave the eval boundary as part of the
     public API. The same internal→public conversion `eval_handle` performs
