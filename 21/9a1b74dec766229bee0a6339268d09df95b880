@@ -1,0 +1,26 @@
+quickjs_rs/context.py
+  h_f78d33d4280f3f 36,38,1035
+  s_40a5e5bb32b0e8::t_b3b834e92d8c03 35,37,39-47
+  s_40a5e5bb32b0e8::t_56be98dfea10c1 1036
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "219a1b74dec766229bee0a6339268d09df95b880",
+  "prompts": {},
+  "humans": {
+    "h_f78d33d4280f3f": {
+      "author": "Colin Francis <colin.francis@langchain.dev>"
+    }
+  },
+  "sessions": {
+    "s_40a5e5bb32b0e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4d05d92-8aa6-4a06-87b4-d7eb5976fb3d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Colin Francis <colin.francis@langchain.dev>"
+    }
+  }
+}
