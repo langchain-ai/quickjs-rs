@@ -32,6 +32,19 @@ from quickjs_rs.transforms import TransformFlagsProvider
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
 
+def _public_engine_error(exc: BaseException) -> BaseException:
+    """Map an internal `_engine.*` exception to its public `errors.*`
+    counterpart so a settle failure can leave the eval boundary as part of the
+    public API — the same internal→public conversion `eval_handle` performs
+    for sync evals. Non-engine exceptions are returned unchanged.
+    """
+    if isinstance(exc, _engine.MarshalError):
+        return MarshalError(str(exc))
+    if isinstance(exc, _engine.QuickJSError):
+        return QuickJSError(str(exc))
+    return exc
+
+
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
     """Infer async-ness of a registered host function.
 
@@ -1019,6 +1032,8 @@ class Context:
                 # promise resurfaces later as an abiguous DeadlockError that
                 # discards the true root cause. Here, we settle it anyway, and keep
                 # the original exception reachable.
+                
+                settle_exc = _public_engine_error(settle_exc)
                 settled = False
                 if resolve_ok:
                     # Retry once for potential transient failures
