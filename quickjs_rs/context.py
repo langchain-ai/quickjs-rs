@@ -1032,7 +1032,7 @@ class Context:
                 # promise resurfaces later as an abiguous DeadlockError that
                 # discards the true root cause. Here, we settle it anyway, and keep
                 # the original exception reachable.
-                
+
                 settle_exc = _public_engine_error(settle_exc)
                 settled = False
                 if resolve_ok:
