@@ -32,6 +32,19 @@ from quickjs_rs.transforms import TransformFlagsProvider
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
 
 
+def _public_engine_error(exc: Exception) -> Exception:
+    """Map an internal `_engine.*` exception to its public `errors.*`
+    counterpart so a settle failure can leave the eval boundary as part of the
+    public API. The same internal→public conversion `eval_handle` performs
+    for sync evals. Non-engine exceptions are returned unchanged.
+    """
+    if isinstance(exc, _engine.MarshalError):
+        return MarshalError(str(exc))
+    if isinstance(exc, _engine.QuickJSError):
+        return QuickJSError(str(exc))
+    return exc
+
+
 def _detect_is_async(fn: Callable[..., Any]) -> bool:
     """Infer async-ness of a registered host function.
 
@@ -112,6 +125,10 @@ class Context:
         # into it instead of loop.create_task.
         self._eval_async_in_flight = False
         self._pending_tasks: dict[int, asyncio.Task[Any]] = {}
+        # Async host calls whose result could NOT be delivered into the guest
+        # (resolve_pending/reject_pending both raised). Kept so the driving
+        # loop can surface a clear error rather than a bare DeadlockError.
+        self._failed_settles: dict[int, BaseException] = {}
         self._pending_completed: asyncio.Event | None = None
         self._active_task_group: asyncio.TaskGroup | None = None
 
@@ -767,6 +784,27 @@ class Context:
 
                             # Step 5/6: pending.
                             if not self._pending_tasks:
+                                if self._failed_settles:
+                                    # A host call completed but its result could not be delivered
+                                    # because resolve or reject raised. We reject those promises
+                                    # now so the await surfaces a catchable error instead of an,
+                                    # ambiguous deadlock error. The original cause is captured
+                                    # via _last_host_exception which helps with diagnosing issues
+                                    # in the future.
+                                    stuck = self._failed_settles
+                                    self._failed_settles = {}
+                                    for pid, exc in stuck.items():
+                                        self._last_host_exception = exc
+                                        try:
+                                            self._engine_ctx.reject_pending(
+                                                pid,
+                                                "HostError",
+                                                _HOST_ERROR_SANITIZED_MESSAGE,
+                                                None,
+                                            )
+                                        except Exception:
+                                            pass
+                                    continue
                                 raise DeadlockError(
                                     "eval_async's top-level promise "
                                     "is pending but no async host "
@@ -985,11 +1023,41 @@ class Context:
                     self._engine_ctx.resolve_pending(pending_id, value)
                 else:
                     self._engine_ctx.reject_pending(pending_id, err_name, err_message, err_stack)
-            except Exception:
-                # Benign: the context may have closed under us, or
-                # the pid was already settled by the cancellation
-                # walk.
-                pass
+            except Exception as settle_exc:
+                # The promise was not settled. Two causes are genuinely benign:
+                #   1. the context closed under us
+                #   2. the pid was already settled by the cancellation walk
+                # But a real failure, e.g., the result could not be marshaled back
+                # into the guest should not be swallowed otherwise an unsettled
+                # promise resurfaces later as an abiguous DeadlockError that
+                # discards the true root cause. Here, we settle it anyway, and keep
+                # the original exception reachable.
+
+                settle_exc = _public_engine_error(settle_exc)
+                settled = False
+                if resolve_ok:
+                    # Retry once for potential transient failures
+                    try:
+                        self._engine_ctx.run_pending_jobs()
+                        self._engine_ctx.resolve_pending(pending_id, value)
+                        settled = True
+                    except Exception:
+                        # Still can't deliver the result. Store the original
+                        # exception so the eval boundary can re-raises it.
+                        self._last_host_exception = settle_exc
+                if not settled:
+                    try:
+                        self._engine_ctx.reject_pending(
+                            pending_id, err_name, _HOST_ERROR_SANITIZED_MESSAGE, None
+                        )
+                        settled = True
+                    except Exception:
+                        settled = False
+                if not settled:
+                    # Could neither resolve nor reject. Record so the driving loop
+                    # surfaces a clear error rather than a bare deadlock error to
+                    # keep the original cause.
+                    self._failed_settles[pending_id] = settle_exc
         finally:
             self._pending_tasks.pop(pending_id, None)
             if self._pending_completed is not None:
