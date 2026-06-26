@@ -2,6 +2,7 @@
 
 from quickjs_rs._engine import UNDEFINED, Undefined
 from quickjs_rs.context import Context
+from quickjs_rs.driver import ContextDriver, DriverSession, HostRequest
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
@@ -30,6 +31,9 @@ __version__ = "0.2.0"
 __all__ = [
     "Runtime",
     "Context",
+    "ContextDriver",
+    "DriverSession",
+    "HostRequest",
     "Handle",
     "Snapshot",
     "ThreadWorker",
