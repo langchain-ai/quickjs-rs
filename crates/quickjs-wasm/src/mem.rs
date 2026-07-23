@@ -110,11 +110,15 @@ pub fn qjs_free_raw(ptr: *const u8, size: usize) {
 
 /// Validate and borrow an untrusted input slice the host wrote in.
 ///
-/// Returns `None` for a null pointer or zero length. A read past the
-/// linear-memory bound traps deterministically — contained by the sandbox,
-/// never UB in the host (the host side also bound-checks before writing).
+/// Returns an empty slice for zero-length input and `None` for a null
+/// non-empty input. A read past the linear-memory bound traps deterministically
+/// — contained by the sandbox, never UB in the host (the host side also
+/// bound-checks before writing).
 pub fn read_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
-    if ptr.is_null() || len == 0 {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null() {
         return None;
     }
     // SAFETY: host allocated (ptr, len) via qjs_alloc and wrote it; the slice
