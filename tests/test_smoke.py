@@ -77,6 +77,20 @@ def test_smoke_primitives() -> None:
             ctx.register("say_hi", lambda who: f"hi {who}")
             assert ctx.eval("say_hi('world')") == "hi world"
 
+            def empty() -> str:
+                return ""
+
+            def payload() -> dict[str, object]:
+                return {"state": "", "items": [{"state": ""}]}
+
+            ctx.register("empty", empty, is_async=False)
+            ctx.register("payload", payload, is_async=False)
+            assert ctx.eval("empty()", module=False) == ""
+            assert ctx.eval("payload()", module=False) == {
+                "state": "",
+                "items": [{"state": ""}],
+            }
+
             # Uncaught host exception bubbles out of ctx.eval as the
             # original Python exception.
             @ctx.function

@@ -36,6 +36,27 @@ async def test_async_def_auto_detected_via_register() -> None:
             assert await ctx.eval_async("await lookup('hello')") == 5
 
 
+async def test_async_host_return_can_contain_empty_strings() -> None:
+    """Async host returns may contain empty strings at any depth."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def empty() -> str:
+                return ""
+
+            async def payload() -> dict[str, object]:
+                return {"state": "", "items": [{"state": ""}]}
+
+            ctx.register("empty", empty, is_async=True)
+            ctx.register("payload", payload, is_async=True)
+
+            assert await ctx.eval_async("await empty()", module=False) == ""
+            assert await ctx.eval_async("await payload()", module=False) == {
+                "state": "",
+                "items": [{"state": ""}],
+            }
+
+
 async def test_sync_def_auto_detected_as_sync() -> None:
     """Regression: plain def functions still register as sync under the
     new auto-detection default. Guards against default
