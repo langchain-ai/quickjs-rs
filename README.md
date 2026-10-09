@@ -213,6 +213,19 @@ snap = await ctx.create_snapshot_async()
 rt.restore_snapshot(snap, other_ctx, inject_globals=True)
 ```
 
+## ThreadWorker cancellation
+
+Cancelling the future returned by `ThreadWorker.run_async()` also signals
+checkpoints in recursive Python/JavaScript value conversion. This lets a large
+conversion unwind even when it is occupying the worker's event loop, without
+accessing the thread-bound guest from the caller's thread. Partial guest values
+are released on the worker, and pending async host-call promises are rejected
+with `HostCancellationError` so JavaScript cleanup can run.
+
+This is cooperative cancellation between conversion steps, not preemption of
+arbitrary synchronous Python callbacks or a single guest operation. JavaScript
+execution still uses the context's per-eval timeout.
+
 ## Security
 
 - **The WebAssembly sandbox is the isolation boundary.** JS executes inside the
