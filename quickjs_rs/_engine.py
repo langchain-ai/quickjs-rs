@@ -27,6 +27,8 @@ sentinel). Lengths are capped. The wasm sandbox is the isolation boundary.
 
 from __future__ import annotations
 
+import json
+import math
 import struct
 import threading
 import weakref
@@ -122,6 +124,9 @@ NULL_HANDLE = 0
 # Marshalling recursion cap (cycle / deep-nesting guard) — matches the prior
 # PyO3 engine's MAX_MARSHAL_DEPTH so the documented behavior is preserved.
 _MAX_MARSHAL_DEPTH = 128
+
+# Largest magnitude an int crosses as an exact JS number; wider ints are BigInt.
+_MAX_SAFE_INT = 2**53
 
 # Sanitized message for a host-function failure surfaced into JS (no host
 # internals leak).
@@ -640,7 +645,7 @@ class _Instance:
         if isinstance(value, int):
             # JS-safe integers cross as numbers; anything wider as BigInt
             # (decimal string — never truncate).
-            if -(2**53) <= value <= 2**53:
+            if -_MAX_SAFE_INT <= value <= _MAX_SAFE_INT:
                 return int(self.c("new_number", _f64_bits(float(value))))
             return self._new_bigint(str(value))
         if isinstance(value, float):
@@ -649,6 +654,10 @@ class _Instance:
             return self._new_string(value)
         if isinstance(value, (bytes, bytearray)):
             return self._new_uint8array(bytes(value))
+        if isinstance(value, (list, tuple, dict)) and _json_exact(value, _depth):
+            handle = self._new_from_json(value)
+            if handle is not None:
+                return handle
         if isinstance(value, (list, tuple)):
             arr = self.c("new_array")
             for i, item in enumerate(value):
@@ -668,6 +677,28 @@ class _Instance:
                 self.c("free_value", vh)
             return int(obj)
         raise MarshalError(f"cannot marshal {type(value).__name__}")
+
+    def _new_from_json(self, value: Any) -> int | None:
+        """Marshal a JSON-exact container in one guest crossing.
+
+        Returns None when the payload exceeds the guest input cap, so the
+        caller falls back to the per-leaf walk.
+        """
+        data = json.dumps(
+            value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode()
+        p = self.alloc_write(data)
+        out = self.alloc_out()
+        try:
+            st = self.c("new_from_json", p, len(data), out)
+            if st == STATUS_BAD_INPUT:
+                return None
+            if st != STATUS_OK:
+                raise MarshalError(f"new_from_json status={st}")
+            return self.read_i32(out)
+        finally:
+            self.free(p, len(data))
+            self.free(out, 4)
 
     def _new_string(self, s: str) -> int:
         data = s.encode()
@@ -1012,6 +1043,35 @@ class _Instance:
             self.mem.grow(self.store, (mem_size - cur + page - 1) // page)
         self.mem.write(self.store, image, 0)
         self.sp.set_value(self.store, sp_val)
+
+
+def _json_exact(value: Any, depth: int = 0) -> bool:
+    """Whether `JSON.parse(json.dumps(value))` builds what the per-leaf walk would.
+
+    Allowlist: anything else (BigInt-range ints, non-finite floats, bytes,
+    `UNDEFINED`, handles, non-str keys) takes the walk. `__proto__` keys are
+    excluded because the walk's `set_prop` invokes the prototype setter while
+    `JSON.parse` defines an own property.
+    """
+    if depth > _MAX_MARSHAL_DEPTH:
+        return False
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, int):
+        return -_MAX_SAFE_INT <= value <= _MAX_SAFE_INT
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return False
+        # The walk's new_number narrows -0.0 to 0; JSON.parse would keep -0.
+        return value != 0 or math.copysign(1.0, value) > 0
+    if isinstance(value, (list, tuple)):
+        return all(_json_exact(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and k != "__proto__" and _json_exact(v, depth + 1)
+            for k, v in value.items()
+        )
+    return False
 
 
 def _f64_bits(f: float) -> int:

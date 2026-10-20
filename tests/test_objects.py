@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from quickjs_rs import Context, Runtime
+import pytest
+
+from quickjs_rs import Context, MarshalError, Runtime
 
 
 def test_empty_object_roundtrips(ctx: Context) -> None:
@@ -168,3 +170,39 @@ def test_objects_across_contexts_do_not_alias() -> None:
             # second eval ran.
             assert ctx_a.eval("({n: 1, items: [1,2,3]})") == a
             assert ctx_b.eval("({n: 2, items: [4,5,6]})") == b
+
+
+def test_python_containers_keep_exact_leaf_types(ctx: Context) -> None:
+    """Values JSON can't carry exactly (bytes, BigInt-range ints, NaN)
+    must arrive with their native JS types even when nested among
+    plain rows."""
+    rows = [
+        {"id": 1, "name": "plain"},
+        {"blob": b"\x00\x01", "big": 2**64, "nan": float("nan")},
+    ]
+    ctx.globals["rows"] = rows
+    assert ctx.eval(
+        "rows[0].id === 1"
+        " && rows[1].blob instanceof Uint8Array"
+        " && typeof rows[1].big === 'bigint'"
+        " && rows[1].big === 2n ** 64n"
+        " && Number.isNaN(rows[1].nan)"
+    )
+
+
+def test_guest_json_override_does_not_affect_marshaling(ctx: Context) -> None:
+    """Host-to-JS marshaling must not route through guest-replaceable
+    globals like `JSON.parse`."""
+    ctx.eval("globalThis.JSON = { parse() { throw new Error('hijacked'); } }; 0")
+    ctx.globals["rows"] = [{"a": 1, "b": "x"}]
+    assert ctx.eval("rows[0].a === 1 && rows[0].b === 'x'")
+
+
+def test_python_nesting_over_limit_raises_marshalerror(ctx: Context) -> None:
+    """The 128-level limit applies to the whole value, including children
+    that are within the limit on their own."""
+    nested: object = 1
+    for _ in range(128):
+        nested = [nested]
+    with pytest.raises(MarshalError):
+        ctx.globals["v"] = [nested]
