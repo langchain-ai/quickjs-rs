@@ -756,6 +756,26 @@ pub extern "C" fn new_bigint(ptr: *const u8, len: usize, out_handle: *mut i32) -
     })
 }
 
+/// Construct a value from untrusted JSON text via the intrinsic
+/// `JS_ParseJSON` (not `globalThis.JSON`, which guest code can replace). Bulk
+/// path for host containers: one crossing instead of one per leaf.
+#[no_mangle]
+pub extern "C" fn new_from_json(ptr: *const u8, len: usize, out_handle: *mut i32) -> i32 {
+    guard_handle(out_handle, |ctx| {
+        let bytes = match read_capped(ptr, len) {
+            Some(b) => b,
+            None => return (STATUS_BAD_INPUT, NULL_HANDLE),
+        };
+        match ctx.json_parse(bytes) {
+            Ok(v) => (STATUS_OK, mint(ctx, v)),
+            Err(_) => {
+                clear_pending(ctx);
+                (STATUS_JS_ERROR, NULL_HANDLE)
+            }
+        }
+    })
+}
+
 /// Set an array/object element by integer index.
 #[no_mangle]
 pub extern "C" fn set_index(obj: i32, index: u32, value: i32) -> i32 {
