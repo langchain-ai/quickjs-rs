@@ -1,5 +1,6 @@
 """quickjs-rs: JavaScript execution for Python."""
 
+from quickjs_rs._diff import SnapshotDiffError, snapshot_diff, snapshot_patch
 from quickjs_rs._engine import UNDEFINED, Undefined
 from quickjs_rs.context import Context
 from quickjs_rs.errors import (
@@ -32,6 +33,9 @@ __all__ = [
     "Context",
     "Handle",
     "Snapshot",
+    "snapshot_diff",
+    "snapshot_patch",
+    "SnapshotDiffError",
     "ThreadWorker",
     "SourceTransform",
     "default_module_transform_flags",

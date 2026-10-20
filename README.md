@@ -213,6 +213,42 @@ snap = await ctx.create_snapshot_async()
 rt.restore_snapshot(snap, other_ctx, inject_globals=True)
 ```
 
+### Snapshot deltas
+
+`snapshot_diff` and `snapshot_patch` operate on serialized bytes through a separate,
+single-threaded [qbsdiff](https://github.com/hucsmn/qbsdiff) WASM guest. No additional
+Python dependency or compiler is needed when installing the wheel.
+
+```python
+from quickjs_rs import snapshot_diff, snapshot_patch
+
+delta = snapshot_diff(previous_bytes, current_bytes)
+assert snapshot_patch(previous_bytes, delta) == current_bytes
+```
+
+Both functions accept only `bytes` and raise `SnapshotDiffError`, a `QuickJSError`,
+on validation, decoding, memory, or fuel failures. Keyword-only limits are:
+
+- `max_bytes=64 * 1024 * 1024`: maximum source, target, and restored size; positive
+  integers up to 256 MiB. Patch bytes are capped at `2 * max_bytes + 4096`.
+- `memory_limit=1024 * 1024 * 1024`: maximum guest linear memory, up to 4 GiB.
+  This does not cap total Python/Wasmtime process memory.
+- `fuel=100_000_000_000`: maximum WASM execution fuel, not a wall-clock timeout.
+
+The compiled diff module is cached; each call gets an isolated, bounded store
+without inherited environment or filesystem access. Errors discard the entire
+store and never return partial output. The QuickJS runtime guest is unchanged.
+
+Deltas use BSDIFF40, but patch bytes need not match another encoder. The decoder
+rejects out-of-source references that reference bspatch implementations may
+zero-extend; it is not a universal replacement for an existing BSDIFF40 decoder.
+Compressed-stream acceptance otherwise follows qbsdiff, including possible
+acceptance of a missing trailer after all required bytes have been read. Output
+must match the declared size, but patches do not authenticate their base or
+result. Preserve the exact base and authenticate snapshot histories before
+restoring them. The existing runtime snapshot `build_id` restriction still applies;
+this API does not migrate checkpoints or change the runtime snapshot format.
+
 ## Security
 
 - **The WebAssembly sandbox is the isolation boundary.** JS executes inside the
@@ -267,4 +303,7 @@ ruff check
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE). The snapshot-diff guest also includes Cargo dependencies
+with their own permissive terms; see [third-party notices](quickjs_rs/THIRD_PARTY_LICENSES.txt).
+The `sacabase` crate declares MIT but omits its license file; review that packaging
+omission before release.
