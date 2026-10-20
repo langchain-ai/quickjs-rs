@@ -654,7 +654,7 @@ class _Instance:
             return self._new_string(value)
         if isinstance(value, (bytes, bytearray)):
             return self._new_uint8array(bytes(value))
-        if isinstance(value, (list, tuple, dict)) and _json_exact(value):
+        if isinstance(value, (list, tuple, dict)) and _json_exact(value, _depth):
             handle = self._new_from_json(value)
             if handle is not None:
                 return handle

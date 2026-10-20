@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from quickjs_rs import Context, Runtime
+import pytest
+
+from quickjs_rs import Context, MarshalError, Runtime
 
 
 def test_empty_object_roundtrips(ctx: Context) -> None:
@@ -194,3 +196,13 @@ def test_guest_json_override_does_not_affect_marshaling(ctx: Context) -> None:
     ctx.eval("globalThis.JSON = { parse() { throw new Error('hijacked'); } }; 0")
     ctx.globals["rows"] = [{"a": 1, "b": "x"}]
     assert ctx.eval("rows[0].a === 1 && rows[0].b === 'x'")
+
+
+def test_python_nesting_over_limit_raises_marshalerror(ctx: Context) -> None:
+    """The 128-level limit applies to the whole value, including children
+    that are within the limit on their own."""
+    nested: object = 1
+    for _ in range(128):
+        nested = [nested]
+    with pytest.raises(MarshalError):
+        ctx.globals["v"] = [nested]
