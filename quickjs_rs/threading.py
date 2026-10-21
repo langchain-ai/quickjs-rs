@@ -6,8 +6,88 @@ import asyncio
 import gc
 import threading
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
+
+
+@dataclass
+class _AsyncSubmission:
+    """Own cancellation on the worker loop, independently of its result future."""
+
+    coro: Coroutine[Any, Any, Any]
+    task: asyncio.Task[Any] | None = None
+    cancelling: bool = False
+
+    async def run(self) -> Any:
+        if self.cancelling:
+            self.coro.close()
+            raise asyncio.CancelledError
+        self.task = asyncio.current_task()
+        try:
+            return await self.coro
+        finally:
+            self.task = None
+
+    def cancel(self) -> None:
+        self.cancelling = True
+        if self.task is not None and not self.task.cancelling():
+            self.task.cancel()
+
+
+async def _drain_cancelled_submission(future: asyncio.Future[Any]) -> None:
+    """Wait through repeated caller cancellation and retrieve the real outcome."""
+    completion = asyncio.gather(future, return_exceptions=True)
+    while True:
+        try:
+            result = await asyncio.shield(completion)
+            break
+        except asyncio.CancelledError:
+            continue
+    if isinstance(result[0], Exception):
+        raise asyncio.CancelledError from result[0]
+
+
+def run_coroutine_on_loop(
+    coro: Coroutine[Any, Any, Any], *, loop: asyncio.AbstractEventLoop
+) -> asyncio.Future[Any]:
+    """Submit a coroutine to a loop and await its actual cancellation cleanup.
+
+    Unlike cancelling a ``run_coroutine_threadsafe`` result future, cancelling
+    the returned future waits for the task on ``loop`` to finish its cleanup.
+    Repeated cancellation does not interrupt that cleanup. The caller's current
+    context variables are preserved.
+
+    Args:
+        coro: Coroutine owned by the target loop once submitted.
+        loop: Running target event loop, possibly on another thread.
+
+    Returns:
+        A future on the caller's running event loop.
+    """
+    submitted = False
+
+    async def wait() -> Any:
+        nonlocal submitted
+        submitted = True
+        operation = _AsyncSubmission(coro)
+        future = asyncio.wrap_future(asyncio.run_coroutine_threadsafe(operation.run(), loop))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            loop.call_soon_threadsafe(operation.cancel)
+            await _drain_cancelled_submission(future)
+            raise
+
+    pending = asyncio.create_task(wait())
+
+    def close_unsubmitted(_task: asyncio.Task[Any]) -> None:
+        # A task cancelled before its first step never enters wait's body.
+        if not submitted:
+            coro.close()
+
+    pending.add_done_callback(close_unsubmitted)
+    return pending
 
 
 class ThreadWorker:
@@ -66,9 +146,7 @@ class ThreadWorker:
                         pass
                     loop.close()
 
-            self._thread = threading.Thread(
-                target=_runner, name=self._name, daemon=True
-            )
+            self._thread = threading.Thread(target=_runner, name=self._name, daemon=True)
             self._thread.start()
             self._ready.wait()
 
@@ -79,10 +157,10 @@ class ThreadWorker:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def run_async(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Future[Any]:
-        """Submit ``coro`` to the worker loop; return a future on the caller's loop."""
+        """Submit work and acknowledge cancellation after worker cleanup completes."""
         self._ensure_started()
         assert self._loop is not None
-        return asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, self._loop))
+        return run_coroutine_on_loop(coro, loop=self._loop)
 
     def close(self) -> None:
         """Stop the worker thread and join. Idempotent."""

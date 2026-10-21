@@ -18,7 +18,7 @@ from quickjs_rs.errors import (
 from quickjs_rs.handle import Handle
 from quickjs_rs.runtime import Runtime
 from quickjs_rs.snapshot import Snapshot
-from quickjs_rs.threading import ThreadWorker
+from quickjs_rs.threading import ThreadWorker, run_coroutine_on_loop
 from quickjs_rs.transforms import (
     SourceTransform,
     default_module_transform_flags,
@@ -33,6 +33,7 @@ __all__ = [
     "Handle",
     "Snapshot",
     "ThreadWorker",
+    "run_coroutine_on_loop",
     "SourceTransform",
     "default_module_transform_flags",
     "transform_source",
