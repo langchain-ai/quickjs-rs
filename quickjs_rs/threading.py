@@ -9,6 +9,8 @@ from collections.abc import Coroutine
 from types import TracebackType
 from typing import Any
 
+from quickjs_rs._cancellation import CancellationRequest, current_request
+
 
 class ThreadWorker:
     """Dedicated OS thread with its own asyncio event loop.
@@ -79,10 +81,32 @@ class ThreadWorker:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def run_async(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Future[Any]:
-        """Submit ``coro`` to the worker loop; return a future on the caller's loop."""
+        """Submit work; cancelling the returned future interrupts marshalling.
+
+        An asyncio Task cancellation alone is queued on the worker loop and
+        cannot run while synchronous value conversion occupies that loop.
+        Signal a per-submission checkpoint as well, without touching the
+        thread-bound guest from the caller's thread.
+        """
         self._ensure_started()
         assert self._loop is not None
-        return asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, self._loop))
+        request = CancellationRequest()
+
+        async def run() -> Any:
+            token = current_request.set(request)
+            try:
+                return await coro
+            finally:
+                current_request.reset(token)
+
+        submitted = asyncio.run_coroutine_threadsafe(run(), self._loop)
+
+        def on_done(future: Any) -> None:
+            if future.cancelled():
+                request.requested.set()
+
+        submitted.add_done_callback(on_done)
+        return asyncio.wrap_future(submitted)
 
     def close(self) -> None:
         """Stop the worker thread and join. Idempotent."""

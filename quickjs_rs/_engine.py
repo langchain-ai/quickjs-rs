@@ -37,6 +37,7 @@ from typing import Any, cast
 
 import wasmtime
 
+from quickjs_rs._cancellation import cancellation_checkpoint
 from quickjs_rs._transform import SourceTransformer, TransformError
 from quickjs_rs._wasmtime import (
     SharedWasmArtifact,
@@ -631,6 +632,7 @@ class _Instance:
     # ----------------------------------------------------------------------
 
     def python_to_handle(self, value: Any, _depth: int = 0) -> int:
+        cancellation_checkpoint()
         if _depth > _MAX_MARSHAL_DEPTH:
             raise MarshalError("recursion limit exceeded while marshaling")
         # An already-minted guest handle (QjsHandle) passes through.
@@ -660,21 +662,33 @@ class _Instance:
                 return handle
         if isinstance(value, (list, tuple)):
             arr = self.c("new_array")
-            for i, item in enumerate(value):
-                ih = self.python_to_handle(item, _depth + 1)
-                st = self.c("set_index", arr, i, ih)
-                self.c("free_value", ih)
-                if st != STATUS_OK:
-                    raise MarshalError(f"set_index failed at {i}")
+            try:
+                for i, item in enumerate(value):
+                    ih = self.python_to_handle(item, _depth + 1)
+                    try:
+                        st = self.c("set_index", arr, i, ih)
+                        if st != STATUS_OK:
+                            raise MarshalError(f"set_index failed at {i}")
+                    finally:
+                        self.c("free_value", ih)
+            except BaseException:
+                self.c("free_value", arr)
+                raise
             return int(arr)
         if isinstance(value, dict):
             obj = self.c("new_object")
-            for k, v in value.items():
-                if not isinstance(k, str):
-                    raise MarshalError("only string keys are supported")
-                vh = self.python_to_handle(v, _depth + 1)
-                self._set_prop(obj, k, vh)
-                self.c("free_value", vh)
+            try:
+                for k, v in value.items():
+                    if not isinstance(k, str):
+                        raise MarshalError("only string keys are supported")
+                    vh = self.python_to_handle(v, _depth + 1)
+                    try:
+                        self._set_prop(obj, k, vh)
+                    finally:
+                        self.c("free_value", vh)
+            except BaseException:
+                self.c("free_value", obj)
+                raise
             return int(obj)
         raise MarshalError(f"cannot marshal {type(value).__name__}")
 
@@ -748,6 +762,7 @@ class _Instance:
     # ----------------------------------------------------------------------
 
     def handle_to_python(self, handle: int, *, allow_opaque: bool, _depth: int = 0) -> Any:
+        cancellation_checkpoint()
         if _depth > _MAX_MARSHAL_DEPTH:
             raise MarshalError(
                 f"recursion limit of {_MAX_MARSHAL_DEPTH} exceeded while "
