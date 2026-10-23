@@ -128,6 +128,9 @@ _MAX_MARSHAL_DEPTH = 128
 # Largest magnitude an int crosses as an exact JS number; wider ints are BigInt.
 _MAX_SAFE_INT = 2**53
 
+# Sentinel: a guest value has no JSON form, so it takes the per-leaf walk.
+_NO_JSON = object()
+
 # Sanitized message for a host-function failure surfaced into JS (no host
 # internals leak).
 _HOST_ERROR_SANITIZED_MESSAGE = "host function raised an exception"
@@ -773,6 +776,10 @@ class _Instance:
         if name == "string":
             return self._get_string(handle)
         if name == "array":
+            if not allow_opaque:
+                value = self._from_json(handle)
+                if value is not _NO_JSON:
+                    return value
             return self._array_to_list(handle, allow_opaque, _depth)
         if name == "object":
             # A Promise is an object structurally, but not marshalable by value
@@ -786,11 +793,28 @@ class _Instance:
             ab = self._try_arraybuffer(handle)
             if ab is not None:
                 return ab
+            if not allow_opaque:
+                value = self._from_json(handle)
+                if value is not _NO_JSON:
+                    return value
             return self._object_to_dict(handle, allow_opaque, _depth)
         # function / symbol / proxy / unknown: opaque.
         if allow_opaque:
             return QjsHandle._adopt(self, self.c("dup_handle", handle))
         raise MarshalError(f"cannot marshal a JS {name} to Python")
+
+    def _from_json(self, handle: int) -> Any:
+        """Marshal a container in one guest crossing, with JSON semantics.
+
+        Returns `_NO_JSON` when the value can't be stringified (BigInt, cycles),
+        so the caller falls back to the per-leaf walk.
+        """
+        st = self.c("to_json", handle)
+        if st in (STATUS_BAD_INPUT, STATUS_JS_ERROR):
+            return _NO_JSON
+        if st != STATUS_OK:
+            raise MarshalError(f"to_json status={st}")
+        return json.loads(self.take_result())
 
     def _is_promise(self, handle: int) -> bool:
         out = self.alloc_out()
