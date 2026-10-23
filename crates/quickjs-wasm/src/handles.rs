@@ -575,6 +575,35 @@ pub extern "C" fn get_string(handle: i32) -> i32 {
     })
 }
 
+/// Serialize a value to JSON text in the result buffer via the intrinsic
+/// `JS_JSONStringify` (not `globalThis.JSON`, which guest code can replace).
+/// Bulk path for marshaling containers out: one crossing instead of one per
+/// leaf. STATUS_BAD_INPUT when the value has no JSON form; STATUS_JS_ERROR
+/// when stringify throws (BigInt, cycles).
+#[no_mangle]
+pub extern "C" fn to_json(handle: i32) -> i32 {
+    guard(|ctx| {
+        let v = match unsafe { borrow_value(handle, ctx) } {
+            Some(v) => v,
+            None => return STATUS_BAD_INPUT,
+        };
+        match ctx.json_stringify(v) {
+            Ok(Some(s)) => match s.to_string() {
+                Ok(text) => {
+                    set_result(text.into_bytes());
+                    STATUS_OK
+                }
+                Err(_) => STATUS_JS_ERROR,
+            },
+            Ok(None) => STATUS_BAD_INPUT,
+            Err(_) => {
+                clear_pending(ctx);
+                STATUS_JS_ERROR
+            }
+        }
+    })
+}
+
 /// Marshal a BigInt handle's DECIMAL STRING into the result buffer (via the JS
 /// global `String(v)` — arbitrary precision; the inverse of `new_bigint`).
 #[no_mangle]
