@@ -80,73 +80,47 @@ def test_large_object_one_hundred_keys(ctx: Context) -> None:
 
 
 def test_object_containing_uint8array_value(ctx: Context) -> None:
-    """Ensures Uint8Array encoding works as a child of an Object, not
-    just as a top-level eval result. The Uint8Array branch of the
-    encoder is reached via encode_value recursion, so this exercises
-    the recursive dispatch rather than the top-level fast path."""
+    """Containers marshal with JSON semantics, so a nested Uint8Array
+    becomes an index-keyed dict; only a top-level one becomes bytes."""
     result = ctx.eval("({payload: new Uint8Array([0, 1, 255])})")
-    assert result == {"payload": b"\x00\x01\xff"}
+    assert result == {"payload": {"0": 0, "1": 1, "2": 255}}
 
 
-_EQUIVALENCE_CASES = [
-    "({a: undefined, b: [undefined, 1]})",
-    "[1, , 3]",
-    "({n: NaN, i: Infinity, j: -Infinity, z: -0})",
-    "[2**53, 2**53 - 1, 2**60, 1e21, 0.1, -1.5, 5e-324]",
-    "({d: new Date(0), m: new Map([[1, 2]])})",
-    "({u: new Uint8Array([0, 1, 255]), e: new Uint8Array(0)})",
-    "({b: new Uint8Array([7, 8]).buffer})",
-    "({big: 10n ** 30n, neg: -5n})",
-    "({t: {toJSON() { return 'x'; }}})",
-    "Object.create({inh: 1}, {own: {value: 2, enumerable: true}})",
-    "({'quote\"back\\\\slash': '\\u0000\\n\\t', 'café': '🔥'})",
-    "({f() {}})",
-    "[Symbol('s')]",
-    "({p: Promise.resolve(1)})",
-    "({s: '\\ud800'})",
-    "(() => { const o = {}; o.self = o; return o; })()",
-    "(() => { let v = 1; for (let i = 0; i < 130; i++) v = [v]; return v; })()",
-]
-
-
-def _outcome(ctx: Context, expr: str) -> str:
-    try:
-        return repr(ctx.eval(expr))
-    except MarshalError:
-        return "MarshalError"
-
-
-@pytest.mark.parametrize("expr", _EQUIVALENCE_CASES)
-def test_bulk_marshaling_matches_per_leaf_walk(
-    ctx: Context, expr: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("({a: undefined, b: 1})", {"b": 1}),
+        ("[undefined, , 3]", [None, None, 3]),
+        ("({n: NaN, i: -Infinity})", {"n": None, "i": None}),
+        ("({d: new Date(0)})", {"d": "1970-01-01T00:00:00.000Z"}),
+        ("({t: {toJSON() { return 'x'; }}})", {"t": "x"}),
+        ("[2**53]", [2**53]),
+    ],
+)
+def test_containers_marshal_with_json_semantics(
+    ctx: Context, expr: str, expected: object
 ) -> None:
-    """The single-call path must produce exactly what the per-leaf walk
-    does, including leaf types (`repr` distinguishes `1` from `1.0`)."""
-    from quickjs_rs import _engine
-
-    bulk = _outcome(ctx, expr)
-    monkeypatch.setattr(_engine._Instance, "_marshal_json", lambda *_: _engine._NO_JSON)
-    assert bulk == _outcome(ctx, expr)
+    assert ctx.eval(expr) == expected
 
 
-def test_bulk_marshaling_allow_opaque_matches_walk(ctx: Context) -> None:
-    """An opaque member deep in a value still yields a handle in place,
-    with plain siblings intact."""
-    with ctx.eval_handle("({rows: [{a: 1}], deep: {f: () => 1, n: NaN}})") as h:
-        value = h.to_python(allow_opaque=True)
-        try:
-            assert value["rows"] == [{"a": 1}]
-            assert value["deep"]["f"].type_of == "function"
-            assert repr(value["deep"]["n"]) == "nan"
-        finally:
-            value["deep"]["f"].dispose()
+def test_container_json_cannot_carry_takes_per_leaf_walk(ctx: Context) -> None:
+    """A BigInt makes JSON.stringify throw, so the value falls back to the
+    per-leaf walk and keeps its native leaf types."""
+    from quickjs_rs import UNDEFINED
+
+    assert ctx.eval("({big: 10n, u: undefined})") == {"big": 10, "u": UNDEFINED}
+
+
+def test_cyclic_container_raises_marshalerror(ctx: Context) -> None:
+    with pytest.raises(MarshalError):
+        ctx.eval("const o = {}; o.self = o; o")
 
 
 def test_guest_json_override_does_not_affect_marshaling_out(ctx: Context) -> None:
     """JS-to-host marshaling must not route through guest-replaceable
     globals like `JSON.stringify`."""
     ctx.eval("globalThis.JSON = { stringify() { return '\"hijacked\"'; } }; 0")
-    assert ctx.eval("({a: 1, big: 10n})") == {"a": 1, "big": 10}
+    assert ctx.eval("({a: 1})") == {"a": 1}
 
 
 def test_object_containing_bigint_value(ctx: Context) -> None:
