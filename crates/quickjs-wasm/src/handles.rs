@@ -575,33 +575,206 @@ pub extern "C" fn get_string(handle: i32) -> i32 {
     })
 }
 
-/// Serialize a value to JSON text in the result buffer via the intrinsic
-/// `JS_JSONStringify` (not `globalThis.JSON`, which guest code can replace).
-/// Bulk path for marshaling containers out: one crossing instead of one per
-/// leaf. STATUS_BAD_INPUT when the value has no JSON form; STATUS_JS_ERROR
-/// when stringify throws (BigInt, cycles).
+/// Bulk path for marshaling a value out: one crossing instead of one per leaf.
+/// Writes `[value, patches]` as JSON to the result buffer, with the same
+/// semantics as the host's per-leaf walk. Leaves JSON can't carry (`undefined`,
+/// binary) are written as `null` plus a `[path, kind, payload?]` patch.
+/// STATUS_BAD_INPUT when the walk must run instead: opaque values (function,
+/// symbol, promise), nesting past `max_depth`, or a JS error.
 #[no_mangle]
-pub extern "C" fn to_json(handle: i32) -> i32 {
+pub extern "C" fn marshal_json(handle: i32, max_depth: u32) -> i32 {
     guard(|ctx| {
         let v = match unsafe { borrow_value(handle, ctx) } {
             Some(v) => v,
             None => return STATUS_BAD_INPUT,
         };
-        match ctx.json_stringify(v) {
-            Ok(Some(s)) => match s.to_string() {
-                Ok(text) => {
-                    set_result(text.into_bytes());
-                    STATUS_OK
-                }
-                Err(_) => STATUS_JS_ERROR,
-            },
-            Ok(None) => STATUS_BAD_INPUT,
-            Err(_) => {
-                clear_pending(ctx);
-                STATUS_JS_ERROR
+        let mut m = Marshaler {
+            ctx,
+            max_depth,
+            out: String::from("["),
+            patches: String::new(),
+            path: Vec::new(),
+        };
+        if m.value(v, 0).is_none() {
+            clear_pending(ctx);
+            return STATUS_BAD_INPUT;
+        }
+        m.out.push_str(",[");
+        m.out.push_str(&m.patches);
+        m.out.push_str("]]");
+        set_result(m.out.into_bytes());
+        STATUS_OK
+    })
+}
+
+enum PathSeg {
+    Index(u32),
+    Key(String),
+}
+
+struct Marshaler<'a, 'js> {
+    ctx: &'a Ctx<'js>,
+    max_depth: u32,
+    out: String,
+    patches: String,
+    path: Vec<PathSeg>,
+}
+
+impl<'js> Marshaler<'_, 'js> {
+    /// Same type dispatch order as `type_name`; None means "fall back".
+    fn value(&mut self, v: Value<'js>, depth: u32) -> Option<()> {
+        if depth > self.max_depth {
+            return None;
+        }
+        if v.is_undefined() {
+            self.out.push_str("null");
+            self.patch("u", None);
+        } else if v.is_null() {
+            self.out.push_str("null");
+        } else if let Some(b) = v.as_bool() {
+            self.out.push_str(if b { "true" } else { "false" });
+        } else if let Some(f) = v.as_number() {
+            push_number(&mut self.out, f);
+        } else if let Some(s) = v.as_string() {
+            push_json_str(&mut self.out, &s.to_string().ok()?);
+        } else if v.is_big_int() {
+            // `String` is guest-replaceable; only splice decimal digits.
+            let text = string_of(self.ctx, v)?;
+            let digits = text.strip_prefix('-').unwrap_or(&text);
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            self.out.push_str(&text);
+        } else if v.is_symbol() || v.is_function() {
+            return None;
+        } else if v.is_array() {
+            self.array(v.into_object()?, depth)?;
+        } else if v.is_object() {
+            self.object(v.into_object()?, depth)?;
+        } else {
+            return None;
+        }
+        Some(())
+    }
+
+    fn array(&mut self, arr: Object<'js>, depth: u32) -> Option<()> {
+        let len = arr.get::<_, Value>("length").ok()?.as_number()? as u32;
+        self.out.push('[');
+        for i in 0..len {
+            if i > 0 {
+                self.out.push(',');
+            }
+            let item = arr.get::<_, Value>(i).ok()?;
+            self.path.push(PathSeg::Index(i));
+            self.value(item, depth + 1)?;
+            self.path.pop();
+        }
+        self.out.push(']');
+        Some(())
+    }
+
+    fn object(&mut self, obj: Object<'js>, depth: u32) -> Option<()> {
+        if obj.is_promise() {
+            return None;
+        }
+        if let Some(bytes) = binary_bytes(self.ctx, &obj) {
+            self.out.push_str("null");
+            let mut hex = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                hex.push(HEX[(b >> 4) as usize] as char);
+                hex.push(HEX[(b & 0xf) as usize] as char);
+            }
+            self.patch("b", Some(&hex));
+            return Some(());
+        }
+        self.out.push('{');
+        for (n, key) in obj.keys::<String>().enumerate() {
+            let key = key.ok()?;
+            if n > 0 {
+                self.out.push(',');
+            }
+            push_json_str(&mut self.out, &key);
+            self.out.push(':');
+            let item = obj.get::<_, Value>(key.as_str()).ok()?;
+            self.path.push(PathSeg::Key(key));
+            self.value(item, depth + 1)?;
+            self.path.pop();
+        }
+        self.out.push('}');
+        Some(())
+    }
+
+    /// Record that the leaf at the current path needs a host-side value.
+    fn patch(&mut self, kind: &str, payload: Option<&str>) {
+        if !self.patches.is_empty() {
+            self.patches.push(',');
+        }
+        self.patches.push_str("[[");
+        for (i, seg) in self.path.iter().enumerate() {
+            if i > 0 {
+                self.patches.push(',');
+            }
+            match seg {
+                PathSeg::Index(n) => self.patches.push_str(&n.to_string()),
+                PathSeg::Key(k) => push_json_str(&mut self.patches, k),
             }
         }
-    })
+        self.patches.push_str("],\"");
+        self.patches.push_str(kind);
+        self.patches.push('"');
+        if let Some(p) = payload {
+            self.patches.push_str(",\"");
+            self.patches.push_str(p);
+            self.patches.push('"');
+        }
+        self.patches.push(']');
+    }
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// The walk's bytes probe: a readable Uint8Array, else a readable ArrayBuffer.
+fn binary_bytes(ctx: &Ctx<'_>, obj: &Object<'_>) -> Option<Vec<u8>> {
+    if let Ok(ta) = TypedArray::<u8>::from_object(obj.clone()) {
+        if let Some(bytes) = ta.as_bytes() {
+            return Some(bytes.to_vec());
+        }
+    }
+    clear_pending(ctx);
+    if let Some(ab) = ArrayBuffer::from_object(obj.clone()) {
+        if let Some(bytes) = ab.as_bytes() {
+            return Some(bytes.to_vec());
+        }
+    }
+    clear_pending(ctx);
+    None
+}
+
+/// Integer-valued numbers below 2^53 as ints, others as shortest round-trip
+/// floats; NaN/Infinity use the literals Python's `json` accepts.
+fn push_number(out: &mut String, f: f64) {
+    if f.is_nan() {
+        out.push_str("NaN");
+    } else if f.is_infinite() {
+        out.push_str(if f > 0.0 { "Infinity" } else { "-Infinity" });
+    } else if f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 {
+        out.push_str(&(f as i64).to_string());
+    } else {
+        out.push_str(&format!("{f:?}"));
+    }
+}
+
+fn push_json_str(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Marshal a BigInt handle's DECIMAL STRING into the result buffer (via the JS

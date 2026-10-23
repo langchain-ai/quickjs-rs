@@ -128,7 +128,7 @@ _MAX_MARSHAL_DEPTH = 128
 # Largest magnitude an int crosses as an exact JS number; wider ints are BigInt.
 _MAX_SAFE_INT = 2**53
 
-# Sentinel: a guest value has no JSON form, so it takes the per-leaf walk.
+# Sentinel: the guest can't bulk-encode a value, so it takes the per-leaf walk.
 _NO_JSON = object()
 
 # Sanitized message for a host-function failure surfaced into JS (no host
@@ -776,10 +776,9 @@ class _Instance:
         if name == "string":
             return self._get_string(handle)
         if name == "array":
-            if not allow_opaque:
-                value = self._from_json(handle)
-                if value is not _NO_JSON:
-                    return value
+            value = self._marshal_json(handle, _depth)
+            if value is not _NO_JSON:
+                return value
             return self._array_to_list(handle, allow_opaque, _depth)
         if name == "object":
             # A Promise is an object structurally, but not marshalable by value
@@ -793,28 +792,33 @@ class _Instance:
             ab = self._try_arraybuffer(handle)
             if ab is not None:
                 return ab
-            if not allow_opaque:
-                value = self._from_json(handle)
-                if value is not _NO_JSON:
-                    return value
+            value = self._marshal_json(handle, _depth)
+            if value is not _NO_JSON:
+                return value
             return self._object_to_dict(handle, allow_opaque, _depth)
         # function / symbol / proxy / unknown: opaque.
         if allow_opaque:
             return QjsHandle._adopt(self, self.c("dup_handle", handle))
         raise MarshalError(f"cannot marshal a JS {name} to Python")
 
-    def _from_json(self, handle: int) -> Any:
-        """Marshal a container in one guest crossing, with JSON semantics.
+    def _marshal_json(self, handle: int, depth: int) -> Any:
+        """Marshal a container in one guest crossing, with the walk's semantics.
 
-        Returns `_NO_JSON` when the value can't be stringified (BigInt, cycles),
-        so the caller falls back to the per-leaf walk.
+        Returns `_NO_JSON` when the guest can't encode it (opaque values,
+        nesting past the depth limit, JS errors), so the caller walks instead.
         """
-        st = self.c("to_json", handle)
-        if st in (STATUS_BAD_INPUT, STATUS_JS_ERROR):
+        st = self.c("marshal_json", handle, _MAX_MARSHAL_DEPTH - depth)
+        if st == STATUS_BAD_INPUT:
             return _NO_JSON
         if st != STATUS_OK:
-            raise MarshalError(f"to_json status={st}")
-        return json.loads(self.take_result())
+            raise MarshalError(f"marshal_json status={st}")
+        value, patches = json.loads(self.take_result())
+        for path, kind, *payload in patches:
+            parent = value
+            for seg in path[:-1]:
+                parent = parent[seg]
+            parent[path[-1]] = UNDEFINED if kind == "u" else bytes.fromhex(payload[0])
+        return value
 
     def _is_promise(self, handle: int) -> bool:
         out = self.alloc_out()

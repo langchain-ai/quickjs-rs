@@ -161,13 +161,17 @@ def test_handle_holds_function_that_would_fail_marshaling() -> None:
 def test_to_python_allow_opaque_substitutes_child_handles() -> None:
     """allow_opaque=True produces marshalable leaves and child
     Handles at positions where msgpack would fail."""
+    from quickjs_rs import MarshalError
+
     with Runtime() as rt:
         with rt.new_context() as ctx:
             with ctx.eval_handle(
                 "({n: 1, s: 'ok', f: () => 42, nested: {g: () => 'deep'}})"
             ) as obj:
-                # Without allow_opaque, JSON semantics drop function members.
-                assert obj.to_python() == {"n": 1, "s": "ok", "nested": {}}
+                # Without allow_opaque, the function member fails
+                # marshaling for the whole value.
+                with pytest.raises(MarshalError):
+                    obj.to_python()
 
                 as_dict = obj.to_python(allow_opaque=True)
                 try:
