@@ -578,16 +578,26 @@ pub extern "C" fn get_string(handle: i32) -> i32 {
 /// Serialize a value to JSON text in the result buffer via the intrinsic
 /// `JS_JSONStringify` (not `globalThis.JSON`, which guest code can replace).
 /// Bulk path for marshaling containers out: one crossing instead of one per
-/// leaf. STATUS_BAD_INPUT when the value has no JSON form; STATUS_JS_ERROR
-/// when stringify throws (BigInt, cycles).
+/// leaf. Leaves JSON can't carry (`undefined`, NaN, ±Infinity, binary, BigInt)
+/// are written as `{<tag>: "<kind>[:payload]"}`, where the host picks a random
+/// `tag` per call. STATUS_BAD_INPUT when the value has no JSON form;
+/// STATUS_JS_ERROR when stringify throws (cycles, throwing getters).
 #[no_mangle]
-pub extern "C" fn to_json(handle: i32) -> i32 {
+pub extern "C" fn to_json(handle: i32, tag_ptr: *const u8, tag_len: usize) -> i32 {
     guard(|ctx| {
         let v = match unsafe { borrow_value(handle, ctx) } {
             Some(v) => v,
             None => return STATUS_BAD_INPUT,
         };
-        match ctx.json_stringify(v) {
+        let tag = match read_capped(tag_ptr, tag_len).and_then(|b| String::from_utf8(b).ok()) {
+            Some(t) => t,
+            None => return STATUS_BAD_INPUT,
+        };
+        let replacer = match tagging_replacer(ctx, tag) {
+            Some(f) => f,
+            None => return STATUS_JS_ERROR,
+        };
+        match ctx.json_stringify_replacer(v, replacer) {
             Ok(Some(s)) => match s.to_string() {
                 Ok(text) => {
                     set_result(text.into_bytes());
@@ -602,6 +612,61 @@ pub extern "C" fn to_json(handle: i32) -> i32 {
             }
         }
     })
+}
+
+/// `JSON.stringify` replacer that swaps leaves JSON can't carry for tagged markers.
+fn tagging_replacer<'js>(ctx: &Ctx<'js>, tag: String) -> Option<Function<'js>> {
+    let ctx_owned = ctx.clone();
+    Function::new(
+        ctx.clone(),
+        move |_key: Value<'js>, value: Value<'js>| -> rquickjs::Result<Value<'js>> {
+            let kind = match leaf_kind(&ctx_owned, &value) {
+                Some(k) => k,
+                None => return Ok(value),
+            };
+            let marker = Object::new(ctx_owned.clone())?;
+            marker.set(tag.as_str(), kind)?;
+            Ok(marker.into_value())
+        },
+    )
+    .ok()
+}
+
+fn leaf_kind<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<String> {
+    if value.is_undefined() {
+        return Some("u".into());
+    }
+    if let Some(f) = value.as_float() {
+        return match f {
+            _ if f.is_nan() => Some("nan".into()),
+            f64::INFINITY => Some("inf".into()),
+            f64::NEG_INFINITY => Some("-inf".into()),
+            _ => None,
+        };
+    }
+    if value.is_big_int() {
+        return string_of(ctx, value.clone()).map(|d| format!("n:{d}"));
+    }
+    let bytes = binary_bytes(ctx, value.as_object()?)?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("b:{hex}"))
+}
+
+/// The walk's bytes probe: a readable Uint8Array, else a readable ArrayBuffer.
+fn binary_bytes(ctx: &Ctx<'_>, obj: &Object<'_>) -> Option<Vec<u8>> {
+    if let Ok(ta) = TypedArray::<u8>::from_object(obj.clone()) {
+        if let Some(bytes) = ta.as_bytes() {
+            return Some(bytes.to_vec());
+        }
+    }
+    clear_pending(ctx);
+    if let Some(ab) = ArrayBuffer::from_object(obj.clone()) {
+        if let Some(bytes) = ab.as_bytes() {
+            return Some(bytes.to_vec());
+        }
+    }
+    clear_pending(ctx);
+    None
 }
 
 /// Marshal a BigInt handle's DECIMAL STRING into the result buffer (via the JS
