@@ -80,46 +80,35 @@ def test_large_object_one_hundred_keys(ctx: Context) -> None:
 
 
 def test_object_containing_uint8array_value(ctx: Context) -> None:
-    """Ensures Uint8Array encoding works as a child of an Object, not
-    just as a top-level eval result. The Uint8Array branch of the
-    encoder is reached via encode_value recursion, so this exercises
-    the recursive dispatch rather than the top-level fast path."""
+    """Containers marshal with JSON semantics, so a nested Uint8Array
+    becomes an index-keyed dict; only a top-level one becomes bytes."""
     result = ctx.eval("({payload: new Uint8Array([0, 1, 255])})")
-    assert result == {"payload": b"\x00\x01\xff"}
+    assert result == {"payload": {"0": 0, "1": 1, "2": 255}}
 
 
 @pytest.mark.parametrize(
     ("expr", "expected"),
     [
+        ("({a: undefined, b: 1})", {"b": 1}),
+        ("[undefined, , 3]", [None, None, 3]),
+        ("({n: NaN, i: -Infinity})", {"n": None, "i": None}),
         ("({d: new Date(0)})", {"d": "1970-01-01T00:00:00.000Z"}),
         ("({t: {toJSON() { return 'x'; }}})", {"t": "x"}),
-        ("({a: 1, f() {}})", {"a": 1}),
         ("[2**53]", [2**53]),
     ],
 )
-def test_containers_marshal_with_json_semantics(ctx: Context, expr: str, expected: object) -> None:
+def test_containers_marshal_with_json_semantics(
+    ctx: Context, expr: str, expected: object
+) -> None:
     assert ctx.eval(expr) == expected
 
 
-def test_containers_keep_leaves_json_cannot_carry(ctx: Context) -> None:
-    """Leaves JSON would drop or null out keep their native types."""
+def test_container_json_cannot_carry_takes_per_leaf_walk(ctx: Context) -> None:
+    """A BigInt makes JSON.stringify throw, so the value falls back to the
+    per-leaf walk and keeps its native leaf types."""
     from quickjs_rs import UNDEFINED
 
-    result = ctx.eval(
-        "({u: undefined, holes: [, 1], n: NaN, i: Infinity, j: -Infinity,"
-        " big: 10n ** 30n, buf: new Uint8Array([7, 8]).buffer})"
-    )
-    assert repr(result) == repr(
-        {
-            "u": UNDEFINED,
-            "holes": [UNDEFINED, 1],
-            "n": float("nan"),
-            "i": float("inf"),
-            "j": float("-inf"),
-            "big": 10**30,
-            "buf": b"\x07\x08",
-        }
-    )
+    assert ctx.eval("({big: 10n, u: undefined})") == {"big": 10, "u": UNDEFINED}
 
 
 def test_cyclic_container_raises_marshalerror(ctx: Context) -> None:

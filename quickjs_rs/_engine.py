@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import math
-import secrets
 import struct
 import threading
 import weakref
@@ -187,16 +186,6 @@ class Undefined:
 
 
 UNDEFINED = Undefined()
-
-# Decoders for the guest's tagged markers, by kind.
-_JSON_LEAVES: dict[str, Callable[[str], Any]] = {
-    "u": lambda _: UNDEFINED,
-    "nan": lambda _: math.nan,
-    "inf": lambda _: math.inf,
-    "-inf": lambda _: -math.inf,
-    "n": int,
-    "b": bytes.fromhex,
-}
 
 
 # --------------------------------------------------------------------------
@@ -817,29 +806,15 @@ class _Instance:
     def _from_json(self, handle: int) -> Any:
         """Marshal a container in one guest crossing, with JSON semantics.
 
-        Leaves JSON can't carry arrive as tagged markers and are restored here.
-        Returns `_NO_JSON` when the value can't be stringified (cycles), so the
-        caller falls back to the per-leaf walk.
+        Returns `_NO_JSON` when the value can't be stringified (BigInt, cycles),
+        so the caller falls back to the per-leaf walk.
         """
-        tag = secrets.token_hex(8)
-        data = tag.encode()
-        p = self.alloc_write(data)
-        try:
-            st = self.c("to_json", handle, p, len(data))
-        finally:
-            self.free(p, len(data))
+        st = self.c("to_json", handle)
         if st in (STATUS_BAD_INPUT, STATUS_JS_ERROR):
             return _NO_JSON
         if st != STATUS_OK:
             raise MarshalError(f"to_json status={st}")
-
-        def restore(obj: dict[str, Any]) -> Any:
-            if len(obj) != 1 or tag not in obj:
-                return obj
-            kind, _, payload = obj[tag].partition(":")
-            return _JSON_LEAVES[kind](payload)
-
-        return json.loads(self.take_result(), object_hook=restore)
+        return json.loads(self.take_result())
 
     def _is_promise(self, handle: int) -> bool:
         out = self.alloc_out()
