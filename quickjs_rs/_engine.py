@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import struct
 import threading
+import time
 import weakref
 from collections.abc import Callable
-from functools import cache
 from typing import Any, cast
 
 import wasmtime
@@ -41,7 +42,6 @@ import wasmtime
 from quickjs_rs._transform import SourceTransformer, TransformError
 from quickjs_rs._wasmtime import (
     SharedWasmArtifact,
-    instantiate_wasm_artifact,
     shared_wasm_artifact,
     shared_wasmtime_engine,
 )
@@ -239,38 +239,49 @@ def _tramp_host_module_load(name_ptr: int, name_len: int, out_len_ptr: int) -> i
     return cast("_Instance", _CUR.inst)._host_module_load(name_ptr, name_len, out_len_ptr)
 
 
-_WASI_NAMES = ("clock_time_get", "clock_res_get", "random_get", "poll_oneoff")
+# WASI errno values returned by the shadowed imports.
+_WASI_EFAULT = 21
+_WASI_EINVAL = 28
+_WASI_EIO = 29
 
 
-def _tramp_wasi(name: str, *args: int) -> int:
-    return cast("_Instance", _CUR.inst)._wasi_call(name, *args)
+def _tramp_wasi_clock_time_get(clock_id: int, precision: int, out_ptr: int) -> int:
+    return cast("_Instance", _CUR.inst)._wasi_call("clock_time_get", clock_id, precision, out_ptr)
 
 
-def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
-    """Build the process-shared Linker, registering the 4 host-function imports
+def _tramp_wasi_random_get(buf_ptr: int, buf_len: int) -> int:
+    return cast("_Instance", _CUR.inst)._wasi_call("random_get", buf_ptr, buf_len)
+
+
+def _build_shared_linker(engine: wasmtime.Engine, *, hosted: bool = False) -> wasmtime.Linker:
+    """Build a process-shared Linker, registering the 4 host-function imports
     exactly once (so wasmtime-py's global slab is touched a constant number of
-    times — see the domain note above)."""
+    times — see the domain note above).
+
+    With ``hosted=True`` the linker also shadows the two WASI imports the guest
+    uses for time and entropy (``clock_time_get``, ``random_get``) with
+    trampolines into the active instance. Only instances created with a host
+    clock or seed use that linker (see `_hosted_linker`), so the default path
+    stays on native WASI."""
     linker = wasmtime.Linker(engine)
     linker.define_wasi()
-    linker.allow_shadowing = True
-    signatures = {
-        "clock_time_get": [wasmtime.ValType.i32(), wasmtime.ValType.i64(), wasmtime.ValType.i32()],
-        "clock_res_get": [wasmtime.ValType.i32(), wasmtime.ValType.i32()],
-        "random_get": [wasmtime.ValType.i32(), wasmtime.ValType.i32()],
-        "poll_oneoff": [wasmtime.ValType.i32()] * 4,
-    }
-    for name, params in signatures.items():
-
-        def dispatch(*args: int, _name: str = name) -> int:
-            return _tramp_wasi(_name, *args)
-
+    i32 = wasmtime.ValType.i32
+    if hosted:
+        linker.allow_shadowing = True
+        # wasi_snapshot_preview1.clock_time_get(clock_id, precision, out_ptr) -> errno
         linker.define_func(
             "wasi_snapshot_preview1",
-            name,
-            wasmtime.FuncType(params, [wasmtime.ValType.i32()]),
-            dispatch,
+            "clock_time_get",
+            wasmtime.FuncType([i32(), wasmtime.ValType.i64(), i32()], [i32()]),
+            _tramp_wasi_clock_time_get,
         )
-    i32 = wasmtime.ValType.i32
+        # wasi_snapshot_preview1.random_get(buf_ptr, buf_len) -> errno
+        linker.define_func(
+            "wasi_snapshot_preview1",
+            "random_get",
+            wasmtime.FuncType([i32(), i32()], [i32()]),
+            _tramp_wasi_random_get,
+        )
     # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
     linker.define_func(
         "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), _tramp_host_call
@@ -296,30 +307,31 @@ def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
     return linker
 
 
-@cache
-def _build_wasi_proxy(engine: wasmtime.Engine) -> wasmtime.Module:
-    return wasmtime.Module(
-        engine,
-        """(module
-          (import "env" "memory" (memory 0))
-          (export "memory" (memory 0))
-          (import "wasi_snapshot_preview1" "clock_time_get"
-            (func $time (param i32 i64 i32) (result i32)))
-          (import "wasi_snapshot_preview1" "clock_res_get"
-            (func $res (param i32 i32) (result i32)))
-          (import "wasi_snapshot_preview1" "random_get"
-            (func $random (param i32 i32) (result i32)))
-          (import "wasi_snapshot_preview1" "poll_oneoff"
-            (func $poll (param i32 i32 i32 i32) (result i32)))
-          (func (export "clock_time_get") (param i32 i64 i32) (result i32)
-            local.get 0 local.get 1 local.get 2 call $time)
-          (func (export "clock_res_get") (param i32 i32) (result i32)
-            local.get 0 local.get 1 call $res)
-          (func (export "random_get") (param i32 i32) (result i32)
-            local.get 0 local.get 1 call $random)
-          (func (export "poll_oneoff") (param i32 i32 i32 i32) (result i32)
-            local.get 0 local.get 1 local.get 2 local.get 3 call $poll))""",
-    )
+_HOSTED_LINKER: wasmtime.Linker | None = None
+_HOSTED_LINKER_LOCK = threading.Lock()
+
+
+def _hosted_linker() -> wasmtime.Linker:
+    """Lazily build the process-shared Linker for instances with a host clock or
+    seed: the default linker plus shadowed ``clock_time_get`` / ``random_get``.
+    Built once, like the default linker, so the per-instance cost is the same."""
+    global _HOSTED_LINKER
+    if _HOSTED_LINKER is None:
+        with _HOSTED_LINKER_LOCK:
+            if _HOSTED_LINKER is None:
+                _HOSTED_LINKER = _build_shared_linker(shared_wasmtime_engine(), hosted=True)
+    return _HOSTED_LINKER
+
+
+def _native_clock_ns(clock_id: int) -> int:
+    """The host's own clocks, for hosted instances created without a ``clock``."""
+    if clock_id == 0:
+        return time.time_ns()
+    if clock_id == 1:
+        return time.monotonic_ns()
+    if clock_id == 2:
+        return time.process_time_ns()
+    return time.thread_time_ns()
 
 
 def _quickjs_artifact() -> SharedWasmArtifact:
@@ -370,20 +382,17 @@ class _Instance:
         # MUST be O(1) — it fires very frequently during JS execution.
         self.interrupt_handler: Callable[[], bool] | None = None
 
-        # Instantiate the SHARED precompiled module via the SHARED linker (no
-        # recompile, no per-instance import registration — ~0.3ms).
-        self.inst = instantiate_wasm_artifact(artifact, self.store)
+        # Instantiate the SHARED precompiled module via a SHARED linker (no
+        # recompile, no per-instance import registration — ~0.3ms). Only an
+        # instance with a host clock or seed takes the hosted linker; every
+        # other instance keeps the default linker and native WASI.
+        hosted = clock is not None or random_seed is not None
+        linker = _hosted_linker() if hosted else artifact.linker
+        self.inst = linker.instantiate(self.store, artifact.module)
         e = self.inst.exports(self.store)
         # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
         # we know the concrete kinds for these named exports.
         self.mem = cast(wasmtime.Memory, e["memory"])
-        native_linker = wasmtime.Linker(shared_wasmtime_engine())
-        native_linker.define_wasi()
-        native_linker.define(self.store, "env", "memory", self.mem)
-        proxy = _build_wasi_proxy(shared_wasmtime_engine())
-        native = native_linker.instantiate(self.store, proxy).exports(self.store)
-        self._native_wasi = {name: cast(wasmtime.Func, native[name]) for name in _WASI_NAMES}
-        native_linker.close()
 
         # __stack_pointer global — captured/restored as part of a snapshot (§6).
         self.sp = cast(wasmtime.Global, e["__stack_pointer"])
@@ -417,44 +426,59 @@ class _Instance:
         self._closed = False
 
     def _wasi_call(self, name: str, *args: int) -> int:
-        if name == "random_get" and self.random_seed is not None:
+        """Shadowed WASI imports (hosted linker only).
+
+        With a seed, ``random_get`` emits the per-context SHA-256 stream; with a
+        clock, ``clock_time_get`` reads it. Whichever option is absent keeps
+        native behaviour: OS entropy, or the host's own clocks.
+        """
+        if name == "random_get":
             ptr, length = (arg & 0xFFFFFFFF for arg in args)
             if ptr > self._mem_size() or length > self._mem_size() - ptr:
-                return 21
-            offset = self._entropy_offset
-            end = offset + length
-            while offset < end:
-                block, skip = divmod(offset, 32)
-                data = hashlib.sha256(
-                    b"quickjs-rs/wasi-random/v1\0"
-                    + self._entropy_key
-                    + block.to_bytes(16, "little")
-                ).digest()[skip : skip + min(32 - skip, end - offset)]
-                self.mem.write(self.store, data, ptr + offset - self._entropy_offset)
-                offset += len(data)
-            self._entropy_offset = end
+                return _WASI_EFAULT
+            if length:
+                seeded = self.random_seed is not None
+                data = self._seeded_entropy(length) if seeded else os.urandom(length)
+                self.mem.write(self.store, data, ptr)
             return 0
-        if self.clock is not None and name in ("clock_time_get", "clock_res_get"):
+        if name == "clock_time_get":
             clock_id = args[0] & 0xFFFFFFFF
             ptr = args[-1] & 0xFFFFFFFF
             if clock_id not in (0, 1, 2, 3):
-                return 28
+                return _WASI_EINVAL
             if ptr > self._mem_size() or 8 > self._mem_size() - ptr:
-                return 21
-            try:
-                seconds = self.clock() if name == "clock_time_get" else 0.000000001
-                if not math.isfinite(seconds) or seconds < 0:
-                    return 28
-                ns = int(seconds * 1_000_000_000)
-                if ns >= 1 << 64:
-                    return 28
-            except Exception:
-                return 29
+                return _WASI_EFAULT
+            if self.clock is None:
+                ns = _native_clock_ns(clock_id)
+            else:
+                try:
+                    seconds = self.clock()
+                    if not math.isfinite(seconds) or seconds < 0:
+                        return _WASI_EINVAL
+                    ns = int(seconds * 1_000_000_000)
+                    if ns >= 1 << 64:
+                        return _WASI_EINVAL
+                except Exception:
+                    return _WASI_EIO
             self.mem.write(self.store, struct.pack("<Q", ns), ptr)
             return 0
-        if self.clock is not None and name == "poll_oneoff":
-            return 58
-        return int(self._native_wasi[name](self.store, *args))
+        raise ValueError(f"unexpected WASI import {name!r}")
+
+    def _seeded_entropy(self, length: int) -> bytes:
+        """The next ``length`` bytes of this context's deterministic stream."""
+        out = bytearray()
+        offset = self._entropy_offset
+        end = offset + length
+        while offset < end:
+            block, skip = divmod(offset, 32)
+            digest = hashlib.sha256(
+                b"quickjs-rs/wasi-random/v1\0" + self._entropy_key + block.to_bytes(16, "little")
+            ).digest()
+            chunk = digest[skip : skip + min(32 - skip, end - offset)]
+            out += chunk
+            offset += len(chunk)
+        self._entropy_offset = end
+        return bytes(out)
 
     def close(self) -> None:
         """Release the wasm instance.
