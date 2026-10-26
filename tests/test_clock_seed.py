@@ -7,7 +7,8 @@ import pytest
 import wasmtime
 
 from quickjs_rs import Runtime
-from quickjs_rs._engine import _CUR, _Instance, _quickjs_artifact
+from quickjs_rs._engine import _CUR, _hosted_linker, _Instance, _quickjs_artifact
+from quickjs_rs._wasmtime import shared_wasmtime_engine
 
 
 def sequence(clock=None, seed=None):
@@ -76,12 +77,9 @@ def test_wasi_clocks_entropy_and_bounds():
         for clock_id in range(4):
             assert a._wasi_call("clock_time_get", clock_id, 0, ptr) == 0
             assert struct.unpack("<Q", a.mem.read(a.store, ptr, ptr + 8))[0] == 12250000000
-            assert a._wasi_call("clock_res_get", clock_id, ptr) == 0
-            assert struct.unpack("<Q", a.mem.read(a.store, ptr, ptr + 8))[0] == 1
         assert a._wasi_call("clock_time_get", 4, 0, ptr) == 28
         for bad in [-1, a._mem_size() - 7, a._mem_size()]:
             assert a._wasi_call("clock_time_get", 0, 0, bad) == 21
-            assert a._wasi_call("clock_res_get", 0, bad) == 21
         assert a._wasi_call("random_get", -1, 8) == 21
         assert a._wasi_call("random_get", ptr, -1) == 21
         assert a._entropy_offset == 0
@@ -96,7 +94,6 @@ def test_wasi_clocks_entropy_and_bounds():
                 b"quickjs-rs/wasi-random/v1\0" + (42).to_bytes(8, "little") + bytes(16)
             ).digest()
         )
-        assert a._wasi_call("poll_oneoff", 0, 0, 1, 0) == 58
     finally:
         a.close()
         b.close()
@@ -128,23 +125,61 @@ def test_bundled_clock_import_audit():
     }
 
 
-def test_native_wasi_fallback():
-    inst = _Instance()
+def test_hosted_fallbacks_for_the_missing_option():
+    # A seed without a clock keeps the host's real clocks.
+    inst = _Instance(random_seed=42)
+    try:
+        ptr = inst.c("qjs_alloc", 64)
+        before = time.time_ns()
+        assert inst._wasi_call("clock_time_get", 0, 0, ptr) == 0
+        now = struct.unpack("<Q", inst.mem.read(inst.store, ptr, ptr + 8))[0]
+        assert before <= now <= time.time_ns()
+        assert inst._wasi_call("clock_time_get", 1, 0, ptr) == 0
+        assert inst._wasi_call("clock_time_get", 4, 0, ptr) == 28
+    finally:
+        inst.close()
+    # A clock without a seed keeps OS entropy.
+    inst = _Instance(clock=lambda: 1)
     try:
         ptr = inst.c("qjs_alloc", 64)
         assert inst._wasi_call("random_get", ptr, 64) == 0
-        assert bytes(inst.mem.read(inst.store, ptr, ptr + 64)) != bytes(64)
-        assert inst._wasi_call("clock_res_get", 0, ptr) == 0
-        assert struct.unpack("<Q", inst.mem.read(inst.store, ptr, ptr + 8))[0] > 0
+        first = bytes(inst.mem.read(inst.store, ptr, ptr + 64))
+        assert inst._wasi_call("random_get", ptr, 64) == 0
+        assert first != bytes(64)
+        assert first != bytes(inst.mem.read(inst.store, ptr, ptr + 64))
+        assert inst._wasi_call("random_get", -1, 8) == 21
     finally:
         inst.close()
 
 
-def test_shared_linker_guest_dispatch():
+def test_default_linker_stays_native():
+    artifact = _quickjs_artifact()
+    assert _hosted_linker() is not artifact.linker
+    engine = shared_wasmtime_engine()
+    store = wasmtime.Store(engine)
+    store.set_wasi(wasmtime.WasiConfig())
+    module = wasmtime.Module(
+        engine,
+        """(module
+        (import "wasi_snapshot_preview1" "clock_time_get"
+            (func $clock (param i32 i64 i32) (result i32)))
+        (memory (export "memory") 1)
+        (func (export "clock") (param i32 i32) (result i32)
+            local.get 0 i64.const 0 local.get 1 call $clock))""",
+    )
+    # No `_CUR.inst` is set here: a shadowed import would fail, native WASI works.
+    exports = artifact.linker.instantiate(store, module).exports(store)
+    mem = exports["memory"]
+    before = time.time_ns()
+    assert exports["clock"](store, 0, 8) == 0
+    now = struct.unpack("<Q", mem.read(store, 8, 16))[0]
+    assert before <= now <= time.time_ns()
+
+
+def test_hosted_linker_guest_dispatch():
     inst = _Instance(clock=lambda: 4.5, random_seed=9)
     previous = getattr(_CUR, "inst", None)
     try:
-        artifact = _quickjs_artifact()
         module = wasmtime.Module(
             inst.store.engine,
             """(module
@@ -157,7 +192,7 @@ def test_shared_linker_guest_dispatch():
             (func (export "random") (param i32 i32) (result i32)
                 local.get 0 local.get 1 call $random))""",
         )
-        exports = artifact.linker.instantiate(inst.store, module).exports(inst.store)
+        exports = _hosted_linker().instantiate(inst.store, module).exports(inst.store)
         ptr = inst.c("qjs_alloc", 32)
         _CUR.inst = inst
         for clock_id in range(4):

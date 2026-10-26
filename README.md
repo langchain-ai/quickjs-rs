@@ -76,9 +76,9 @@ the same seed. Identical seeds deliberately do **not** diversify sibling context
   All four WASI clock IDs (realtime, monotonic, process CPU, thread CPU) use this
   same value; the latter three are virtual values, not real CPU measurements.
   Hosts wanting monotonic behavior must provide nondecreasing values. Precision
-  hints are ignored; virtual `clock_res_get` reports one nanosecond. Invalid
-  values return WASI `INVAL`; callback exceptions return `IO` without exposing
-  the exception to JS. Callbacks must be safe for the host's threading model.
+  hints are ignored. Invalid values return WASI `INVAL`; callback exceptions
+  return `IO` without exposing the exception to JS. Callbacks must be safe for
+  the host's threading model.
 - `random_seed` must be an unsigned 64-bit integer (not `bool`). WASI
   `random_get` emits a per-context byte stream: concatenate SHA-256 blocks of
   `b"quickjs-rs/wasi-random/v1\0" + seed.to_bytes(8, "little") +
@@ -96,14 +96,13 @@ the same seed. Identical seeds deliberately do **not** diversify sibling context
   the top 52 bits by 2^52. The function's native identity/name can differ from
   the default QuickJS builtin; no JS source or host callback runs per draw.
 
-The current bundled guest imports `clock_time_get` and `random_get`, but neither
-`clock_res_get` nor `poll_oneoff`. Both additional imports are nevertheless
-shadowed in the shared linker: custom clocks return virtual resolution and
-`poll_oneoff` returns WASI `NOTSUP` rather than sleeping against or exposing real
-host time. Without a custom clock those calls forward to native WASI. Default
-forwarding uses a small WASM adapter exporting the guest memory so native WASI
-receives the correct caller memory. All overrides dispatch through the active
-instance, not a runtime captured by the shared linker.
+A runtime without a clock or seed is unchanged: its contexts use the default
+linker and native WASI. A runtime with either option instantiates its contexts
+through a second process-shared linker that shadows only `clock_time_get` and
+`random_get` (the bundled guest imports neither `clock_res_get` nor
+`poll_oneoff`), dispatching through the active instance. When only one option is
+given, the other import keeps native behavior: the host's own clocks, or OS
+entropy.
 
 These controls are not complete timing-side-channel elimination or a guarantee
 of Temporal/durable replay safety. Host deadlines still use real monotonic time;
