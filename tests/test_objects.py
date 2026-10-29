@@ -116,6 +116,27 @@ def test_cyclic_container_raises_marshalerror(ctx: Context) -> None:
         ctx.eval("const o = {}; o.self = o; o")
 
 
+def _nested_js(levels: int, wrap: str) -> str:
+    step = "v = [v]" if wrap == "array" else "v = {a: v}"
+    return f"(() => {{ let v = 1; for (let i = 0; i < {levels}; i++) {step}; return v; }})()"
+
+
+@pytest.mark.parametrize("wrap", ["array", "object"])
+def test_js_nesting_limit(ctx: Context, wrap: str) -> None:
+    assert ctx.eval(_nested_js(128, wrap)) is not None
+    for levels in (129, 1000):
+        with pytest.raises(MarshalError):
+            ctx.eval(_nested_js(levels, wrap))
+
+
+def test_js_nesting_limit_counts_enclosing_walk(ctx: Context) -> None:
+    """A BigInt sends the root through the per-leaf walk, so the nested
+    child starts one level down."""
+    assert ctx.eval(f"({{big: 1n, deep: {_nested_js(127, 'array')}}})")["big"] == 1
+    with pytest.raises(MarshalError):
+        ctx.eval(f"({{big: 1n, deep: {_nested_js(128, 'array')}}})")
+
+
 def test_guest_json_override_does_not_affect_marshaling_out(ctx: Context) -> None:
     """JS-to-host marshaling must not route through guest-replaceable
     globals like `JSON.stringify`."""
