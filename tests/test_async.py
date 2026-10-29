@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 
 import pytest
 
@@ -369,6 +371,41 @@ async def test_cumulative_budget_still_trips_on_js_time() -> None:
         with rt.new_context(timeout=0.1) as ctx:
             with pytest.raises(_TimeoutError):
                 await ctx.eval_async("while (true) {}", module=False)
+
+
+_RUNAWAY_MARSHALING = [
+    "({get x() { while (true) {} }})",
+    "Object.create({toJSON() { while (true) {} }})",
+]
+
+
+@pytest.mark.parametrize("code", _RUNAWAY_MARSHALING)
+async def test_eval_async_result_marshaling_is_bounded_by_timeout(code: str) -> None:
+    """Marshaling the result can run guest code (getters, `toJSON`); a
+    runaway one is interrupted instead of hanging the caller."""
+    with Runtime() as rt:
+        with rt.new_context(timeout=0.1) as ctx:
+            start = time.monotonic()
+            with contextlib.suppress(Exception):
+                await ctx.eval_async(code)
+            assert time.monotonic() - start < 2
+            assert await ctx.eval_async("1 + 1") == 2
+
+
+@pytest.mark.parametrize("code", _RUNAWAY_MARSHALING)
+async def test_handle_to_python_is_bounded_by_timeout(code: str) -> None:
+    """`Handle.to_python` outside any eval still gets the context timeout."""
+    with Runtime() as rt:
+        with rt.new_context(timeout=0.1) as ctx:
+            handle = await ctx.eval_handle_async(code)
+            try:
+                start = time.monotonic()
+                with contextlib.suppress(Exception):
+                    handle.to_python()
+                assert time.monotonic() - start < 2
+            finally:
+                handle.dispose()
+            assert await ctx.eval_async("1 + 1") == 2
 
 
 async def test_cumulative_budget_drained_by_wall_time_outside_eval() -> None:
