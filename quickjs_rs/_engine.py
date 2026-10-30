@@ -27,10 +27,13 @@ sentinel). Lengths are capped. The wasm sandbox is the isolation boundary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import struct
 import threading
+import time
 import weakref
 from collections.abc import Callable
 from typing import Any, cast
@@ -40,7 +43,6 @@ import wasmtime
 from quickjs_rs._transform import SourceTransformer, TransformError
 from quickjs_rs._wasmtime import (
     SharedWasmArtifact,
-    instantiate_wasm_artifact,
     shared_wasm_artifact,
     shared_wasmtime_engine,
 )
@@ -241,13 +243,49 @@ def _tramp_host_module_load(name_ptr: int, name_len: int, out_len_ptr: int) -> i
     return cast("_Instance", _CUR.inst)._host_module_load(name_ptr, name_len, out_len_ptr)
 
 
-def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
-    """Build the process-shared Linker, registering the 4 host-function imports
+# WASI errno values returned by the shadowed imports.
+_WASI_EFAULT = 21
+_WASI_EINVAL = 28
+_WASI_EIO = 29
+
+
+def _tramp_wasi_clock_time_get(clock_id: int, precision: int, out_ptr: int) -> int:
+    return cast("_Instance", _CUR.inst)._wasi_call("clock_time_get", clock_id, precision, out_ptr)
+
+
+def _tramp_wasi_random_get(buf_ptr: int, buf_len: int) -> int:
+    return cast("_Instance", _CUR.inst)._wasi_call("random_get", buf_ptr, buf_len)
+
+
+def _build_shared_linker(engine: wasmtime.Engine, *, hosted: bool = False) -> wasmtime.Linker:
+    """Build a process-shared Linker, registering the 4 host-function imports
     exactly once (so wasmtime-py's global slab is touched a constant number of
-    times — see the domain note above)."""
+    times — see the domain note above).
+
+    With ``hosted=True`` the linker also shadows the two WASI imports the guest
+    uses for time and entropy (``clock_time_get``, ``random_get``) with
+    trampolines into the active instance. Only instances created with a host
+    clock or seed use that linker (see `_hosted_linker`), so the default path
+    stays on native WASI."""
     linker = wasmtime.Linker(engine)
     linker.define_wasi()
     i32 = wasmtime.ValType.i32
+    if hosted:
+        linker.allow_shadowing = True
+        # wasi_snapshot_preview1.clock_time_get(clock_id, precision, out_ptr) -> errno
+        linker.define_func(
+            "wasi_snapshot_preview1",
+            "clock_time_get",
+            wasmtime.FuncType([i32(), wasmtime.ValType.i64(), i32()], [i32()]),
+            _tramp_wasi_clock_time_get,
+        )
+        # wasi_snapshot_preview1.random_get(buf_ptr, buf_len) -> errno
+        linker.define_func(
+            "wasi_snapshot_preview1",
+            "random_get",
+            wasmtime.FuncType([i32(), i32()], [i32()]),
+            _tramp_wasi_random_get,
+        )
     # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
     linker.define_func(
         "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), _tramp_host_call
@@ -273,6 +311,33 @@ def _build_shared_linker(engine: wasmtime.Engine) -> wasmtime.Linker:
     return linker
 
 
+_HOSTED_LINKER: wasmtime.Linker | None = None
+_HOSTED_LINKER_LOCK = threading.Lock()
+
+
+def _hosted_linker() -> wasmtime.Linker:
+    """Lazily build the process-shared Linker for instances with a host clock or
+    seed: the default linker plus shadowed ``clock_time_get`` / ``random_get``.
+    Built once, like the default linker, so the per-instance cost is the same."""
+    global _HOSTED_LINKER
+    if _HOSTED_LINKER is None:
+        with _HOSTED_LINKER_LOCK:
+            if _HOSTED_LINKER is None:
+                _HOSTED_LINKER = _build_shared_linker(shared_wasmtime_engine(), hosted=True)
+    return _HOSTED_LINKER
+
+
+def _native_clock_ns(clock_id: int) -> int:
+    """The host's own clocks, for hosted instances created without a ``clock``."""
+    if clock_id == 0:
+        return time.time_ns()
+    if clock_id == 1:
+        return time.monotonic_ns()
+    if clock_id == 2:
+        return time.process_time_ns()
+    return time.thread_time_ns()
+
+
 def _quickjs_artifact() -> SharedWasmArtifact:
     """Lazily return the process-shared QuickJS artifact."""
     return shared_wasm_artifact(
@@ -291,7 +356,14 @@ def _quickjs_artifact() -> SharedWasmArtifact:
 class _Instance:
     """A loaded guest wasm instance and the low-level call surface."""
 
-    def __init__(self, *, memory_limit: int | None = None, stack_limit: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        memory_limit: int | None = None,
+        stack_limit: int | None = None,
+        clock: Callable[[], float] | None = None,
+        random_seed: int | None = None,
+    ) -> None:
         # Share the Engine + compiled Module + Linker (see the domain note
         # above); only the Store is per-instance. Host imports are registered
         # ONCE on the shared Linker — we do NOT define_func per instance (that
@@ -304,19 +376,28 @@ class _Instance:
         wasi.inherit_stdout()
         wasi.inherit_stderr()
         self.store.set_wasi(wasi)
+        self.clock = clock
+        self.random_seed = random_seed
+        self._entropy_offset = 0
+        self._entropy_key = random_seed.to_bytes(8, "little") if random_seed is not None else b""
 
         # Interrupt poll: a callable () -> bool the host_interrupt import calls
         # from the guest's hot loop (set by QjsRuntime; None = never interrupt).
         # MUST be O(1) — it fires very frequently during JS execution.
         self.interrupt_handler: Callable[[], bool] | None = None
 
-        # Instantiate the SHARED precompiled module via the SHARED linker (no
-        # recompile, no per-instance import registration — ~0.3ms).
-        self.inst = instantiate_wasm_artifact(artifact, self.store)
+        # Instantiate the SHARED precompiled module via a SHARED linker (no
+        # recompile, no per-instance import registration — ~0.3ms). Only an
+        # instance with a host clock or seed takes the hosted linker; every
+        # other instance keeps the default linker and native WASI.
+        hosted = clock is not None or random_seed is not None
+        linker = _hosted_linker() if hosted else artifact.linker
+        self.inst = linker.instantiate(self.store, artifact.module)
         e = self.inst.exports(self.store)
         # wasmtime's exports[name] is a union (Func | Memory | Global | ...);
         # we know the concrete kinds for these named exports.
         self.mem = cast(wasmtime.Memory, e["memory"])
+
         # __stack_pointer global — captured/restored as part of a snapshot (§6).
         self.sp = cast(wasmtime.Global, e["__stack_pointer"])
         self._exports = e
@@ -347,6 +428,66 @@ class _Instance:
         self.module_transform_flags: int | Callable[[str], int] | None = None
         self.source_transformer = SourceTransformer()
         self._closed = False
+
+    def _wasi_call(self, name: str, *args: int) -> int:
+        """Shadowed WASI imports (hosted linker only).
+
+        With a seed, ``random_get`` emits the per-context SHA-256 stream; with a
+        clock, ``clock_time_get`` reads it. Whichever option is absent keeps
+        native behaviour: OS entropy, or the host's own clocks.
+        """
+        if name == "random_get":
+            ptr, length = (arg & 0xFFFFFFFF for arg in args)
+            if ptr > self._mem_size() or length > self._mem_size() - ptr:
+                return _WASI_EFAULT
+            if length:
+                seeded = self.random_seed is not None
+                data = self._seeded_entropy(length) if seeded else os.urandom(length)
+                self.mem.write(self.store, data, ptr)
+            return 0
+        if name == "clock_time_get":
+            clock_id = args[0] & 0xFFFFFFFF
+            ptr = args[-1] & 0xFFFFFFFF
+            if clock_id not in (0, 1, 2, 3):
+                return _WASI_EINVAL
+            if ptr > self._mem_size() or 8 > self._mem_size() - ptr:
+                return _WASI_EFAULT
+            if self.clock is None:
+                ns = _native_clock_ns(clock_id)
+            else:
+                try:
+                    seconds = self.clock()
+                    if not math.isfinite(seconds) or seconds < 0:
+                        return _WASI_EINVAL
+                    ns = int(seconds * 1_000_000_000)
+                    if ns >= 1 << 64:
+                        return _WASI_EINVAL
+                except Exception:
+                    return _WASI_EIO
+            self.mem.write(self.store, struct.pack("<Q", ns), ptr)
+            return 0
+        raise ValueError(f"unexpected WASI import {name!r}")
+
+    def _seeded_entropy(self, length: int) -> bytes:
+        """The next ``length`` bytes of this context's deterministic stream.
+
+        The stream is SHA-256 blocks of ``b"quickjs-rs/wasi-random/v1\\0" + seed
+        (8 bytes LE) + block index (16 bytes LE)``, so how requests are chunked
+        does not change it. Changing the framing changes every seeded output.
+        """
+        out = bytearray()
+        offset = self._entropy_offset
+        end = offset + length
+        while offset < end:
+            block, skip = divmod(offset, 32)
+            digest = hashlib.sha256(
+                b"quickjs-rs/wasi-random/v1\0" + self._entropy_key + block.to_bytes(16, "little")
+            ).digest()
+            chunk = digest[skip : skip + min(32 - skip, end - offset)]
+            out += chunk
+            offset += len(chunk)
+        self._entropy_offset = end
+        return bytes(out)
 
     def close(self) -> None:
         """Release the wasm instance.
@@ -1109,7 +1250,19 @@ class QjsRuntime:
         memory_limit: int | None = None,
         stack_limit: int | None = None,
         transform_flags: int | Callable[[str], int] | None = None,
+        clock: Callable[[], float] | None = None,
+        random_seed: int | None = None,
     ) -> None:
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
+        if random_seed is not None and (
+            isinstance(random_seed, bool)
+            or not isinstance(random_seed, int)
+            or not 0 <= random_seed < 1 << 64
+        ):
+            raise ValueError("random_seed must be an unsigned 64-bit integer")
+        self._clock = clock
+        self._random_seed = random_seed
         self._memory_limit = memory_limit
         self._stack_limit = stack_limit
         self._transform_flags = transform_flags
@@ -1123,7 +1276,12 @@ class QjsRuntime:
     def _new_instance(self) -> _Instance:
         """Create a fresh, isolated wasm instance for a new context, seeded
         with this runtime's module loader + limits + interrupt poll."""
-        inst = _Instance(memory_limit=self._memory_limit, stack_limit=self._stack_limit)
+        inst = _Instance(
+            memory_limit=self._memory_limit,
+            stack_limit=self._stack_limit,
+            clock=self._clock,
+            random_seed=self._random_seed,
+        )
         inst.module_normalize = self._module_normalize
         inst.module_load = self._module_load
         inst.runtime_transform_flags = self._transform_flags
@@ -1135,6 +1293,15 @@ class QjsRuntime:
             inst.c("set_memory_limit", self._memory_limit)
         if self._stack_limit is not None:
             inst.c("set_max_stack_size", self._stack_limit)
+        if self._random_seed is not None:
+            seed = self._random_seed
+            try:
+                status = inst.c("set_random_seed", seed if seed < 1 << 63 else seed - (1 << 64))
+                if status != STATUS_OK:
+                    raise QuickJSError(f"set_random_seed status={status}")
+            except BaseException:
+                inst.close()
+                raise
         self._instances.add(inst)
         return inst
 
