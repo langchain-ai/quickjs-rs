@@ -173,7 +173,10 @@ def test_default_linker_stays_native():
     before = time.time_ns()
     assert exports["clock"](store, 0, 8) == 0
     now = struct.unpack("<Q", mem.read(store, 8, 16))[0]
-    assert before <= now <= time.time_ns()
+    # Native WASI and `time.time_ns()` read different host clocks; on Windows
+    # before Python 3.13 the latter is coarse, so allow some skew.
+    slack = 50_000_000
+    assert before - slack <= now <= time.time_ns() + slack
 
 
 def test_hosted_linker_guest_dispatch():
