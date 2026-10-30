@@ -53,6 +53,19 @@ def test_live_clock():
         assert ctx.eval("new Date().getTime()") == 20500
 
 
+def test_snapshot_carries_math_random_but_not_host_controls():
+    with Runtime(clock=lambda: 1, random_seed=42) as rt, rt.new_context() as ctx:
+        ctx.eval("Math.random(); Math.random()")
+        snap = ctx.create_snapshot()
+        expected = ctx.eval("[Math.random(), Math.random()]")
+    # A different seed and clock on the destination: the JS generator resumes
+    # from the snapshot, while `Date.now()` reads the destination's clock.
+    with Runtime(clock=lambda: 9, random_seed=7) as rt2, rt2.new_context() as ctx2:
+        rt2.restore_snapshot(snap, ctx2)
+        assert ctx2.eval("[Math.random(), Math.random()]") == expected
+        assert ctx2.eval("Date.now()") == 9000
+
+
 def test_defaults():
     before = time.time() * 1000
     result = sequence()
