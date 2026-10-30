@@ -469,7 +469,12 @@ class _Instance:
         raise ValueError(f"unexpected WASI import {name!r}")
 
     def _seeded_entropy(self, length: int) -> bytes:
-        """The next ``length`` bytes of this context's deterministic stream."""
+        """The next ``length`` bytes of this context's deterministic stream.
+
+        The stream is SHA-256 blocks of ``b"quickjs-rs/wasi-random/v1\\0" + seed
+        (8 bytes LE) + block index (16 bytes LE)``, so how requests are chunked
+        does not change it. Changing the framing changes every seeded output.
+        """
         out = bytearray()
         offset = self._entropy_offset
         end = offset + length

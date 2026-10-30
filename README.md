@@ -60,69 +60,31 @@ asyncio.run(main())
 with Runtime(clock=lambda: 1_700_000_000.25, random_seed=42) as rt:
     with rt.new_context() as ctx:
         assert ctx.eval("Date.now()") == 1_700_000_000_250
-        value = ctx.eval("Math.random()")
+        value = ctx.eval("Math.random()")  # same value on every run
 ```
 
-Both options default to `None`: native WASI clocks and entropy, and QuickJS's
-unmodified time-seeded `Math.random()`. Controls apply to every new context on
-the runtime; each context has its own independent random streams starting at
-the same seed. Identical seeds deliberately do **not** diversify sibling contexts.
+Both options default to `None`, which keeps native WASI clocks and entropy and
+QuickJS's own `Math.random()` at no extra cost. They apply to every new context
+on the runtime.
 
-- `clock` is a synchronous, no-argument callback returning finite, nonnegative
-  **seconds since the Unix epoch**. WASI receives `int(seconds * 1_000_000_000)`
-  nanoseconds, within unsigned 64-bit range; floating-point precision applies.
-  `Date.now()` and `new Date()` expose milliseconds. The callback is read on each
-  clock request, including context initialization, not cached or auto-advanced.
-  All four WASI clock IDs (realtime, monotonic, process CPU, thread CPU) use this
-  same value; the latter three are virtual values, not real CPU measurements.
-  Hosts wanting monotonic behavior must provide nondecreasing values. Precision
-  hints are ignored. Invalid values return WASI `INVAL`; callback exceptions
-  return `IO` without exposing the exception to JS. Callbacks must be safe for
-  the host's threading model.
-- `random_seed` must be an unsigned 64-bit integer (not `bool`). WASI
-  `random_get` emits a per-context byte stream: concatenate SHA-256 blocks of
-  `b"quickjs-rs/wasi-random/v1\0" + seed.to_bytes(8, "little") +
-  block_index.to_bytes(16, "little")`, with block indices starting at zero.
-  Chunking requests does not change the stream, and invalid memory ranges do not
-  consume bytes. This deterministic entropy is **not suitable for secrets**.
-- WASI entropy does **not** seed QuickJS's `Math.random()`: the bundled
-  rquickjs 0.12.0 / quickjs-ng source initializes its xorshift64* state from
-  `js__gettimeofday_us()`. A fixed clock alone therefore reproduces its initial
-  sequence. An explicit seed separately installs a guest-native `Math.random`
-  function using the same xorshift64* algorithm, independent of WASI entropy
-  consumption and clock values. Zero maps to state one (so JS seeds zero and
-  one coincide); WASI seeds zero and one remain distinct. Each JS call applies
-  shifts 12/25/27, multiplies modulo 2^64 by `0x2545F4914F6CDD1D`, and divides
-  the top 52 bits by 2^52. The function's native identity/name can differ from
-  the default QuickJS builtin; no JS source or host callback runs per draw.
+- `clock` returns **seconds since the Unix epoch**; `Date.now()` sees
+  milliseconds. It is called on every clock read and backs all four WASI clocks,
+  so return nondecreasing values if guest code needs monotonic time. Invalid
+  values and exceptions reach the guest as WASI errors. The callback runs on
+  whichever thread drives the eval.
+- `random_seed` (an unsigned 64-bit integer) seeds WASI `random_get` and
+  `Math.random()` as two independent streams, neither tied to the clock. Every
+  context on the runtime starts from the same seed, so sibling contexts produce
+  the same sequence. Seeded entropy is deterministic and **not suitable for
+  secrets**.
+- Without a seed, QuickJS seeds `Math.random()` from the clock when a context is
+  created, so a fixed `clock` alone also makes it reproducible.
 
-A runtime without a clock or seed is unchanged: its contexts use the default
-linker and native WASI. A runtime with either option instantiates its contexts
-through a second process-shared linker that shadows only `clock_time_get` and
-`random_get` (the bundled guest imports neither `clock_res_get` nor
-`poll_oneoff`), dispatching through the active instance. When only one option is
-given, the other import keeps native behavior: the host's own clocks, or OS
-entropy.
-
-These controls are not complete timing-side-channel elimination or a guarantee
-of Temporal/durable replay safety. Host deadlines still use real monotonic time;
-host callbacks, scheduling, I/O, and future guest imports can expose external
-nondeterminism. Whole-memory snapshots capture the guest JS RNG state, but do not
-capture the Python clock callback or WASI entropy offset. Restoring a snapshot
-keeps the destination's host controls and current entropy position; hosts must
-manage those externally for replay. This does not add timers or virtual sleep.
-
-### Companion deepagents integration (separate change)
-
-The `langchain-quickjs` integration should expose and forward `clock` and
-`random_seed` when constructing `Runtime`, including recreated runtimes, and
-specify their lifecycle/snapshot policy. Its README/security claims must state
-that defaults expose wall time, that deterministic seeds are opt-in and unsafe
-for secrets, and that virtual time does not remove all timing channels. Add
-integration tests for dates, seeded shuffles, independent sessions, and unchanged
-defaults, and bump its minimum quickjs-rs version after this API is released.
-No companion repository is changed here; durable execution needs a separate
-record/replay design for host callbacks, time, entropy position, and scheduling.
+Snapshots capture the `Math.random()` state, but not the clock callback or the
+WASI entropy position: a restored context uses the destination runtime's
+controls. These options do not remove every source of nondeterminism or timing
+side channel; host deadlines still use real time, and host callbacks and I/O
+can differ between runs.
 
 ## ES modules
 
