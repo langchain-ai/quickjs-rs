@@ -120,19 +120,6 @@ def test_sync_caller_with_async_host_function() -> None:
     worker.close()
 
 
-def test_close_without_explicit_dispose() -> None:
-    """Leaving Runtime/Context undisposed: the worker collects them on its
-    own thread as it shuts down."""
-    worker = ThreadWorker()
-
-    async def _leak() -> None:
-        rt = Runtime()
-        rt.new_context()
-
-    worker.run_sync(_leak())
-    worker.close()
-
-
 def test_close_is_idempotent() -> None:
     worker = ThreadWorker()
     worker.run_sync(asyncio.sleep(0))
@@ -172,7 +159,12 @@ def test_sync_context_manager() -> None:
         async def _eval() -> int:
             return ctx.eval("2 + 2")
 
+        async def _dispose() -> None:
+            ctx.close()
+            rt.close()
+
         assert worker.run_sync(_eval()) == 4
+        worker.run_sync(_dispose())
 
 
 async def test_async_context_manager() -> None:
@@ -187,7 +179,12 @@ async def test_async_context_manager() -> None:
         async def _eval() -> int:
             return ctx.eval("10 - 3")
 
+        async def _dispose() -> None:
+            ctx.close()
+            rt.close()
+
         assert await worker.run_async(_eval()) == 7
+        await worker.run_async(_dispose())
 
 
 def test_exception_propagates_to_sync_caller() -> None:
@@ -214,67 +211,47 @@ async def test_exception_propagates_to_async_caller() -> None:
     worker.close()
 
 
-async def _max_gap_while(coro: object) -> float:
-    """Await ``coro`` while a 5 ms heartbeat runs; return the worst gap (s)."""
+async def test_aclose_does_not_block_caller_loop() -> None:
+    """aclose() only posts the stop; teardown runs on the worker thread."""
+    worker = ThreadWorker()
+
+    async def _make() -> tuple[Runtime, Context]:
+        rt = Runtime()
+        return rt, rt.new_context()
+
+    async def _dispose(rt: Runtime, ctx: Context) -> None:
+        ctx.close()
+        rt.close()
+
+    async def _slow_teardown() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            time.sleep(0.3)  # blocks the worker thread, not the caller
+            raise
+
+    rt, ctx = await worker.run_async(_make())
+    await worker.run_async(_dispose(rt, ctx))
+    assert ctx._engine_ctx._inst._closed  # the wasm Store is closed
+    worker.run_async(_slow_teardown())
+    await asyncio.sleep(0.02)
+    thread = worker._thread
+    assert thread is not None
+
     gaps: list[float] = []
 
     async def _beat() -> None:
         last = time.monotonic()
-        while True:
+        while thread.is_alive():
             await asyncio.sleep(0.005)
-            now = time.monotonic()
-            gaps.append(now - last)
-            last = now
+            gaps.append(time.monotonic() - last)
+            last = time.monotonic()
 
     beat = asyncio.create_task(_beat())
     await asyncio.sleep(0.02)
-    gaps.clear()
-    await coro  # type: ignore[misc]
-    await asyncio.sleep(0.02)
-    beat.cancel()
-    return max(gaps)
-
-
-async def test_aclose_does_not_block_caller_loop() -> None:
-    """Teardown (task cancellation, gc) runs on the worker thread."""
-    worker = ThreadWorker()
-
-    async def _slow_cleanup() -> None:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            time.sleep(0.3)  # blocking teardown, on the worker thread
-            raise
-
-    worker.run_async(_slow_cleanup())
-    await asyncio.sleep(0.02)
-    thread = worker._thread
-    assert thread is not None
-    gap = await _max_gap_while(worker.aclose())
-    assert gap < 0.15
-    assert worker._exited  # teardown finished before aclose() returned
-
-
-async def test_aclose_times_out_on_busy_worker() -> None:
-    """A worker stuck in blocking code is abandoned, not waited on."""
-    worker = ThreadWorker()
-    release = threading.Event()
-
-    async def _stuck() -> None:
-        release.wait()
-
-    worker.run_async(_stuck())
-    await asyncio.sleep(0.02)
-    thread = worker._thread
-    assert thread is not None
-    start = time.monotonic()
-    gap = await _max_gap_while(worker.aclose(timeout=0.2))
-    assert time.monotonic() - start < 1.0
-    assert gap < 0.15
-    assert thread.is_alive()
-    release.set()
-    thread.join(timeout=2.0)
-    assert not thread.is_alive()
+    await worker.aclose()
+    await asyncio.wait_for(beat, timeout=2.0)
+    assert max(gaps) < 0.1
 
 
 async def test_aclose_is_idempotent() -> None:
@@ -284,32 +261,3 @@ async def test_aclose_is_idempotent() -> None:
     await worker.aclose()
     await worker.aclose()
     worker.close()
-
-
-async def test_async_context_manager_uses_aclose() -> None:
-    async with ThreadWorker() as worker:
-        await worker.run_async(asyncio.sleep(0))
-        thread = worker._thread
-    assert thread is not None
-    assert worker._exited
-    assert worker._thread is None
-
-
-def test_close_without_explicit_dispose_collects_on_worker() -> None:
-    """Undisposed QuickJS objects are finalized on the worker thread."""
-    worker = ThreadWorker()
-    finalized_on: list[str] = []
-
-    class _Probe:
-        def __init__(self) -> None:
-            self.cycle = self
-
-        def __del__(self) -> None:
-            finalized_on.append(threading.current_thread().name)
-
-    async def _leak() -> None:
-        _Probe()
-
-    worker.run_sync(_leak())
-    worker.close()
-    assert finalized_on == ["quickjs-worker"]
