@@ -220,32 +220,3 @@ pub extern "C" fn compute_memory_usage() -> i32 {
     }));
     result.unwrap_or(STATUS_PANIC)
 }
-
-/// Replace `Math.random` with a seeded generator, independent of WASI entropy
-/// and the clock. Same xorshift64* as quickjs-ng's builtin (shifts 12/25/27,
-/// multiplier 0x2545F4914F6CDD1D, top 52 bits / 2^52); its state must be
-/// nonzero, so seed 0 maps to 1. Changing this changes every seeded sequence.
-#[no_mangle]
-pub extern "C" fn set_random_seed(seed: u64) -> i32 {
-    with_context(|ctx| {
-        let state = Cell::new(if seed == 0 { 1 } else { seed });
-        let random = rquickjs::Function::new(ctx.clone(), move || {
-            let mut x = state.get();
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            state.set(x);
-            (x.wrapping_mul(0x2545F4914F6CDD1D) >> 12) as f64 / 4503599627370496.0
-        })?;
-        let math: rquickjs::Object = ctx.globals().get("Math")?;
-        math.set("random", random)
-    })
-    .map(|result: rquickjs::Result<()>| {
-        if result.is_ok() {
-            STATUS_OK
-        } else {
-            STATUS_JS_ERROR
-        }
-    })
-    .unwrap_or(STATUS_NO_ENGINE)
-}
