@@ -1,9 +1,10 @@
-"""ThreadWorker — pinning !Send Runtime/Context work to a single thread."""
+"""ThreadWorker — running Runtime/Context work on one dedicated thread."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -12,8 +13,7 @@ from quickjs_rs import Context, Runtime, ThreadWorker
 
 
 def test_runtime_created_and_used_on_worker() -> None:
-    """Runtime + Context created on the worker, eval'd from main thread
-    without tripping the !Send panic."""
+    """Runtime + Context created on the worker, driven from the main thread."""
     worker = ThreadWorker()
 
     async def _make() -> tuple[Runtime, Context]:
@@ -121,9 +121,8 @@ def test_sync_caller_with_async_host_function() -> None:
 
 
 def test_close_without_explicit_dispose() -> None:
-    """Leaving Runtime/Context undisposed: close() runs gc on the
-    worker thread, so the !Send drop check succeeds. Without the gc
-    pass on the worker, interpreter-shutdown gc would panic."""
+    """Leaving Runtime/Context undisposed: the worker collects them on its
+    own thread as it shuts down."""
     worker = ThreadWorker()
 
     async def _leak() -> None:
@@ -213,3 +212,104 @@ async def test_exception_propagates_to_async_caller() -> None:
         await worker.run_async(_boom())
 
     worker.close()
+
+
+async def _max_gap_while(coro: object) -> float:
+    """Await ``coro`` while a 5 ms heartbeat runs; return the worst gap (s)."""
+    gaps: list[float] = []
+
+    async def _beat() -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.005)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    beat = asyncio.create_task(_beat())
+    await asyncio.sleep(0.02)
+    gaps.clear()
+    await coro  # type: ignore[misc]
+    await asyncio.sleep(0.02)
+    beat.cancel()
+    return max(gaps)
+
+
+async def test_aclose_does_not_block_caller_loop() -> None:
+    """Teardown (task cancellation, gc) runs on the worker thread."""
+    worker = ThreadWorker()
+
+    async def _slow_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            time.sleep(0.3)  # blocking teardown, on the worker thread
+            raise
+
+    worker.run_async(_slow_cleanup())
+    await asyncio.sleep(0.02)
+    thread = worker._thread
+    assert thread is not None
+    gap = await _max_gap_while(worker.aclose())
+    assert gap < 0.15
+    assert worker._exited  # teardown finished before aclose() returned
+
+
+async def test_aclose_times_out_on_busy_worker() -> None:
+    """A worker stuck in blocking code is abandoned, not waited on."""
+    worker = ThreadWorker()
+    release = threading.Event()
+
+    async def _stuck() -> None:
+        release.wait()
+
+    worker.run_async(_stuck())
+    await asyncio.sleep(0.02)
+    thread = worker._thread
+    assert thread is not None
+    start = time.monotonic()
+    gap = await _max_gap_while(worker.aclose(timeout=0.2))
+    assert time.monotonic() - start < 1.0
+    assert gap < 0.15
+    assert thread.is_alive()
+    release.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+
+
+async def test_aclose_is_idempotent() -> None:
+    worker = ThreadWorker()
+    await worker.aclose()  # never started
+    await worker.run_async(asyncio.sleep(0))
+    await worker.aclose()
+    await worker.aclose()
+    worker.close()
+
+
+async def test_async_context_manager_uses_aclose() -> None:
+    async with ThreadWorker() as worker:
+        await worker.run_async(asyncio.sleep(0))
+        thread = worker._thread
+    assert thread is not None
+    assert worker._exited
+    assert worker._thread is None
+
+
+def test_close_without_explicit_dispose_collects_on_worker() -> None:
+    """Undisposed QuickJS objects are finalized on the worker thread."""
+    worker = ThreadWorker()
+    finalized_on: list[str] = []
+
+    class _Probe:
+        def __init__(self) -> None:
+            self.cycle = self
+
+        def __del__(self) -> None:
+            finalized_on.append(threading.current_thread().name)
+
+    async def _leak() -> None:
+        _Probe()
+
+    worker.run_sync(_leak())
+    worker.close()
+    assert finalized_on == ["quickjs-worker"]
