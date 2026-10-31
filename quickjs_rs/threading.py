@@ -1,9 +1,8 @@
-"""ThreadWorker — pin !Send Runtime/Context work to a single thread."""
+"""ThreadWorker — run Runtime/Context work on one dedicated thread."""
 
 from __future__ import annotations
 
 import asyncio
-import gc
 import threading
 from collections.abc import Coroutine
 from types import TracebackType
@@ -13,22 +12,16 @@ from typing import Any
 class ThreadWorker:
     """Dedicated OS thread with its own asyncio event loop.
 
-    ``Runtime`` and ``Context`` are ``!Send`` at the Rust level: they carry
-    ``Rc<RefCell<...>>`` internals and QuickJS itself is single-threaded, so
-    using them from any thread other than the creator panics with an
-    "unsendable" assertion.
+    A ``Context`` is single-threaded: only one thread may drive it at a
+    time. ``ThreadWorker`` runs all Runtime/Context work on one thread, off
+    the caller's event loop. Callers on any thread submit coroutines via
+    ``run_sync`` (blocks the caller) or ``run_async`` (returns an awaitable
+    tied to the caller's loop). The worker starts lazily on first submission
+    and runs as a daemon thread.
 
-    ``ThreadWorker`` pins all Runtime/Context work to a single thread.
-    Callers on any thread submit coroutines via ``run_sync`` (blocks the
-    caller) or ``run_async`` (returns an awaitable tied to the caller's
-    loop). The worker starts lazily on first submission and runs as a
-    daemon thread.
-
-    ``close()`` forces ``gc.collect()`` on the worker thread so ``!Send``
-    QuickJS objects are finalized on their owning thread, then stops the
-    loop and joins. Without the gc pass, a later collection on any other
-    thread (e.g. an interpreter-shutdown sweep) would hit the ``!Send``
-    drop check and panic.
+    Close your ``Context`` and ``Runtime`` (e.g. via ``run_async``) before
+    closing the worker. Stopping the worker cancels any tasks still on its
+    loop and closes the loop.
     """
 
     def __init__(self, name: str = "quickjs-worker") -> None:
@@ -86,21 +79,26 @@ class ThreadWorker:
 
     def close(self) -> None:
         """Stop the worker thread and join. Idempotent."""
-        if self._loop is None or self._thread is None:
-            return
+        thread = self._stop()
+        if thread is not None:
+            thread.join(timeout=5.0)
 
-        async def _gc() -> None:
-            gc.collect()
+    async def aclose(self) -> None:
+        """Stop the worker without blocking the caller's loop. Idempotent.
 
-        try:
-            asyncio.run_coroutine_threadsafe(_gc(), self._loop).result(timeout=1.0)
-        except Exception:
-            # Best-effort; don't block shutdown.
-            pass
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5.0)
+        The daemon thread cancels its leftover tasks, closes its loop, and
+        exits on its own.
+        """
+        self._stop()
+
+    def _stop(self) -> threading.Thread | None:
+        loop, thread = self._loop, self._thread
+        if loop is None or thread is None:
+            return None
         self._loop = None
         self._thread = None
+        loop.call_soon_threadsafe(loop.stop)
+        return thread
 
     def __enter__(self) -> ThreadWorker:
         self._ensure_started()
@@ -124,4 +122,4 @@ class ThreadWorker:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.close()
+        await self.aclose()

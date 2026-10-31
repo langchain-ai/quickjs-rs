@@ -743,12 +743,10 @@ class Context:
                     # so dispatched host-call tasks become children.
                     handle = get_handle()
                     # Fast path: non-promise result — no driving.
-                    # Must not bind the raw _engine.QjsHandle to a
-                    # local: the engine class is `unsendable`, so any
-                    # exception raised below would capture the local
-                    # in the traceback and trip the cross-thread drop
-                    # check when cyclic GC eventually collects the
-                    # exception on a different thread.
+                    # Don't bind the raw _engine.QjsHandle to a local:
+                    # an exception raised below would capture it in
+                    # the traceback and keep the handle alive until
+                    # cyclic GC collects the exception.
                     if not handle._require_live().is_promise():
                         fast = handle
                         handle = None  # transferred to caller

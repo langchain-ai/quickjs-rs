@@ -1,9 +1,10 @@
-"""ThreadWorker — pinning !Send Runtime/Context work to a single thread."""
+"""ThreadWorker — running Runtime/Context work on one dedicated thread."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -12,8 +13,7 @@ from quickjs_rs import Context, Runtime, ThreadWorker
 
 
 def test_runtime_created_and_used_on_worker() -> None:
-    """Runtime + Context created on the worker, eval'd from main thread
-    without tripping the !Send panic."""
+    """Runtime + Context created on the worker, driven from the main thread."""
     worker = ThreadWorker()
 
     async def _make() -> tuple[Runtime, Context]:
@@ -120,20 +120,6 @@ def test_sync_caller_with_async_host_function() -> None:
     worker.close()
 
 
-def test_close_without_explicit_dispose() -> None:
-    """Leaving Runtime/Context undisposed: close() runs gc on the
-    worker thread, so the !Send drop check succeeds. Without the gc
-    pass on the worker, interpreter-shutdown gc would panic."""
-    worker = ThreadWorker()
-
-    async def _leak() -> None:
-        rt = Runtime()
-        rt.new_context()
-
-    worker.run_sync(_leak())
-    worker.close()
-
-
 def test_close_is_idempotent() -> None:
     worker = ThreadWorker()
     worker.run_sync(asyncio.sleep(0))
@@ -173,7 +159,12 @@ def test_sync_context_manager() -> None:
         async def _eval() -> int:
             return ctx.eval("2 + 2")
 
+        async def _dispose() -> None:
+            ctx.close()
+            rt.close()
+
         assert worker.run_sync(_eval()) == 4
+        worker.run_sync(_dispose())
 
 
 async def test_async_context_manager() -> None:
@@ -188,7 +179,12 @@ async def test_async_context_manager() -> None:
         async def _eval() -> int:
             return ctx.eval("10 - 3")
 
+        async def _dispose() -> None:
+            ctx.close()
+            rt.close()
+
         assert await worker.run_async(_eval()) == 7
+        await worker.run_async(_dispose())
 
 
 def test_exception_propagates_to_sync_caller() -> None:
@@ -212,4 +208,56 @@ async def test_exception_propagates_to_async_caller() -> None:
     with pytest.raises(RuntimeError, match="kaboom-async"):
         await worker.run_async(_boom())
 
+    worker.close()
+
+
+async def test_aclose_does_not_block_caller_loop() -> None:
+    """aclose() only posts the stop; teardown runs on the worker thread."""
+    worker = ThreadWorker()
+
+    async def _make() -> tuple[Runtime, Context]:
+        rt = Runtime()
+        return rt, rt.new_context()
+
+    async def _dispose(rt: Runtime, ctx: Context) -> None:
+        ctx.close()
+        rt.close()
+
+    async def _slow_teardown() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            time.sleep(0.3)  # blocks the worker thread, not the caller
+            raise
+
+    rt, ctx = await worker.run_async(_make())
+    await worker.run_async(_dispose(rt, ctx))
+    assert ctx._engine_ctx._inst._closed  # the wasm Store is closed
+    worker.run_async(_slow_teardown())
+    await asyncio.sleep(0.02)
+    thread = worker._thread
+    assert thread is not None
+
+    gaps: list[float] = []
+
+    async def _beat() -> None:
+        last = time.monotonic()
+        while thread.is_alive():
+            await asyncio.sleep(0.005)
+            gaps.append(time.monotonic() - last)
+            last = time.monotonic()
+
+    beat = asyncio.create_task(_beat())
+    await asyncio.sleep(0.02)
+    await worker.aclose()
+    await asyncio.wait_for(beat, timeout=2.0)
+    assert max(gaps) < 0.1
+
+
+async def test_aclose_is_idempotent() -> None:
+    worker = ThreadWorker()
+    await worker.aclose()  # never started
+    await worker.run_async(asyncio.sleep(0))
+    await worker.aclose()
+    await worker.aclose()
     worker.close()
