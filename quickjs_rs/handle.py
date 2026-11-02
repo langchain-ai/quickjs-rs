@@ -248,17 +248,17 @@ class Handle:
         detection is indirect via the depth cap (128).
         """
         live = self._require_live()
-        # Marshaling can run guest code (getters, `toJSON`), so bound it too.
+        # Marshaling can run guest code (getters, `toJSON`); bound it when no eval has.
         runtime = self._context._runtime
-        owns_deadline = runtime._deadline is None
-        if owns_deadline:
+        sets_deadline = runtime._deadline is None
+        if sets_deadline:
             runtime._deadline = time.monotonic() + self._context._timeout
         try:
             raw = live.to_python(allow_opaque=allow_opaque)
         except _engine.MarshalError as e:
             raise MarshalError(str(e)) from None
         finally:
-            if owns_deadline:
+            if sets_deadline:
                 runtime._deadline = None
         if allow_opaque:
             return _wrap_opaque(self._context, raw)
