@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import wasmtime
 
-from quickjs_rs import Runtime
+from quickjs_rs import QuickJSError, Runtime
 from quickjs_rs._engine import _CUR, _hosted_linker, _Instance, _quickjs_artifact
 from quickjs_rs._wasmtime import shared_wasmtime_engine
 
@@ -104,6 +104,29 @@ def test_clock_errors_surface_as_wasi_errors():
         assert inst._wasi_clock_time_get(0, 0, ptr) == 29
     finally:
         inst.close()
+
+
+@pytest.mark.parametrize("bad", [RuntimeError("boom"), None, -1, 1.5])
+def test_clock_failure_raises_quickjs_error(bad):
+    def clock():
+        if armed:
+            if isinstance(bad, Exception):
+                raise bad
+            return bad
+        return SECOND
+
+    armed = False
+    rt = Runtime(clock=clock)
+    ctx = rt.new_context()
+    armed = True
+    with pytest.raises(QuickJSError, match="host clock failed") as exc:
+        ctx.eval("Date.now()")
+    cause = exc.value.__cause__
+    assert cause is bad if isinstance(bad, Exception) else isinstance(cause, ValueError)
+    with pytest.raises(QuickJSError, match="unusable"):
+        ctx.eval("1 + 1")
+    ctx.close()
+    rt.close()
 
 
 def test_bundled_clock_import_audit():

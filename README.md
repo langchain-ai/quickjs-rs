@@ -65,7 +65,9 @@ with Runtime(clock=lambda: 1_700_000_000_250_000_000) as rt:
 
 `clock` returns **integer nanoseconds since the Unix epoch** and backs every
 WASI clock the guest reads. It defaults to `None`, which keeps native WASI at no
-extra cost. Invalid values and exceptions reach the guest as WASI errors.
+extra cost. If the clock raises or returns anything else, the call raises
+`QuickJSError` with the original error as `__cause__`, and the context can only
+be closed.
 
 - A fixed clock fixes `Date.now()` and `Math.random()`: QuickJS seeds
   `Math.random()` from the clock when each context is created. Sibling contexts

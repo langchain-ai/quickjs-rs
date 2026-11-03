@@ -43,6 +43,7 @@ from quickjs_rs._wasmtime import (
     shared_wasm_artifact,
     shared_wasmtime_engine,
 )
+from quickjs_rs.errors import QuickJSError as PublicQuickJSError
 
 _BUNDLED_WASM = "_guest.wasm"  # package-data filename inside quickjs_rs/
 
@@ -245,6 +246,8 @@ _WASI_EFAULT = 21
 _WASI_EINVAL = 28
 _WASI_EIO = 29
 
+_FREE_EXPORTS = frozenset({"qjs_free", "qjs_result_free", "free_value"})
+
 
 def _tramp_wasi_clock_time_get(clock_id: int, precision: int, out_ptr: int) -> int:
     return cast("_Instance", _CUR.inst)._wasi_clock_time_get(clock_id, precision, out_ptr)
@@ -352,6 +355,10 @@ class _Instance:
         wasi.inherit_stderr()
         self.store.set_wasi(wasi)
         self.clock = clock
+        # Set when the host clock raises or returns a bad value. The guest
+        # can't recover from a failed clock read, so the instance is dead from
+        # then on; `c()` raises QuickJSError with this as the cause.
+        self.clock_error: Exception | None = None
 
         # Interrupt poll: a callable () -> bool the host_interrupt import calls
         # from the guest's hot loop (set by QjsRuntime; None = never interrupt).
@@ -402,7 +409,8 @@ class _Instance:
     def _wasi_clock_time_get(self, clock_id: int, precision: int, out_ptr: int) -> int:
         """Shadowed WASI ``clock_time_get`` (hosted linker only): every clock id
         reads the host ``clock`` callback, which returns integer nanoseconds
-        since the Unix epoch. Bad values and callback errors become WASI errors."""
+        since the Unix epoch. A bad value or callback error is recorded in
+        ``clock_error`` and returned to the guest as a WASI errno."""
         clock_id &= 0xFFFFFFFF
         ptr = out_ptr & 0xFFFFFFFF
         if clock_id not in (0, 1, 2, 3):
@@ -412,9 +420,13 @@ class _Instance:
         clock = cast("Callable[[], int]", self.clock)
         try:
             ns = clock()
-        except Exception:
+        except Exception as e:
+            self.clock_error = e
             return _WASI_EIO
         if isinstance(ns, bool) or not isinstance(ns, int) or not 0 <= ns < 1 << 64:
+            self.clock_error = ValueError(
+                f"clock returned {ns!r}; expected int nanoseconds in [0, 2**64)"
+            )
             return _WASI_EINVAL
         self.mem.write(self.store, struct.pack("<Q", ns), ptr)
         return 0
@@ -444,6 +456,14 @@ class _Instance:
 
     # -- raw export call --
     def c(self, name: str, *args: Any) -> Any:
+        if self.clock_error is not None:
+            # The heap is discarded with the store, so frees (often in
+            # `finally` blocks) are no-ops rather than masking the error.
+            if name in _FREE_EXPORTS:
+                return None
+            raise PublicQuickJSError(
+                "context is unusable after a host clock failure"
+            ) from self.clock_error
         # Every named entry here is a function export; wasmtime types the
         # lookup as a union, so narrow to Func before calling.
         fn = cast(wasmtime.Func, self._exports[name])
@@ -458,9 +478,15 @@ class _Instance:
         prev = getattr(_CUR, "inst", None)
         _CUR.inst = self
         try:
-            return fn(self.store, *args)
+            result = fn(self.store, *args)
+        except wasmtime.Trap:
+            if self.clock_error is None:
+                raise
         finally:
             _CUR.inst = prev
+        if self.clock_error is not None:
+            raise PublicQuickJSError("host clock failed") from self.clock_error
+        return result
 
     # -- memory: bound-checked reads, writes via guest alloc --
     def _mem_size(self) -> int:
