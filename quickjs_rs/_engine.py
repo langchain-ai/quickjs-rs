@@ -124,9 +124,16 @@ NULL_HANDLE = 0
 # Marshalling recursion cap (cycle / deep-nesting guard) — matches the prior
 # PyO3 engine's MAX_MARSHAL_DEPTH so the documented behavior is preserved.
 _MAX_MARSHAL_DEPTH = 128
+_DEPTH_EXCEEDED = (
+    f"recursion limit of {_MAX_MARSHAL_DEPTH} exceeded while "
+    "marshaling (cycle or deeply nested structure)"
+)
 
 # Largest magnitude an int crosses as an exact JS number; wider ints are BigInt.
 _MAX_SAFE_INT = 2**53
+
+# Sentinel: a guest value has no JSON form, so it takes the per-leaf walk.
+_NO_JSON = object()
 
 # Sanitized message for a host-function failure surfaced into JS (no host
 # internals leak).
@@ -749,10 +756,7 @@ class _Instance:
 
     def handle_to_python(self, handle: int, *, allow_opaque: bool, _depth: int = 0) -> Any:
         if _depth > _MAX_MARSHAL_DEPTH:
-            raise MarshalError(
-                f"recursion limit of {_MAX_MARSHAL_DEPTH} exceeded while "
-                "marshaling (cycle or deeply nested structure)"
-            )
+            raise MarshalError(_DEPTH_EXCEEDED)
         name = self._type_name(handle)
 
         if name == "undefined":
@@ -773,6 +777,10 @@ class _Instance:
         if name == "string":
             return self._get_string(handle)
         if name == "array":
+            if not allow_opaque:
+                value = self._from_json(handle, _depth)
+                if value is not _NO_JSON:
+                    return value
             return self._array_to_list(handle, allow_opaque, _depth)
         if name == "object":
             # A Promise is an object structurally, but not marshalable by value
@@ -786,11 +794,40 @@ class _Instance:
             ab = self._try_arraybuffer(handle)
             if ab is not None:
                 return ab
+            if not allow_opaque:
+                value = self._from_json(handle, _depth)
+                if value is not _NO_JSON:
+                    return value
             return self._object_to_dict(handle, allow_opaque, _depth)
         # function / symbol / proxy / unknown: opaque.
         if allow_opaque:
             return QjsHandle._adopt(self, self.c("dup_handle", handle))
         raise MarshalError(f"cannot marshal a JS {name} to Python")
+
+    def _from_json(self, handle: int, depth: int) -> Any:
+        """Marshal a container in one guest crossing, with JSON semantics.
+
+        Returns `_NO_JSON` when the value can't be stringified (BigInt, cycles),
+        so the caller falls back to the per-leaf walk.
+
+        Raises:
+            MarshalError: The value nests past the depth limit, counting `depth`.
+        """
+        st = self.c("to_json", handle)
+        if st in (STATUS_BAD_INPUT, STATUS_JS_ERROR):
+            return _NO_JSON
+        if st != STATUS_OK:
+            raise MarshalError(f"to_json status={st}")
+        raw = self.take_result()
+        # Each bracket adds at most one level, so few brackets can't exceed the limit.
+        if depth + raw.count(b"[") + raw.count(b"{") <= _MAX_MARSHAL_DEPTH:
+            return json.loads(raw)
+        try:
+            value = json.loads(raw)
+        except RecursionError:
+            raise MarshalError(_DEPTH_EXCEEDED) from None
+        _check_depth(value, depth)
+        return value
 
     def _is_promise(self, handle: int) -> bool:
         out = self.alloc_out()
@@ -1043,6 +1080,19 @@ class _Instance:
             self.mem.grow(self.store, (mem_size - cur + page - 1) // page)
         self.mem.write(self.store, image, 0)
         self.sp.set_value(self.store, sp_val)
+
+
+def _check_depth(value: Any, depth: int) -> None:
+    """Raise `MarshalError` where the per-leaf walk would, for a decoded value at `depth`."""
+    stack = [(value, depth)]
+    while stack:
+        node, level = stack.pop()
+        if level > _MAX_MARSHAL_DEPTH:
+            raise MarshalError(_DEPTH_EXCEEDED)
+        if isinstance(node, list):
+            stack.extend((item, level + 1) for item in node)
+        elif isinstance(node, dict):
+            stack.extend((item, level + 1) for item in node.values())
 
 
 def _json_exact(value: Any, depth: int = 0) -> bool:
