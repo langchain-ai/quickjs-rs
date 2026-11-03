@@ -15,6 +15,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
 
 use crate::modules::{HostLoader, HostResolver};
+use rquickjs::allocator::RustAllocator;
 use rquickjs::{qjs, Context, Ctx, Runtime};
 
 // Status codes (host reads these as the i32 return of fallible exports).
@@ -55,7 +56,10 @@ fn ensure_engine() -> i32 {
     ENGINE.with(|e| {
         let mut slot = e.borrow_mut();
         if slot.is_none() {
-            let rt = match Runtime::new() {
+            // RustAllocator records each block's size in a header. The default
+            // allocator can't report usable size on wasi (quickjs-ng returns 0),
+            // so JS_SetMemoryLimit would only count 8 bytes per allocation.
+            let rt = match Runtime::new_with_alloc(RustAllocator) {
                 Ok(rt) => rt,
                 Err(_) => return STATUS_NO_ENGINE,
             };

@@ -16,6 +16,15 @@ def test_memory_limit_trips_with_runaway_allocation() -> None:
                 ctx.eval("let a = []; while(true) a.push(new Array(1e6).fill(0))")
 
 
+def test_memory_limit_counts_many_small_allocations() -> None:
+    """The limit counts real allocation sizes, so many small strings trip it
+    too, not just one allocation larger than the limit."""
+    with Runtime(memory_limit=8 * 1024 * 1024) as rt:
+        with rt.new_context() as ctx:
+            with pytest.raises(MemoryLimitError):
+                ctx.eval("let a = []; for (let i = 0; i < 1000; i++) a.push('x'.repeat(50000) + i)")
+
+
 def test_timeout_terminates_infinite_loop() -> None:
     """wall-clock deadline in host_interrupt kicks QuickJS out of
     an infinite loop within the configured budget."""
