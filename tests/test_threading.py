@@ -212,7 +212,7 @@ async def test_exception_propagates_to_async_caller() -> None:
 
 
 async def test_aclose_does_not_block_caller_loop() -> None:
-    """aclose() only posts the stop; teardown runs on the worker thread."""
+    """aclose() waits for teardown on the worker without blocking the caller."""
     worker = ThreadWorker()
 
     async def _make() -> tuple[Runtime, Context]:
@@ -233,7 +233,7 @@ async def test_aclose_does_not_block_caller_loop() -> None:
     rt, ctx = await worker.run_async(_make())
     await worker.run_async(_dispose(rt, ctx))
     assert ctx._engine_ctx._inst._closed  # the wasm Store is closed
-    worker.run_async(_slow_teardown())
+    lingering = worker.run_async(_slow_teardown())
     await asyncio.sleep(0.02)
     thread = worker._thread
     assert thread is not None
@@ -250,6 +250,7 @@ async def test_aclose_does_not_block_caller_loop() -> None:
     beat = asyncio.create_task(_beat())
     await asyncio.sleep(0.02)
     await worker.aclose()
+    assert lingering.cancelled()  # teardown finished before aclose() returned
     await asyncio.wait_for(beat, timeout=2.0)
     assert max(gaps) < 0.1
 

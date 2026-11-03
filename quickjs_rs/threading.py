@@ -78,17 +78,24 @@ class ThreadWorker:
         return asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, self._loop))
 
     def close(self) -> None:
-        """Stop the worker thread and join. Idempotent."""
+        """Stop the worker thread and join, blocking the caller. Idempotent.
+
+        For sync callers. Async callers should use ``aclose()``.
+        """
         thread = self._stop()
         if thread is not None:
             thread.join(timeout=5.0)
 
     async def aclose(self) -> None:
-        """Stop the worker without blocking the caller's loop. Idempotent.
+        """Drain the worker's loop, then stop it. Idempotent.
 
-        The daemon thread cancels its leftover tasks, closes its loop, and
-        exits on its own.
+        Returns once every task left on the worker has been cancelled and
+        has finished, without blocking the caller's loop. The daemon thread
+        then closes its loop and exits on its own.
         """
+        if self._loop is None:
+            return
+        await self.run_async(_drain())
         self._stop()
 
     def _stop(self) -> threading.Thread | None:
@@ -123,3 +130,12 @@ class ThreadWorker:
         tb: TracebackType | None,
     ) -> None:
         await self.aclose()
+
+
+async def _drain() -> None:
+    """Cancel every other task on the running loop and wait for them to finish."""
+    current = asyncio.current_task()
+    pending = [t for t in asyncio.all_tasks() if t is not current]
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
