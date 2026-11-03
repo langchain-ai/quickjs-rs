@@ -838,7 +838,10 @@ class Context:
                 # Cancellation step 4-6.
                 self._runtime._deadline = None
                 self._active_task_group = None
-                assert handle is not None
+                if handle is None:
+                    # Argument marshalling can be cancelled during the initial
+                    # guest call, before a top-level promise handle exists.
+                    raise asyncio.CancelledError() from None
                 # See note above on the main loop: do not bind raw
                 # _engine.QjsHandle values to locals; pass them inline
                 # so a raise here cannot capture them in the
@@ -1023,6 +1026,15 @@ class Context:
                     self._engine_ctx.resolve_pending(pending_id, value)
                 else:
                     self._engine_ctx.reject_pending(pending_id, err_name, err_message, err_stack)
+            except asyncio.CancelledError:
+                # A synchronous marshalling checkpoint can receive cancellation
+                # before the driving task gets its queued Task.cancel(). Reject
+                # this promise while its resolver is live, before the finally
+                # block removes the task from the cancellation walk.
+                self._engine_ctx.reject_pending(
+                    pending_id, "HostCancellationError", "Host call cancelled", None
+                )
+                raise
             except Exception as settle_exc:
                 # The promise was not settled. Two causes are genuinely benign:
                 #   1. the context closed under us

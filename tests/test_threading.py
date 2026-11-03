@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import pytest
 
@@ -213,3 +214,77 @@ async def test_exception_propagates_to_async_caller() -> None:
         await worker.run_async(_boom())
 
     worker.close()
+
+
+@pytest.mark.parametrize("direction", ["export", "import", "async_response", "arguments"])
+async def test_cancellation_stops_marshalling_and_releases_worker(direction: str) -> None:
+    """A cancelled caller must not leave a large conversion occupying the worker.
+
+    The thread event proves that synchronous conversion actually unwound, rather
+    than merely observing the caller's Future becoming cancelled. All operations
+    use the public API and the context must remain reusable afterwards.
+    """
+    started = threading.Event()
+    finished = threading.Event()
+    payload = [{f"field_{j}": i + j for j in range(32)} for i in range(800)]
+    with ThreadWorker() as worker:
+        async def setup() -> tuple[Runtime, Context]:
+            rt = Runtime()
+            ctx = rt.new_context(timeout=30)
+            if direction in {"export", "arguments"}:
+                ctx.eval(
+                    "globalThis.payload = Array.from({length: 800}, (_, i) => "
+                    "Object.fromEntries(Array.from({length: 32}, (_, j) => "
+                    "['field_' + j, i + j])))"
+                )
+
+            async def response() -> list[dict[str, int]]:
+                started.set()
+                return payload
+
+            async def accept(value: Any) -> int:
+                return len(value)
+
+            ctx.register("response", response)
+            ctx.register("accept", accept)
+            return rt, ctx
+
+        rt, ctx = await worker.run_async(setup())
+
+        async def convert() -> None:
+            try:
+                if direction == "export":
+                    with ctx.eval_handle("payload") as handle:
+                        started.set()
+                        handle.to_python()
+                elif direction == "import":
+                    started.set()
+                    ctx.globals["imported"] = payload
+                elif direction == "async_response":
+                    await ctx.eval_async(
+                        "try { await response(); } finally { globalThis.cleaned = true; }"
+                    )
+                else:
+                    started.set()
+                    await ctx.eval_async("await accept(payload)")
+            finally:
+                finished.set()
+
+        submitted = worker.run_async(convert())
+        assert await asyncio.to_thread(started.wait, 5)
+        await asyncio.sleep(0.01)
+        submitted.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await submitted
+        assert await asyncio.to_thread(finished.wait, 1), "conversion still running after cancel"
+
+        async def reuse_and_dispose() -> None:
+            try:
+                assert await ctx.eval_async("20 + 22") == 42
+                if direction == "async_response":
+                    assert ctx.eval("cleaned") is True
+            finally:
+                ctx.close()
+                rt.close()
+
+        await asyncio.wait_for(worker.run_async(reuse_and_dispose()), timeout=2)
