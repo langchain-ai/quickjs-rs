@@ -54,6 +54,26 @@ async def main():
 asyncio.run(main())
 ```
 
+## Host-controlled clock
+
+```python
+with Runtime(clock=lambda: 1_700_000_000_250_000_000) as rt:
+    with rt.new_context() as ctx:
+        assert ctx.eval("Date.now()") == 1_700_000_000_250
+        value = ctx.eval("Math.random()")  # same value on every run
+```
+
+`clock` returns **integer nanoseconds since the Unix epoch** and backs every
+WASI clock the guest reads. It defaults to `None`, which keeps native WASI at no
+extra cost. Invalid values and exceptions reach the guest as WASI errors.
+
+- A fixed clock fixes `Date.now()` and `Math.random()`: QuickJS seeds
+  `Math.random()` from the clock when each context is created. Sibling contexts
+  under a frozen clock get the same sequence; use a stepping clock if they
+  should differ. Clock-seeded randomness is not for secrets.
+- Snapshots keep the `Math.random()` state; a restored context reads the
+  destination runtime's clock.
+
 ## ES modules
 
 Supply modules through a host loader callback pair: `normalize(base, specifier)` resolves an import to a canonical name, and
