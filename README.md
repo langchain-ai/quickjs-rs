@@ -54,37 +54,25 @@ async def main():
 asyncio.run(main())
 ```
 
-## Host-controlled time and entropy
+## Host-controlled clock
 
 ```python
-with Runtime(clock=lambda: 1_700_000_000.25, random_seed=42) as rt:
+with Runtime(clock=lambda: 1_700_000_000_250_000_000) as rt:
     with rt.new_context() as ctx:
         assert ctx.eval("Date.now()") == 1_700_000_000_250
         value = ctx.eval("Math.random()")  # same value on every run
 ```
 
-Both options default to `None`, which keeps native WASI clocks and entropy and
-QuickJS's own `Math.random()` at no extra cost. They apply to every new context
-on the runtime.
+`clock` returns **integer nanoseconds since the Unix epoch** and backs every
+WASI clock the guest reads. It defaults to `None`, which keeps native WASI at no
+extra cost. Invalid values and exceptions reach the guest as WASI errors.
 
-- `clock` returns **seconds since the Unix epoch**; `Date.now()` sees
-  milliseconds. It is called on every clock read and backs all four WASI clocks,
-  so return nondecreasing values if guest code needs monotonic time. Invalid
-  values and exceptions reach the guest as WASI errors. The callback runs on
-  whichever thread drives the eval.
-- `random_seed` (an unsigned 64-bit integer) seeds WASI `random_get` and
-  `Math.random()` as two independent streams, neither tied to the clock. Every
-  context on the runtime starts from the same seed, so sibling contexts produce
-  the same sequence. Seeded entropy is deterministic and **not suitable for
-  secrets**.
-- Without a seed, QuickJS seeds `Math.random()` from the clock when a context is
-  created, so a fixed `clock` alone also makes it reproducible.
-
-Snapshots capture the `Math.random()` state, but not the clock callback or the
-WASI entropy position: a restored context uses the destination runtime's
-controls. These options do not remove every source of nondeterminism or timing
-side channel; host deadlines still use real time, and host callbacks and I/O
-can differ between runs.
+- A fixed clock fixes `Date.now()` and `Math.random()`: QuickJS seeds
+  `Math.random()` from the clock when each context is created. Sibling contexts
+  under a frozen clock get the same sequence; use a stepping clock if they
+  should differ. Clock-seeded randomness is not for secrets.
+- Snapshots keep the `Math.random()` state; a restored context reads the
+  destination runtime's clock.
 
 ## ES modules
 
