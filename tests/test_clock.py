@@ -61,7 +61,10 @@ def test_defaults():
     before = time.time() * 1000
     result = sequence()
     after = time.time() * 1000
-    assert before - 1 <= result[0] <= after
+    # The guest and `time.time()` read different host clocks; on Windows before
+    # Python 3.13 the latter is coarse, so allow some skew (in ms).
+    slack = 50
+    assert before - slack <= result[0] <= after + slack
     assert all(0 <= x < 1 for x in result[2:])
 
 
