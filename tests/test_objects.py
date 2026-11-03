@@ -103,6 +103,14 @@ def test_containers_marshal_with_json_semantics(
     assert ctx.eval(expr) == expected
 
 
+@pytest.mark.parametrize("expr", ["42", "2**53", "2**64", "1e20", "1e21"])
+def test_nested_numbers_match_top_level(ctx: Context, expr: str) -> None:
+    top = ctx.eval(expr)
+    for nested in (ctx.eval(f"[{expr}]")[0], ctx.eval(f"({{n: {expr}}})")["n"]):
+        assert nested == top
+        assert type(nested) is type(top)
+
+
 def test_container_json_cannot_carry_takes_per_leaf_walk(ctx: Context) -> None:
     """A BigInt makes JSON.stringify throw, so the value falls back to the
     per-leaf walk and keeps its native leaf types."""
