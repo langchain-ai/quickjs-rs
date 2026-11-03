@@ -132,6 +132,13 @@ _DEPTH_EXCEEDED = (
 # Largest magnitude an int crosses as an exact JS number; wider ints are BigInt.
 _MAX_SAFE_INT = 2**53
 
+
+def _json_int(s: str) -> int | float:
+    """JSON has no int/float split; match the walk, which narrows to int below 2**53."""
+    n = int(s)
+    return n if abs(n) < _MAX_SAFE_INT else float(s)
+
+
 # Sentinel: a guest value has no JSON form, so it takes the per-leaf walk.
 _NO_JSON = object()
 
@@ -821,9 +828,9 @@ class _Instance:
         raw = self.take_result()
         # Each bracket adds at most one level, so few brackets can't exceed the limit.
         if depth + raw.count(b"[") + raw.count(b"{") <= _MAX_MARSHAL_DEPTH:
-            return json.loads(raw)
+            return json.loads(raw, parse_int=_json_int)
         try:
-            value = json.loads(raw)
+            value = json.loads(raw, parse_int=_json_int)
         except RecursionError:
             raise MarshalError(_DEPTH_EXCEEDED) from None
         _check_depth(value, depth)
