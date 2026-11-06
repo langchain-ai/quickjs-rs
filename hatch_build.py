@@ -14,7 +14,7 @@ from pathlib import Path
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 _ROOT = Path(__file__).resolve().parent
-_BUNDLED = ("quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm")
+_BUNDLED = ("quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm", "quickjs_rs/_diff.wasm")
 
 
 class GuestWasmBuildHook(BuildHookInterface):

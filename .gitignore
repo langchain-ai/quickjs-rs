@@ -9,6 +9,7 @@ target/
 # from source on every build; never committed.
 quickjs_rs/_guest.wasm
 quickjs_rs/_transform.wasm
+quickjs_rs/_diff.wasm
 
 # Python
 __pycache__/

@@ -35,7 +35,7 @@ Issues = "https://github.com/langchain-ai/quickjs-rs/issues"
 packages = ["quickjs_rs"]
 # WASM guests are produced by the build hook and force-included from there;
 # they are gitignored, never committed.
-artifacts = ["quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm"]
+artifacts = ["quickjs_rs/_guest.wasm", "quickjs_rs/_transform.wasm", "quickjs_rs/_diff.wasm"]
 
 [tool.hatch.build.targets.sdist]
 # Ship the guest crate sources so an sdist can rebuild the wasm from source.
@@ -43,6 +43,7 @@ include = [
   "quickjs_rs",
   "crates/quickjs-wasm",
   "crates/quickjs-wasm-transform",
+  "crates/snapshot-diff-wasm",
   "scripts/build_guest.py",
   "hatch_build.py",
   "README.md",
