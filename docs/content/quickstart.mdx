@@ -1,0 +1,105 @@
+---
+title: Quickstart
+description: Install the package, evaluate code, give the script a tool, and await it.
+---
+
+## Install
+
+<Tabs>
+  <Tab title="pip">
+    ```sh
+    pip install quickjs-rs
+    ```
+  </Tab>
+  <Tab title="uv">
+    ```sh
+    uv add quickjs-rs
+    ```
+  </Tab>
+</Tabs>
+
+The wheel is `py3-none-any`: the bundled guest is platform-independent WebAssembly, and `wasmtime` supplies the
+per-platform runtime. It needs Python 3.11 or newer and runs wherever `wasmtime` has a wheel (Linux, macOS and Windows
+on x86_64 and arm64).
+
+## Evaluate code
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt:
+    with rt.new_context() as ctx:
+        assert ctx.eval("1 + 2") == 3
+        assert ctx.eval("[1, 2, 3].map(x => x * 2)") == [2, 4, 6]
+        assert ctx.eval("({ ok: true, n: 1.5 })") == {"ok": True, "n": 1.5}
+```
+
+`Runtime` holds configuration and creates contexts. Each `Context` is a fresh, isolated JavaScript global
+environment backed by its own wasm instance. Close both when you are done; the `with` blocks do it for you.
+
+## Give the script a tool
+
+```python
+with Runtime() as rt:
+    with rt.new_context() as ctx:
+        @ctx.function
+        def lookup(user_id: int) -> dict:
+            return {"id": user_id, "name": "Ada"}
+
+        assert ctx.eval("lookup(7).name") == "Ada"
+```
+
+The decorated function becomes the global `lookup`. Arguments arrive as Python values and the return value goes back
+as a JavaScript value. If it raises, JavaScript sees a generic `HostError`; your original exception is raised from
+`eval` if the script doesn't catch it.
+
+<Callout type="warning" title="Host functions are the attack surface">
+  Untrusted code can call every function you register, with any arguments. Read
+  [Host functions](/guide/host-functions) and [the security model](/security) before exposing anything that touches
+  files, the network or secrets.
+</Callout>
+
+## Await async tools
+
+```python
+import asyncio
+from quickjs_rs import Runtime
+
+async def main() -> None:
+    with Runtime() as rt:
+        with rt.new_context(timeout=2.0) as ctx:
+            @ctx.function
+            async def search(q: str) -> list[str]:
+                await asyncio.sleep(0.1)
+                return [f"{q}-1", f"{q}-2"]
+
+            hits = await ctx.eval_async("""
+                const [a, b] = await Promise.all([search("x"), search("y")]);
+                [...a, ...b].length
+            """)
+            assert hits == 4
+
+asyncio.run(main())
+```
+
+`eval_async` supports top-level `await` and returns the value of the last expression. Async host functions run as
+asyncio tasks; while the script waits on them, the clock against `timeout` stops.
+
+## Set limits
+
+```python
+rt = Runtime(memory_limit=32 * 1024 * 1024)   # QuickJS heap cap, bytes (default 64 MiB)
+ctx = rt.new_context(timeout=1.0)              # wall-clock seconds per eval (default 5.0)
+```
+
+A script over its memory limit raises `MemoryLimitError`; one over its deadline raises `TimeoutError`. The context
+survives both and can be used again. See [Limits](/guide/limits) for what each limit does and doesn't cover.
+
+## Next
+
+<Cards cols={2}>
+  <Card title="Runtimes and contexts" href="/guide/runtimes-and-contexts">What each object owns, and their lifetimes.</Card>
+  <Card title="Values" href="/guide/values">How Python and JavaScript values convert.</Card>
+  <Card title="Architecture" href="/internals/architecture">What runs where, and why.</Card>
+  <Card title="Security model" href="/security">What the sandbox does and doesn't protect.</Card>
+</Cards>

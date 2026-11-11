@@ -1,0 +1,85 @@
+---
+title: Runtimes and contexts
+description: What a Runtime and a Context own, how long they live, and how state carries between evals.
+---
+
+A `Runtime` is configuration plus a factory. A `Context` is a running JavaScript VM. The split looks like native
+QuickJS, where a `JSRuntime` is a heap shared by several `JSContext`s, but here it means something different: **every
+context is its own wasm instance**, with its own linear memory, its own quickjs-ng runtime and its own quickjs-ng
+context. Two contexts made by the same `Runtime` share no JavaScript objects.
+
+> **In short.** Make one `Runtime` per trust domain and configuration. Make a `Context` per run you want isolated.
+> State in a context persists from one `eval` to the next until you close it.
+
+## What a Runtime holds
+
+| Setting | Where it comes from | Shared by its contexts? |
+| --- | --- | --- |
+| `memory_limit` (default 64 MiB) | `Runtime(memory_limit=...)` | Each context gets its own limit of this size. |
+| `stack_limit` (default 1 MiB) | `Runtime(stack_limit=...)` | Applied per context; has no effect on wasi (see [Limits](/guide/limits)). |
+| `clock` | `Runtime(clock=...)` | The same callable backs every context's clocks. |
+| `transform_flags` | `Runtime(transform_flags=...)` | Default source-transform policy for every context. |
+| Module loader | `rt.set_module_loader(...)` | The same `normalize`/`load` callbacks, but each context keeps its own module graph. |
+| Interrupt handler and deadline slot | Installed by `Runtime.__init__` | One deadline slot for the whole runtime (see [Threads](/guide/threads)). |
+
+`Runtime.memory_usage()` sums QuickJS's memory counters across all live contexts, and `Runtime.run_gc()` runs the
+cycle collector in each of them. An empty runtime reports all zeros.
+
+## What a Context holds
+
+A context owns a wasmtime `Store` and the instance in it. Inside the instance live the quickjs-ng runtime and context
+(created on the first call that needs them), the boxed values behind every `Handle`, the table of pending deferred
+promises for async host calls, and the module cache. On the Python side the context owns its host-function registry,
+its async bookkeeping and the `globals` proxy.
+
+```python
+with Runtime() as rt:
+    a = rt.new_context()
+    b = rt.new_context()
+    a.eval("globalThis.secret = 42")
+    assert b.eval("typeof secret") == "undefined"   # separate instances
+```
+
+## State carries between evals
+
+Each `eval` on a context runs as a new top-level script in the same global environment. Globals, prototype changes,
+`var` and top-level `let`/`const` bindings all persist:
+
+```python
+ctx.eval("const base = 10")
+assert ctx.eval("base + 1") == 11
+ctx.eval("Array.prototype.sum = function () { return this.reduce((a, b) => a + b, 0) }")
+assert ctx.eval("[1, 2, 3].sum()") == 6
+```
+
+That is useful for building up an environment once and reusing it, and it is a hazard when contexts are reused
+across users: anything one script leaves behind, including a poisoned prototype, is there for the next. Use a fresh
+context, or restore a known-good [snapshot](/guide/snapshots), for each untrusted run.
+
+## Strict mode
+
+Every script is evaluated in strict mode: assigning to an undeclared variable throws `ReferenceError`, and `with`
+is a syntax error. The `strict=` argument on `eval` and friends is accepted for compatibility and has no effect.
+
+## Lifetimes
+
+- `Context.close()` disposes the `globals` handle, then closes the wasmtime store, which frees the linear memory and
+  drops the store's references to the host callbacks. Further calls raise `QuickJSError("context is closed")`.
+- `Runtime.close()` closes every context it made, then marks itself closed.
+- Both are idempotent and both are context managers.
+- A `Handle` belongs to one context. Using it after `dispose()` raises `InvalidHandleError`, and so does passing it
+  to a different context.
+
+## Globals
+
+`ctx.globals` is a dict-like view of `globalThis`:
+
+```python
+ctx.globals["config"] = {"retries": 3}
+assert ctx.eval("config.retries") == 3
+assert ctx.globals["missing"] is None         # undefined reads as None
+assert "config" in ctx.globals                # exists and isn't undefined
+fn = ctx.globals.get_handle("parseInt")       # functions need a Handle
+```
+
+`del ctx.globals[key]` isn't supported; assign `UNDEFINED` or run `delete globalThis.key` instead.

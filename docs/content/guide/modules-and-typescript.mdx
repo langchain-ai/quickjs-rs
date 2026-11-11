@@ -1,0 +1,138 @@
+---
+title: Modules and TypeScript
+description: The host module loader, how resolution is cached, and how TypeScript is stripped before QuickJS sees it.
+---
+
+quickjs-rs has no filesystem and no built-in module resolution. When a script imports something, the guest asks the
+host two questions through imports: what is the canonical name of this specifier, and what is the source for that
+name. You answer both with callbacks.
+
+> **In short.** `rt.set_module_loader(normalize=..., load=...)` installs the callbacks for every context of the
+> runtime. `normalize` is where your sandbox policy lives: return `None` to refuse. Each context resolves each
+> import edge once and loads each module once, then caches it. Names ending in `.ts`, `.mts`, `.cts` or `.tsx` are
+> type-stripped by a separate OXC wasm module first.
+
+## The loader
+
+```python
+import posixpath
+from quickjs_rs import Runtime
+
+sources = {
+    "@agent/config": "export const MAX_RETRIES = 3;",
+    "@agent/utils": "export { slugify } from './strings.js';",
+    "@agent/utils/strings.js": "export const slugify = s => s.toLowerCase().replace(/ /g, '-');",
+}
+
+def normalize(base: str, spec: str) -> str | None:
+    if not spec.startswith("."):
+        return spec if spec in sources else None          # bare names: allowlist
+    base_dir = base if "." not in posixpath.basename(base) else posixpath.dirname(base)
+    return posixpath.normpath(posixpath.join(base_dir, spec))
+
+async def main():
+    with Runtime() as rt:
+        rt.set_module_loader(normalize=normalize, load=sources.get)
+        with rt.new_context() as ctx:
+            assert await ctx.eval_async("""
+                const { slugify } = await import("@agent/utils");
+                const { MAX_RETRIES } = await import("@agent/config");
+                slugify("Hello World") + "/" + MAX_RETRIES
+            """) == "hello-world/3"
+```
+
+- `normalize(base, specifier) -> str | None` gets the importing module's canonical name and the specifier as written.
+  The default, when you pass no `normalize`, returns the specifier unchanged.
+- `load(name) -> str | None` returns source for a canonical name, or `None` for "not found".
+- Returning `None`, or raising, makes the import fail with a JavaScript error in the script. Your exception isn't
+  passed through.
+- Both callbacks are synchronous, because QuickJS links static imports synchronously. They run on the evaluating
+  thread while the eval's deadline is running, and like sync host functions they can't be interrupted.
+- A canonical name may be at most 4096 bytes and a module source at most 16 MiB; larger answers are treated as
+  "not found".
+
+## Using modules
+
+Dynamic `import()` works from any script, sync or async eval. To run a module itself, use
+`eval_async(code, module=True)`: `import`/`export` work, top-level bindings stay in the module, and the call returns
+`None`. To get a value out, assign it to a global or import the module from a script.
+
+A context that has run `module=True` code can't be snapshotted (see [Snapshots](/guide/snapshots)). Dynamic
+`import()` from a script doesn't set that flag.
+
+## Caching
+
+The guest keeps two caches per context, both for the life of the context:
+
+- **Resolution:** each `(base, specifier)` pair calls `normalize` at most once. Only successful answers are cached.
+- **Modules:** QuickJS evaluates a module once per canonical name. Importing it again returns the same namespace,
+  even if `load` would now return different source.
+
+The loader callbacks are shared by the runtime's contexts, but the caches aren't: each context has its own module
+graph. Both caches are guest memory, so they are part of a snapshot.
+
+## TypeScript
+
+Module sources whose canonical name ends in `.ts`, `.mts` or `.cts` are stripped as TypeScript, and `.tsx` as TSX,
+before QuickJS sees them. Type annotations are erased; enums, namespaces and parameter properties are transformed into
+JavaScript. Nothing is type-checked; run `tsc --noEmit` separately for that.
+
+```python
+ts_sources = {
+    "util.ts": """
+        export enum Mode { Strict = 1, Loose = 2 }
+        export function slug(s: string, mode: Mode): string {
+            return s.toLowerCase().replace(/ /g, mode === Mode.Strict ? '_' : '-');
+        }
+    """,
+}
+rt.set_module_loader(load=ts_sources.get)
+await ctx.eval_async("const { slug, Mode } = await import('util.ts'); slug('Hello World', Mode.Strict)")
+```
+
+A TypeScript parse error in a module surfaces as a module-load error at the import. In top-level eval code it raises
+`JSError("SyntaxError", ...)` before QuickJS runs anything.
+
+### Transform flags
+
+`SourceTransform` is an `IntFlag`:
+
+| Flag | Effect |
+| --- | --- |
+| `SOURCE_TS` | Parse the source as TypeScript. |
+| `SOURCE_TSX` | Parse the source as TSX. |
+| `STRIP_TYPESCRIPT` | Erase types and lower TypeScript-only syntax. |
+| `TOP_LEVEL_CONST_TO_VAR` | Rewrite top-level `const` to `var`, so the binding becomes a property of `globalThis`. |
+| `NONE` | No transform. |
+
+The policy for a given source is the first of these that is set:
+
+1. `transform_flags=` on the eval call (top-level code only).
+2. `transform_flags=` on `set_module_loader` (module sources only).
+3. `Runtime(transform_flags=...)`.
+4. The default: modules by file extension as above; top-level eval code untransformed.
+
+Each policy can be a fixed `SourceTransform` or a callable `name -> SourceTransform`. `default_module_transform_flags(name)`
+returns the default for a name, so you can add to it:
+
+```python
+from quickjs_rs import SourceTransform, default_module_transform_flags
+
+rt.set_module_loader(
+    load=sources.get,
+    transform_flags=lambda name: default_module_transform_flags(name) | SourceTransform.TOP_LEVEL_CONST_TO_VAR,
+)
+
+with Runtime(transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT) as rt:
+    with rt.new_context() as ctx:
+        assert ctx.eval("const value: number = 2; value") == 2
+```
+
+`transform_source(name, source, flags=None)` runs a one-off transform in a temporary instance.
+
+### Where the transform runs
+
+The transformer is OXC compiled to its own wasm module (`_transform.wasm`). The compiled module is shared by the
+process; each context lazily gets its own instance, created on first use, so transform state follows the same
+boundary as the context. Results are cached per instance by build id, name, SHA-256 of the source and flags. If the
+transform traps, that instance is thrown away and recreated on the next call.

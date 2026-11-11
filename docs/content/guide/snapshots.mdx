@@ -1,0 +1,114 @@
+---
+title: Snapshots
+description: Capturing a whole context as bytes, restoring it elsewhere, the format, and what a snapshot does and doesn't guarantee.
+---
+
+A snapshot is a copy of a context's entire wasm linear memory plus its stack pointer. Everything the guest has
+allocated lives in that memory, addressed by offset, so restoring the bytes into another instance of the same guest
+build reconstitutes the VM exactly: objects, closures, aliasing, the atom table, the job queue, the module and
+resolution caches, the handles' boxes.
+
+> **In short.** `ctx.create_snapshot()` returns a `Snapshot`; `rt.restore_snapshot(snap, other_ctx)` replaces
+> `other_ctx`'s whole heap with it. The header pins the guest build, so a snapshot only restores into the exact same
+> `_guest.wasm`. Nothing signs or encrypts it: a snapshot is as trusted as code, and it contains every secret the
+> context ever saw.
+
+## Taking and restoring
+
+```python
+from quickjs_rs import Runtime, Snapshot
+
+with Runtime() as rt:
+    with rt.new_context() as ctx:
+        ctx.eval("""
+            const shared = { count: 1 };
+            const a = shared, b = shared;
+            const counter = (() => { let n = 0; return () => ++n; })();
+        """)
+        payload = ctx.create_snapshot().to_bytes()
+
+with Runtime() as rt2:
+    with rt2.new_context() as ctx2:
+        rt2.restore_snapshot(Snapshot.from_bytes(payload), ctx2)
+        assert ctx2.eval("a === b") is True      # aliasing preserved
+        assert ctx2.eval("counter()") == 1       # closure state preserved
+```
+
+- `create_snapshot()` (and `create_snapshot_async()`, the same copy for async code) needs a quiet context: no
+  `eval_async` in flight (`ConcurrentEvalError`) and no async host tasks pending (`QuickJSError`).
+- A context that ran `module=True` code raises `NotImplementedError`; module-mode snapshots aren't supported yet.
+- `Runtime.create_snapshot(ctx)` and `Runtime.create_snapshot_async(ctx)` are factory forms.
+- `restore_snapshot(snap, ctx, inject_globals=False)` validates the header and changes nothing. There is no partial
+  restore; the flag means "validate only".
+- The destination context must belong to the runtime you call `restore_snapshot` on.
+
+## What carries over, and what doesn't
+
+| Carried in the snapshot | Not carried |
+| --- | --- |
+| Every JS object, closure, prototype change and global | The Python host-function registry |
+| Pending promises and queued jobs | Python-side `Handle` objects of the source context |
+| The JS functions for registered host functions (they dispatch by name) | The runtime's limits, clock and module loader |
+| The `Math.random()` state | Async host tasks (snapshots require none pending) |
+| The module and resolution caches | |
+
+Host functions in the image look up their Python callable by name when called. Register the same names on the
+destination context, after restoring, or calls fail with `HostError`:
+
+```python
+src.register("tool", lambda x: x * 2)
+src.eval("var f = () => tool(21)")
+snap = src.create_snapshot()
+
+rt.restore_snapshot(snap, dst)
+dst.eval("f()")                          # HostError: no "tool" registered here
+dst.register("tool", lambda x: x * 2)
+assert dst.eval("f()") == 42
+```
+
+A restored context reads the destination runtime's clock. Its memory limit is the one stored in the image, which is
+the limit of the runtime that took the snapshot.
+
+## Size
+
+A snapshot is the size of the linear memory when it was taken: about 1.3 MB for a fresh context. Wasm memory only
+grows, so a context that once used 60 MB of heap snapshots at 60 MB or more even after its garbage is collected.
+Snapshot fresh contexts, or contexts before they do heavy work, when size matters.
+
+## Format
+
+```text
+offset  size  field
+0       4     magic            b"QFGS"
+4       4     format_version   u32 LE, currently 1
+8       32    build_id         SHA-256 of the guest .wasm bytes
+40      8     memory_size      u64 LE, bytes of linear memory that follow
+48      4     stack_pointer    u32 LE, the guest's __stack_pointer global
+52      ...   image            memory_size bytes of linear memory
+```
+
+Restore checks, in this order, and stops at the first failure: the payload is at least 52 bytes (`QuickJSError`), the
+magic (`ValueError`), the format version, the build id, that the image length equals `memory_size`, and that the stack
+pointer is within the image. Only then does it grow the destination memory to `memory_size` if needed, copy the image
+over it from offset 0, and set the stack pointer.
+
+`build_id` is the SHA-256 of the exact guest binary. Any rebuild of `_guest.wasm` (a new quickjs-rs release, a
+different toolchain) changes it and invalidates every older snapshot. Snapshots are a way to move a VM between
+processes running the same build, not a storage format.
+
+## Trust
+
+The header check stops accidents, not attackers. A snapshot is raw guest memory; whoever can write it controls
+everything the restored context computes and returns, and its header decides how much memory the restore allocates.
+It is still contained by the wasm sandbox, like any script. In the other direction, a snapshot holds everything the
+context ever held, including host-function results and secrets passed in as globals.
+
+So:
+
+- Restore only snapshots you produced, from storage only you can write. If they travel or rest anywhere less
+  trusted, sign or MAC them and verify before restoring.
+- Encrypt them at rest if the context saw sensitive data.
+- Check `len(payload)` against your own cap before restoring.
+- Don't share one snapshot between tenants unless it was taken before any tenant data went in.
+
+See [the threat model](/security/threat-model#t7-snapshot-tampering-and-disclosure).

@@ -1,0 +1,112 @@
+---
+title: Values
+description: How values convert between Python and JavaScript, when you get a Handle instead, and the JSON fast path's rules.
+---
+
+Values cross the boundary in two ways. **Marshalling** copies a value into the other language: `eval` results,
+host-function arguments and return values, `globals[...]`, and `Handle.to_python()`. A **Handle** keeps the value in
+the guest and gives Python a reference to it: `eval_handle`, `globals.get_handle`, and anything you reach from another
+handle.
+
+> **In short.** Primitives, lists, dicts, bytes and big integers convert. Functions, symbols and promises don't; ask
+> for a `Handle`. Containers coming out of JavaScript go through `JSON.stringify` when they can, so inside a
+> container they follow JSON's rules: `undefined` and `NaN` become `None`, functions vanish, `Date` becomes a string.
+
+## Python to JavaScript
+
+| Python | JavaScript | Notes |
+| --- | --- | --- |
+| `None` | `null` | |
+| `UNDEFINED` | `undefined` | `quickjs_rs.UNDEFINED`, a falsy singleton. |
+| `bool` | `boolean` | Checked before `int`. |
+| `int` with abs ≤ 2⁵³ | `number` | |
+| `int` with abs > 2⁵³ | `bigint` | Sent as a decimal string, never truncated. |
+| `float` | `number` | `nan` and `inf` pass through; `-0.0` arrives as `0`. |
+| `str` | `string` | UTF-8. |
+| `bytes`, `bytearray` | `Uint8Array` | A copy. |
+| `list`, `tuple` | `Array` | |
+| `dict` with `str` keys | plain `Object` | Other key types raise `MarshalError`. |
+| `Handle` | the referenced value | Must belong to the same context. |
+| anything else | | `MarshalError("cannot marshal set")`, etc. |
+
+A list or dict made only of JSON-exact values (no big ints, no non-finite floats, no `-0.0`, no bytes, no
+`UNDEFINED`, no `"__proto__"` key) is sent as one JSON string and parsed in the guest with `JSON.parse`, a single
+boundary crossing. Anything else is built leaf by leaf. The two paths produce the same value; the allowlist exists
+so they always do. One visible effect of the leaf path: a `"__proto__"` key is assigned with a normal property set,
+which calls the prototype setter instead of creating an own property, so `{"__proto__": {...}}` arrives as `{}`.
+
+## JavaScript to Python
+
+| JavaScript | Python | Notes |
+| --- | --- | --- |
+| `undefined` (top level) | `None` | |
+| `undefined` (nested, leaf path) | `UNDEFINED` | Only when the container can't take the JSON path, or with `allow_opaque=True`. |
+| `null` | `None` | |
+| `boolean` | `bool` | |
+| `number`, integer-valued, abs < 2⁵³ | `int` | `3.0` comes back as `3`. |
+| other `number` | `float` | Including `2**53` itself, `NaN` and `±Infinity` at the top level. |
+| `bigint` | `int` | |
+| `string` | `str` | |
+| `ArrayBuffer`, `Uint8Array` (top level) | `bytes` | |
+| `Array` | `list` | |
+| other objects | `dict` | Own enumerable string keys. |
+| `Promise`, function, symbol | | `MarshalError`, or a `Handle` with `allow_opaque=True`. |
+
+### The JSON fast path
+
+When `allow_opaque` is false (the default, and always for `eval` results and host-function arguments), an array or
+object is first run through `JSON.stringify` in the guest and parsed with `json.loads` in Python: one crossing
+instead of one per property. If stringify fails (a `BigInt` inside, or a cycle) the walker takes over and converts
+leaf by leaf.
+
+So nested values follow JSON's rules, not the table above:
+
+```python
+ctx.eval("({ f: () => 1, a: 1 })")      # {'a': 1}             functions are dropped
+ctx.eval("[NaN, Infinity]")             # [None, None]
+ctx.eval("({ a: [undefined] })")        # {'a': [None]}
+ctx.eval("({ a: undefined, b: 1 })")    # {'b': 1}             undefined-valued keys are dropped
+ctx.eval("({ d: new Date(0) })")        # {'d': '1970-01-01T00:00:00.000Z'}   toJSON runs
+ctx.eval("[new Uint8Array([1, 2])]")    # [{'0': 1, '1': 2}]   only top-level bytes become bytes
+ctx.eval("new Map([[1, 2]])")           # {}                   no own enumerable keys
+```
+
+`toJSON` methods and getters are guest code. They run under the context's timeout even when marshalling happens
+outside an eval (for example in `Handle.to_python()`).
+
+On 0.2.6 and earlier, a nested integer-valued number of 2⁵³ or more comes back as the `int` JSON prints, which can
+differ from the actual double (`[2**60]` gives `[1152921504606847000]`). If exact values matter, return them as
+strings or `BigInt`.
+
+### Depth and cycles
+
+Both directions stop at a nesting depth of 128 and raise `MarshalError("recursion limit of 128 exceeded while
+marshaling (cycle or deeply nested structure)")`. There is no separate cycle detector: a cycle that JSON can't
+stringify falls back to the walker and hits the depth cap.
+
+## Handles
+
+```python
+with ctx.eval_handle("({ greet: (n) => `hi ${n}`, items: [1, 2] })") as h:
+    with h.get("greet") as greet, greet.call("Ada") as out:
+        assert out.to_python() == "hi Ada"
+    assert h.get("items").to_python() == [1, 2]
+    assert h.type_of == "object"
+```
+
+- A handle holds one reference to a guest value. `dispose()` releases it; `with` does it for you. A handle that is
+  garbage-collected while still live emits `ResourceWarning` and is released.
+- `get`, `get_index`, `call`, `call_method` and `new` return new handles, which you must dispose too.
+- `to_python(allow_opaque=True)` returns a structure with fresh `Handle`s wherever a value couldn't be marshalled.
+- `await_promise()` drives a promise handle to completion like `eval_async` does.
+- Handles are bound to their context. A disposed handle, a handle whose context is closed, or a handle from another
+  context raises `InvalidHandleError`.
+
+Under the hood a handle is an `i32`: the address, inside the guest's linear memory, of a boxed rquickjs
+`Persistent<Value>`. See [the wasm boundary](/internals/boundary).
+
+## Errors thrown by scripts
+
+A JavaScript exception that reaches `eval` becomes a `JSError` with `name`, `message` and `stack`. A thrown non-Error
+value is converted with `String(v)` and named `Error`: `throw 42` raises `JSError("Error", "42")`. Some names are
+promoted to more specific classes; see [Errors](/reference/errors).

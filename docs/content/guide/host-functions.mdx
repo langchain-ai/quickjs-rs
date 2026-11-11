@@ -1,0 +1,139 @@
+---
+title: Host functions
+description: Exposing Python callables to JavaScript, sync and async, and what scripts see when they fail.
+---
+
+A host function is a Python callable installed as a global function in one context. It is the only way a script can
+reach anything outside the sandbox, so it is both the main feature and the main risk.
+
+> **In short.** `ctx.register(name, fn)` or `@ctx.function` installs `fn` as `globalThis[name]`. Sync functions
+> return a value; async functions return a promise that settles when the coroutine finishes. A failure shows up in
+> JavaScript as `HostError: Host function failed`, with no detail; the original Python exception is raised from the
+> eval if the script doesn't catch it.
+
+## Registering
+
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+
+ctx.register("add", add)
+
+@ctx.function
+def greet(name: str) -> str:
+    return f"hi {name}"
+
+@ctx.function(name="fetchUser")
+async def fetch_user(user_id: int) -> dict:
+    ...
+```
+
+- The JS name defaults to the function's `__name__`.
+- Sync or async is detected with `inspect.iscoroutinefunction`. If a decorator hid the coroutine marker but
+  `__wrapped__` reveals one, registration raises `TypeError` instead of guessing; pass `is_async=True` or `False` to
+  decide yourself (for example for a callable class with `async def __call__`).
+- Registering the same name again replaces the global and the dispatch entry.
+- Registration is per context. A new context, or a context restored from a snapshot, starts with none.
+
+## Arguments and return values
+
+Each argument is marshalled to Python with the default rules (see [Values](/guide/values)), so tool arguments follow
+the JSON fast path: a `Date` arrives as an ISO string and a nested function is dropped. Arguments that can't be
+marshalled at all (a top-level function, symbol or promise) make the call fail before your function runs. `this` is
+not passed.
+
+Returning a value marshals it back. Return a `Handle` to hand back a guest value as is.
+
+## Sync calls
+
+A sync host function runs on the thread that is evaluating, inside the guest call, while the JavaScript that called
+it is suspended. It must not call back into the same context's `eval`.
+
+The deadline keeps running during the call, but JavaScript can only be interrupted once the call returns: a sync host
+function that blocks for ten seconds holds the context for ten seconds whatever its timeout. Keep sync functions
+fast, or make them async.
+
+## Async calls
+
+```python
+@ctx.function
+async def search(q: str) -> list[str]:
+    return await my_index.search(q)
+
+result = await ctx.eval_async("(await search('quickjs')).length")
+```
+
+When JavaScript calls an async host function, the bridge creates a deferred promise in the guest, schedules the
+coroutine as an asyncio task in a `TaskGroup` owned by the running `eval_async`, and returns the promise straight
+away. The script can await it, start several and `Promise.all` them, or ignore it. When the task finishes, its result
+resolves the promise, or its exception rejects it, and the eval loop runs the microtasks that were waiting.
+
+Async host functions only work under `eval_async`, `eval_handle_async` or `Handle.await_promise()`. Calling one
+during a sync `eval` raises `ConcurrentEvalError`, even if the script caught the rejection, because there is no event
+loop to drive the coroutine.
+
+There is no limit on how many async calls a script can start at once. `Promise.all(Array.from({ length: 1e5 }, () =>
+search("x")))` schedules 100,000 tasks. Put a semaphore or a per-run budget inside the host function if that matters
+(see [Security](/security#resource-budgets)).
+
+## Failures
+
+When a host function raises, the script sees a real `Error` with a fixed name and message:
+
+```python
+@ctx.function
+def boom() -> None:
+    raise RuntimeError("db password is hunter2")
+
+ctx.eval("try { boom() } catch (e) { e.name + ': ' + e.message }")
+# 'HostError: Host function failed'
+```
+
+The message is the same for every failure and never includes the Python exception, its type, or the function's
+name, so secrets and paths in host exceptions don't leak into JavaScript (and from there into model output). The
+original exception is kept in Python:
+
+- If the script lets the error propagate to the eval, the eval raises **your original exception** (here
+  `RuntimeError`), not a `QuickJSError`.
+- If the script catches it and later throws an error that is itself named `HostError`, the eval raises
+  `quickjs_rs.HostError` with the original as `__cause__`.
+- If the script catches it and carries on, the exception is dropped at the start of the next eval.
+
+The same applies to async host functions: the promise rejects with `HostError: Host function failed`.
+
+If an async result can't be delivered (for example the return value can't be marshalled), the promise is rejected
+with the same `HostError`, and the eval raises the marshalling error if the script doesn't handle it.
+
+## Cancellation
+
+If the asyncio task running `eval_async` is cancelled, every async host call still in flight is rejected with an
+error named `HostCancellationError` before the task group cancels the coroutines. The microtask queue is then
+drained once, so `catch` and `finally` blocks in the script run.
+
+- If the script catches the cancellation and the top-level promise settles with a value, `eval_async` returns that
+  value. The script "absorbed" the cancellation.
+- If it rejects with something other than `HostCancellationError`, that error is raised.
+- Otherwise `eval_async` raises `asyncio.CancelledError`.
+
+```python
+async def main():
+    task = asyncio.create_task(ctx.eval_async("""
+        try { await slowTool(); "finished" }
+        catch (e) { e.name === "HostCancellationError" ? "cleaned up" : "other" }
+    """))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert await task == "cleaned up"
+```
+
+## Design notes
+
+- **Dispatch by name.** The guest closure for a host function captures only its name and passes it to the
+  `host_call` import with the argument handles. The host looks the name up in a per-context table. Because the
+  closure lives in the guest heap and the table in Python, a snapshot carries the JS function but not the Python
+  callable, which is why you register again after restoring.
+- **No host-authored strings on the error path.** The host returns a sentinel (`-1`) and the guest builds the
+  `HostError` itself. Nothing the host could get wrong ends up in a JS-visible message.
+- **Alternative not taken:** passing exception messages through, or making that configurable. A model-visible
+  message is a leak channel, and a single fixed message keeps the Python side able to recognize its own failures
+  when they surface at the eval boundary.
