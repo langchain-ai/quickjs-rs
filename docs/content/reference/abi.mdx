@@ -1,0 +1,128 @@
+---
+title: Guest ABI
+description: Every import and export of the QuickJS and transform guests.
+---
+
+The internal contract between `quickjs_rs/_engine.py` and `crates/quickjs-wasm`. It isn't a public API and changes
+with the guest; it's listed here so the boundary can be audited. Conventions (handles, status codes, ownership) are
+explained in [the wasm boundary](/internals/boundary).
+
+All pointers and lengths are `i32` offsets into guest memory. `→ status` means the export returns a status code
+(`0` OK, `1` JS error, `2` bad input, `3` panic, `4` no engine). `out` parameters are 4-byte slots (8 for numbers)
+the host allocates.
+
+## QuickJS guest imports
+
+| Import | Signature | Purpose |
+| --- | --- | --- |
+| `env.host_call` | `(name_ptr, name_len, this, argc, argv_ptr) → handle` | Call a registered host function; `-1` means failure. |
+| `env.host_interrupt` | `() → i32` | Non-zero stops execution (deadline passed). |
+| `env.host_module_normalize` | `(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) → ptr` | Resolve a specifier; `0` refuses. |
+| `env.host_module_load` | `(name_ptr, name_len, out_len_ptr) → ptr` | Module source; `0` means not found. |
+| `wasi_snapshot_preview1.*` | WASI preview 1 | Native WASI; `clock_time_get` is replaced when the runtime has a `clock`. |
+
+## QuickJS guest exports
+
+**Memory and results**
+
+| Export | Signature |
+| --- | --- |
+| `qjs_alloc` | `(size) → ptr` |
+| `qjs_free` | `(ptr, size)` |
+| `qjs_last_ptr`, `qjs_last_len` | `() → ptr`, `() → len`: the pending result buffer |
+| `qjs_result_free` | `()` |
+| `memory`, `__stack_pointer` | linear memory and the shadow-stack pointer (used by snapshots) |
+
+**Engine**
+
+| Export | Signature |
+| --- | --- |
+| `set_memory_limit` | `(bytes)` |
+| `set_max_stack_size` | `(bytes)` |
+| `run_gc` | `()` |
+| `compute_memory_usage` | `() → status`; 26 little-endian `i64` in the result buffer |
+
+**Evaluation**
+
+| Export | Signature |
+| --- | --- |
+| `eval_code` | `(code_ptr, code_len, out) → status` |
+| `eval_async` | `(code_ptr, code_len, out) → status`; `out` is a promise for `{value, done}` |
+| `eval_module` | `(code_ptr, code_len, name_ptr, name_len, out) → status`; `out` is the namespace |
+| `eval_module_async` | `(code_ptr, code_len, name_ptr, name_len, out) → status`; `out` is the evaluation promise |
+
+**Values**
+
+| Export | Signature |
+| --- | --- |
+| `new_undefined`, `new_null`, `new_object`, `new_array`, `global_object` | `() → handle` |
+| `new_bool` | `(i32) → handle` |
+| `new_number` | `(f64 bits as i64) → handle` |
+| `new_string` | `(ptr, len) → handle` |
+| `new_bigint` | `(decimal_ptr, len, out) → status` |
+| `new_arraybuffer`, `new_uint8array` | `(ptr, len, out) → status` |
+| `new_from_json` | `(json_ptr, len, out) → status` |
+| `new_error` | `(msg_ptr, len, out) → status` |
+| `new_function` | `(name_ptr, name_len) → handle` |
+| `dup_handle` | `(handle) → handle` |
+| `free_value` | `(handle)` |
+
+**Reading values** (string results go to the result buffer)
+
+| Export | Signature |
+| --- | --- |
+| `type_of` | `(handle) → status`; type name in the result buffer |
+| `get_number` | `(handle, out_bits) → status` |
+| `get_bool` | `(handle, out) → status` |
+| `get_string`, `get_bigint`, `get_arraybuffer`, `to_json` | `(handle) → status` |
+| `get_typed_array_buffer` | `(handle, out1, out2, out3) → status` |
+| `is_promise` | `(handle, out) → status` |
+
+**Objects and calls**
+
+| Export | Signature |
+| --- | --- |
+| `get_prop` | `(obj, key_ptr, key_len, out) → status` |
+| `set_prop` | `(obj, key_ptr, key_len, value) → status` |
+| `has_prop` | `(obj, key_ptr, key_len, out) → status` |
+| `get_index` | `(obj, index, out) → status` |
+| `set_index` | `(obj, index, value) → status` |
+| `get_own_property_names` | `(obj, out) → status` |
+| `call_function` | `(fn, this, argv_ptr, argc, out) → status` |
+| `call_constructor` | `(fn, argv_ptr, argc, out) → status` |
+
+**Errors and promises**
+
+| Export | Signature |
+| --- | --- |
+| `last_exception` | `(out) → status` |
+| `throw` | `(handle) → status` |
+| `new_promise` | `(out_id) → handle` |
+| `resolve_deferred`, `reject_deferred` | `(id, value) → status`; takes ownership of `value` |
+| `promise_state` | `(handle, out) → status`; `0` pending, `1` fulfilled, `2` rejected |
+| `promise_result` | `(handle, out) → status`; `1` with the reason when rejected |
+| `execute_pending_jobs` | `() → count`; at most 100,000 jobs per call |
+
+## Limits enforced at the boundary
+
+| Limit | Value | Where |
+| --- | --- | --- |
+| Binary, BigInt and JSON input | 64 MiB | `handles.rs` `MAX_INPUT_LEN` |
+| Module name | 4096 bytes | `modules.rs` `MAX_NAME_LEN` |
+| Module source | 16 MiB | `modules.rs` `MAX_SOURCE_LEN` |
+| Marshalling depth | 128 | `_engine.py` `_MAX_MARSHAL_DEPTH` |
+| Jobs per drain | 100,000 | `promise.rs` `execute_pending_jobs` |
+
+## Transform guest exports
+
+The OXC guest (`crates/quickjs-wasm-transform`) imports only WASI and exports:
+
+| Export | Signature |
+| --- | --- |
+| `qjst_transform` | `(name_ptr, name_len, src_ptr, src_len, flags) → status`; `0` OK, `1` unchanged, `2` bad input, `3` parse error, `4` transform error, `5` panic |
+| `qjst_alloc`, `qjst_free` | `(size) → ptr`, `(ptr, size)` |
+| `qjst_result_ptr`, `qjst_result_len` | output source |
+| `qjst_error_ptr`, `qjst_error_len` | error message |
+| `qjst_result_free` | `()` |
+
+Flags: `SOURCE_TS = 1`, `SOURCE_TSX = 2`, `STRIP_TYPESCRIPT = 256`, `TOP_LEVEL_CONST_TO_VAR = 512`.

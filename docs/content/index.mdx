@@ -1,0 +1,92 @@
+---
+title: What quickjs-rs is
+description: Sandboxed JavaScript for Python. QuickJS compiled to WebAssembly, run by wasmtime, with a small Python API on top.
+sidebar:
+  label: Introduction
+---
+
+quickjs-rs runs JavaScript and TypeScript from Python inside a WebAssembly sandbox. The JavaScript engine is
+[quickjs-ng](https://quickjs-ng.github.io/quickjs/), reached through the [rquickjs](https://github.com/DelSkayn/rquickjs)
+bindings and compiled to `wasm32-wasip1`. [wasmtime](https://wasmtime.dev/) runs that module inside your Python
+process. The package is pure Python: one universal wheel that carries the compiled `.wasm` files, with `wasmtime` as
+its only runtime dependency.
+
+This guide explains how it works and why it is built the way it is, so that you can decide whether its guarantees
+fit what you want to run. It describes the code on `main`.
+
+> **In short.** Each `Context` is its own wasm instance with its own linear memory, so JavaScript can't reach Python
+> objects or another context's heap. Everything crosses the boundary through a flat set of exported functions and
+> four imported ones; values cross as integer handles or bytes. Python functions you register become JavaScript
+> globals, and they are the only way the script can affect the world outside the sandbox.
+
+## The job
+
+The main user is programmatic tool calling: a language model writes a short script that calls tools, combines their
+results and returns a value. The script is untrusted, it calls tools that may take seconds, and it must be stopped
+if it loops or allocates without end. That job sets the priorities:
+
+| What the job needs | What quickjs-rs does |
+| --- | --- |
+| Run code nobody reviewed | Every context is a separate wasm instance; the engine never sees a host pointer. |
+| Give the script tools | Registered Python callables become JS globals; async ones return promises. |
+| Stop runaway scripts | A per-eval wall-clock deadline interrupts JS; a memory limit caps the QuickJS heap. |
+| Keep a run's state | A snapshot copies the whole linear memory, closures and pending promises included. |
+| Start fast, ship easily | The wasm is compiled once per process and shared; each context costs one instantiation. |
+
+## The shape of the system
+
+<figure className="docs-block">
+<svg viewBox="0 0 860 400" role="img" aria-label="Python API on top of the wasmtime host adapter, which drives one wasm instance per context plus a transform instance" style={{ width: "100%", height: "auto" }} fill="none" stroke="currentColor" fontFamily="inherit" fontSize="14">
+  <rect x="20" y="20" width="820" height="70" rx="8" strokeWidth="1.5" />
+  <text x="40" y="48" fill="currentColor" stroke="none" fontWeight="600">Python API (quickjs_rs)</text>
+  <text x="40" y="72" fill="currentColor" stroke="none" opacity="0.8">Runtime · Context · Handle · Globals · Snapshot · ThreadWorker · SourceTransform</text>
+  <rect x="20" y="110" width="820" height="70" rx="8" strokeWidth="1.5" />
+  <text x="40" y="138" fill="currentColor" stroke="none" fontWeight="600">Host adapter (quickjs_rs/_engine.py)</text>
+  <text x="40" y="162" fill="currentColor" stroke="none" opacity="0.8">marshalling · host-call dispatch · interrupt poll · module loader · snapshot envelope</text>
+  <rect x="20" y="200" width="820" height="40" rx="8" strokeWidth="1.5" strokeDasharray="6 4" />
+  <text x="40" y="225" fill="currentColor" stroke="none">wasmtime: one shared Engine, one compiled Module, shared Linkers (process-wide)</text>
+  <rect x="20" y="260" width="250" height="120" rx="8" strokeWidth="2" />
+  <text x="36" y="286" fill="currentColor" stroke="none" fontWeight="600">Context A: wasm instance</text>
+  <text x="36" y="310" fill="currentColor" stroke="none" opacity="0.8">own Store + linear memory</text>
+  <text x="36" y="332" fill="currentColor" stroke="none" opacity="0.8">quickjs-ng runtime + context</text>
+  <text x="36" y="354" fill="currentColor" stroke="none" opacity="0.8">handles, deferreds, modules</text>
+  <rect x="300" y="260" width="250" height="120" rx="8" strokeWidth="2" />
+  <text x="316" y="286" fill="currentColor" stroke="none" fontWeight="600">Context B: wasm instance</text>
+  <text x="316" y="310" fill="currentColor" stroke="none" opacity="0.8">own Store + linear memory</text>
+  <text x="316" y="332" fill="currentColor" stroke="none" opacity="0.8">nothing shared with A</text>
+  <rect x="580" y="260" width="260" height="120" rx="8" strokeWidth="1.5" />
+  <text x="596" y="286" fill="currentColor" stroke="none" fontWeight="600">Transform instance</text>
+  <text x="596" y="310" fill="currentColor" stroke="none" opacity="0.8">OXC TypeScript stripping</text>
+  <text x="596" y="332" fill="currentColor" stroke="none" opacity="0.8">one per context, lazily created</text>
+</svg>
+</figure>
+
+- The **Python API** is what you import. `Runtime` holds configuration (limits, clock, module loader, transform policy)
+  and makes contexts. `Context` evaluates code and registers host functions.
+- The **host adapter** in `_engine.py` turns Python values into calls on the guest's exports, reads results back out
+  of linear memory with bounds checks, and answers the guest's imports: host calls, the interrupt poll, and module
+  loading.
+- The **guest** (`crates/quickjs-wasm`) is a reactor-mode wasm module that wraps one quickjs-ng runtime and one
+  context. It exports about fifty small functions (`new_string`, `get_prop`, `eval_code`, `resolve_deferred`, …)
+  and imports four.
+- The **transform guest** (`crates/quickjs-wasm-transform`) is a separate wasm module built on
+  [OXC](https://oxc.rs/). It strips TypeScript before QuickJS sees the source.
+
+## What quickjs-rs is not
+
+- **Not a browser or Node.** There is no `console`, `fetch`, `setTimeout`, filesystem or network. A script can do
+  only what the ECMAScript built-ins and your host functions allow.
+- **Not a process boundary.** The sandbox runs in your Python process. A bug in wasmtime itself could cross it; see
+  [the security model](/security).
+- **Not a type checker.** TypeScript types are erased, not checked.
+- **Not stable yet.** The package is experimental and its API may change between minor versions.
+
+## How to read this guide
+
+- [Quickstart](/quickstart) gets code running in a minute.
+- **Using quickjs-rs** covers each feature from the caller's side: runtimes and contexts, values, host functions,
+  async evaluation, modules and TypeScript, snapshots, limits, and threads.
+- **How it works** goes under the API: the architecture, the wasm boundary, how a host call travels, and the eval
+  lifecycle. Each chapter says what the design costs and what was not done.
+- **Security** has the security model and the threat model.
+- **Reference** lists the public API, the errors, the guest ABI and the known limitations.

@@ -1,0 +1,57 @@
+---
+title: Threads
+description: Which objects are thread-safe, ThreadWorker, and how to run many contexts at once.
+---
+
+> **In short.** The process-wide pieces (the wasmtime engine, the compiled modules, the linkers) are shared and
+> thread-safe. A `Context` is not: drive each one from one thread at a time. Give each thread its own `Runtime`.
+> `ThreadWorker` runs a runtime and its contexts on a dedicated thread with its own event loop.
+
+## The rules
+
+- **One thread per context at a time.** A context's wasm store is not safe for concurrent use. The library doesn't
+  lock it for you.
+- **One runtime per thread.** Contexts of one runtime share the runtime's deadline slot, so evaluating on two of
+  them from two threads at once breaks both timeouts (see [Limits](/guide/limits#time)).
+- **Contexts on different runtimes and threads are independent.** The test suite runs many threads, each creating,
+  evaluating and closing its own runtimes and contexts, and checks that host calls always reach the instance that
+  made them.
+
+## ThreadWorker
+
+```python
+from quickjs_rs import Runtime, ThreadWorker
+
+async def run_script(code: str):
+    rt = Runtime()
+    ctx = rt.new_context()
+    try:
+        return await ctx.eval_async(code)
+    finally:
+        ctx.close()
+        rt.close()
+
+async def main():
+    async with ThreadWorker() as worker:
+        value = await worker.run_async(run_script("1 + 2"))
+```
+
+`ThreadWorker` starts one daemon thread with its own asyncio loop on first use. `run_async(coro)` runs a coroutine
+there and returns a future on the caller's loop; `run_sync(coro)` blocks the calling thread instead. Create, use and
+close runtimes and contexts inside coroutines submitted to the same worker, so they never leave its thread. Close
+them before closing the worker: `close()` (sync) or `aclose()` (async) cancels whatever is still running on the
+worker's loop and stops it.
+
+Use it to keep JavaScript off your application's event loop. A CPU-bound script inside `eval_async` blocks the loop
+it runs on until it yields to a host coroutine or hits its timeout.
+
+## Why the shared pieces are shared
+
+Compiling the guest with Cranelift takes tens of milliseconds, so the module is compiled once per process and every
+instance reuses it. The host imports are registered once on a shared linker for a different reason: wasmtime-py
+keeps registered host functions in a process-global table that isn't synchronized, and registering per instance
+corrupted it under concurrent creation and teardown. Registering once touches that table a constant number of times.
+
+A shared import can't close over a particular instance, so it finds the caller through a thread-local: every call
+into the guest records "this instance is running on this thread", and the imports, which only fire during such a
+call and on the same thread, read it back. See [Architecture](/internals/architecture#compiled-once-per-process).

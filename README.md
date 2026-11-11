@@ -2,10 +2,19 @@
 
 Sandboxed JavaScript execution for Python.
 
-JS runs inside a WebAssembly sandbox: [quickjs-ng](https://quickjs-ng.github.io/quickjs/) (a QuickJS fork) via [rquickjs](https://github.com/DelSkayn/rquickjs) is compiled to `wasm32-wasip1` and driven by [wasmtime](https://wasmtime.dev/). The package is pure Python - one universal wheel that bundles the guest `.wasm` artifacts; the only runtime dependency is `wasmtime`. ES modules resolve through a host loader callback; inline TypeScript is type-stripped by a separate OXC-backed transform `.wasm` before QuickJS sees it.
+[quickjs-ng](https://quickjs-ng.github.io/quickjs/) (via [rquickjs](https://github.com/DelSkayn/rquickjs)) is compiled
+to `wasm32-wasip1` and run by [wasmtime](https://wasmtime.dev/). Every context is its own WebAssembly instance, so
+scripts can't touch Python's memory, and they reach the outside world only through functions you register. Inline
+TypeScript is type-stripped by a separate OXC-based wasm module. The package is one pure-Python wheel; its only
+runtime dependency is `wasmtime`.
+
+**Documentation: https://langchain-ai.github.io/quickjs-rs/** (source in [`docs/`](docs/)): usage guide,
+architecture, [security model](https://langchain-ai.github.io/quickjs-rs/security) and
+[threat model](https://langchain-ai.github.io/quickjs-rs/security/threat-model).
 
 > [!WARNING]
-> `quickjs-rs` is experimental. Before putting this in production, you should read the [Security](#security) guide.
+> `quickjs-rs` is experimental. Read the [security model](https://langchain-ai.github.io/quickjs-rs/security)
+> before running untrusted code with it.
 
 ## Install
 
@@ -14,10 +23,7 @@ pip install quickjs-rs
 uv add quickjs-rs
 ```
 
-Ships as a single universal pure-Python wheel (`py3-none-any`) — the bundled
-guest is platform-independent WebAssembly, and `wasmtime` supplies the
-per-platform runtime. Requires Python 3.11+; runs anywhere `wasmtime` has a
-wheel (Linux, macOS, Windows; x86_64 + arm64).
+Python 3.11+, anywhere `wasmtime` has a wheel (Linux, macOS, Windows; x86_64 and arm64).
 
 ## Quickstart
 
@@ -26,263 +32,108 @@ from quickjs_rs import Runtime
 
 with Runtime() as rt:
     with rt.new_context() as ctx:
-        assert ctx.eval("1 + 2") == 3
+        assert ctx.eval("[1, 2, 3].map(x => x * 2)") == [2, 4, 6]
 
-        # Register a Python callable as a JS global.
         @ctx.function
-        def greet(name: str) -> str:
-            return f"hi {name}"
-        assert ctx.eval("greet('world')") == "hi world"
+        def lookup(user_id: int) -> dict:
+            return {"id": user_id, "name": "Ada"}
+
+        assert ctx.eval("lookup(7).name") == "Ada"
 ```
 
-Async + top-level `await`:
+Async host functions and top-level `await`:
 
 ```python
 import asyncio
+from quickjs_rs import Runtime
 
-async def main():
+async def main() -> None:
     with Runtime() as rt:
-        with rt.new_context() as ctx:
+        with rt.new_context(timeout=2.0) as ctx:
             @ctx.function
-            async def fetch_thing() -> str:
-                await asyncio.sleep(0.01)
-                return "from python"
+            async def search(q: str) -> list[str]:
+                await asyncio.sleep(0.1)
+                return [f"{q}-1", f"{q}-2"]
 
-            result = await ctx.eval_async("await fetch_thing()")
-            assert result == "from python"
+            hits = await ctx.eval_async("""
+                const [a, b] = await Promise.all([search("x"), search("y")]);
+                [...a, ...b].length
+            """)
+            assert hits == 4
 
 asyncio.run(main())
 ```
 
-## Host-controlled clock
+## Features
+
+- **Limits.** `Runtime(memory_limit=...)` caps QuickJS allocations per context (default 64 MiB) and
+  `new_context(timeout=...)` sets a wall-clock budget per eval (default 5 s). Both raise (`MemoryLimitError`,
+  `TimeoutError`) and leave the context usable. [Limits](https://langchain-ai.github.io/quickjs-rs/guide/limits)
+  covers what they don't bound.
+- **ES modules** through a host loader: `rt.set_module_loader(normalize=..., load=...)`. The host owns all resolution
+  policy. [Modules](https://langchain-ai.github.io/quickjs-rs/guide/modules-and-typescript)
+- **TypeScript.** Modules named `.ts`/`.mts`/`.cts`/`.tsx` are type-stripped before QuickJS sees them; evals can opt in
+  with `transform_flags`. No type checking.
+- **Snapshots.** `ctx.create_snapshot()` copies the whole guest memory: closures, aliasing and the job queue survive a
+  restore into another context. [Snapshots](https://langchain-ai.github.io/quickjs-rs/guide/snapshots)
+- **Host clock.** `Runtime(clock=lambda: ns)` backs every guest clock, which also fixes `Math.random()`'s seed.
 
 ```python
-with Runtime(clock=lambda: 1_700_000_000_250_000_000) as rt:
-    with rt.new_context() as ctx:
-        assert ctx.eval("Date.now()") == 1_700_000_000_250
-        value = ctx.eval("Math.random()")  # same value on every run
-```
-
-`clock` returns **integer nanoseconds since the Unix epoch** and backs every
-WASI clock the guest reads. It defaults to `None`, which keeps native WASI at no
-extra cost. Invalid values and exceptions reach the guest as WASI errors.
-
-- A fixed clock fixes `Date.now()` and `Math.random()`: QuickJS seeds
-  `Math.random()` from the clock when each context is created. Sibling contexts
-  under a frozen clock get the same sequence; use a stepping clock if they
-  should differ. Clock-seeded randomness is not for secrets.
-- Snapshots keep the `Math.random()` state; a restored context reads the
-  destination runtime's clock.
-
-## ES modules
-
-Supply modules through a host loader callback pair: `normalize(base, specifier)` resolves an import to a canonical name, and
-`load(name)` returns the source. The host owns all resolution policy — there is
-no built-in scope model.
-
-```python
-import posixpath
-from quickjs_rs import Runtime
-
-sources = {
-    "@agent/config": "export const MAX_RETRIES = 3;",
-    "@agent/utils": "export { slugify } from './strings.js';",
-    "@agent/utils/strings.js":
-        "export const slugify = s => s.toLowerCase().replace(/ /g, '-');",
-}
-
-def normalize(base, spec):
-    if not spec.startswith("."):
-        return spec                       # bare name → canonical name
-    base_dir = base if "." not in posixpath.basename(base) else posixpath.dirname(base)
-    return posixpath.normpath(posixpath.join(base_dir, spec))  # relative → joined
-
-with Runtime() as rt:
-    rt.set_module_loader(normalize=normalize, load=sources.get)
-    with rt.new_context() as ctx:
-        assert await ctx.eval_async("""
-            const { slugify } = await import("@agent/utils");
-            const { MAX_RETRIES } = await import("@agent/config");
-            slugify("Hello World") + '/' + MAX_RETRIES;
-        """) == "hello-world/3"
-```
-
-`normalize` is where sandboxing lives — return `None` to refuse a specifier.
-
-## TypeScript
-
-Module sources whose canonical name ends in `.ts`, `.mts`, `.cts`, or `.tsx` are
-type-stripped by the host transform adapter before evaluation. Enums,
-namespaces, and parameter properties are transformed; plain type annotations
-erase. No type checking — run `tsc --noEmit` separately for that.
-
-```python
-# A canonical name ending in .ts/.tsx is stripped before QuickJS sees it.
-ts_sources = {
-    "util.ts": """
-        export enum Mode { Strict = 1, Loose = 2 }
-        export function slug(s: string, mode: Mode): string {
-            return s.toLowerCase().replace(/ /g, mode === Mode.Strict ? '_' : '-');
-        }
-    """,
-}
-
-with Runtime() as rt:
-    rt.set_module_loader(load=ts_sources.get)
-    with rt.new_context() as ctx:
-        assert await ctx.eval_async(
-            "const { slug, Mode } = await import('util.ts');"
-            "slug('Hello World', Mode.Strict)"
-        ) == "hello_world"
-```
-
-A TypeScript parse error surfaces as a module-load error rather than at eval.
-
-Transform flags are also public for hosts that need a different policy. Runtime
-flags apply to top-level eval calls and module-loaded sources:
-
-```python
-from quickjs_rs import Runtime, SourceTransform
-
-with Runtime(transform_flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR) as rt:
-    with rt.new_context() as ctx:
-        ctx.eval("const exposed = 1;")
-        assert ctx.eval("globalThis.exposed") == 1
-```
-
-For TypeScript sources, choose the source kind explicitly:
-
-```python
-from quickjs_rs import Runtime, SourceTransform
-
-with Runtime(transform_flags=SourceTransform.SOURCE_TS | SourceTransform.STRIP_TYPESCRIPT) as rt:
-    with rt.new_context() as ctx:
-        assert ctx.eval("const value: number = 2; value") == 2
-```
-
-Eval calls can override the runtime policy:
-
-```python
-ctx.eval("const scoped = 1;", transform_flags=SourceTransform.NONE)
-```
-
-Module loaders can also override the runtime policy per canonical module name.
-For example, this enables the extra top-level `const` to `var` rewrite while
-keeping the default TypeScript/TSX module behavior:
-
-```python
-from quickjs_rs import SourceTransform, default_module_transform_flags
-
-def transform_flags(name):
-    return default_module_transform_flags(name) | SourceTransform.TOP_LEVEL_CONST_TO_VAR
-
-rt.set_module_loader(load=sources.get, transform_flags=transform_flags)
-```
-
-Policy precedence is: per-eval `transform_flags`, then module-loader
-`transform_flags`, then runtime `transform_flags`, then the default module
-TypeScript/TSX policy. Pass `SourceTransform.NONE` to disable transforms
-explicitly.
-
-For one-off transforms outside module loading, use `transform_source()`:
-
-```python
-from quickjs_rs import SourceTransform, transform_source
-
-js = transform_source(
-    "plain.js",
-    "export const value = 1;",
-    flags=SourceTransform.TOP_LEVEL_CONST_TO_VAR,
-)
-```
-
-## Snapshots
-
-A snapshot captures the **entire** guest heap — every object, the atom table,
-the job queue, closures, and pending promises — as a flat image, and
-reconstitutes it into a fresh context. Because it's the whole VM memory,
-aliasing and closure state survive exactly.
-
-```python
+import asyncio
 from quickjs_rs import Runtime, Snapshot
 
+sources = {"@agent/util.ts": "export const slug = (s: string): string => s.toLowerCase().replace(/ /g, '-');"}
+
+async def main() -> None:
+    with Runtime() as rt:
+        rt.set_module_loader(load=sources.get)
+        with rt.new_context() as ctx:
+            assert await ctx.eval_async(
+                "const { slug } = await import('@agent/util.ts'); slug('Hello World')"
+            ) == "hello-world"
+
+asyncio.run(main())
+
 with Runtime() as rt:
     with rt.new_context() as ctx:
-        ctx.eval("""
-            const shared = { count: 1 };
-            const a = shared, b = shared;
-            const counter = (() => { let n = 0; return () => ++n; })();
-        """)
+        ctx.eval("const counter = (() => { let n = 0; return () => ++n; })(); counter();")
         payload = ctx.create_snapshot().to_bytes()
-
-with Runtime() as rt2:
-    with rt2.new_context() as ctx2:
-        rt2.restore_snapshot(Snapshot.from_bytes(payload), ctx2)
-        assert ctx2.eval("a === b") is True       # aliasing preserved
-        assert ctx2.eval("counter()") == 1        # closure state preserved
+    with rt.new_context() as ctx2:
+        rt.restore_snapshot(Snapshot.from_bytes(payload), ctx2)
+        assert ctx2.eval("counter()") == 2
 ```
 
-A snapshot must be taken at a quiescent point (no in-flight `eval_async`, no
-pending async host calls); `create_snapshot_async()` is the async-context form.
-Restore validates a fail-closed header — including a `build_id` that **rejects a
-snapshot taken from a different guest build** — before writing the image. Treat
-snapshot bytes as trusted input (see [Security](#security)).
+## Security in brief
 
-```python
-snap = await ctx.create_snapshot_async()
-rt.restore_snapshot(snap, other_ctx, inject_globals=True)
-```
+- **The wasm sandbox is the boundary.** A bug in QuickJS stays inside the guest's linear memory. The remaining escape
+  path is a wasmtime or Cranelift bug: keep `wasmtime` current, and add process or container isolation for hostile
+  multi-tenant workloads.
+- **Host functions are capabilities.** Untrusted code can call everything you register, with any arguments. Validate
+  inputs and budget calls inside them.
+- **Limits have gaps.** The timeout doesn't count time spent awaiting host calls and can't interrupt a blocking sync
+  host function. Deep recursion traps the instance (`wasmtime.Trap`) instead of raising a `QuickJSError`; discard the
+  context. On 0.2.6 and earlier, `memory_limit` undercounts allocations badly; later releases count real sizes.
+- **Snapshots are trusted input.** Restore checks the image came from the same guest build, but images aren't signed:
+  a crafted image is arbitrary guest state. Store them with integrity protection and don't restore untrusted ones.
+- **Use one `Runtime` per tenant and per thread.** Contexts never share memory, but a runtime shares its loader, clock
+  and timeout slot.
 
-## Security
-
-- **The WebAssembly sandbox is the isolation boundary.** JS executes inside the
-  guest's wasm linear memory; quickjs-ng never sees a host pointer and cannot
-  read or write Python's address space. A bug in the JS engine is contained
-  within the sandbox, not a path to host-memory compromise — this is the
-  central reason JS runs in wasm rather than as a native extension.
-
-- **The residual runtime-escape risk is wasmtime itself.** wasmtime executes the
-  guest in-process, so a vulnerability in wasmtime / Cranelift (the JIT) is the
-  one path that could cross the sandbox boundary. Keep `wasmtime` updated. For
-  hostile multi-tenant workloads where you must defend against an active
-  runtime-attacker, add process/container isolation on top and recycle on
-  timeout/OOM — the sandbox raises the bar but does not replace defense in depth.
-
-- **Registered host callbacks are capability boundaries.** Anything you expose to
-  JS via `ctx.register(...)` is reachable by the sandboxed code; treat every such
-  callback as privileged when running untrusted JS. The sandbox contains the
-  engine, not the capabilities you hand it.
-
-- **Resource limits are enforced** — `Runtime(memory_limit=...)` caps heap, a
-  per-eval timeout interrupts runaway JS (the instance survives), and a runaway
-  recursion is contained by the sandbox (it traps the wasm instance rather than
-  the host; see the [threat model](.github/THREAT_MODEL.md) for the wasi
-  stack-check caveat).
-
-- **Each `Context` is its own isolated wasm instance** — separate linear memory,
-  no shared globals/modules. Still, use one `Runtime` per trust domain.
-
-- **Snapshots are trusted input.** A whole-memory snapshot is an arbitrary guest
-  heap image. Restore validates a fail-closed header (incl. a `build_id` that
-  rejects a snapshot taken from a different guest build), but a same-build
-  *crafted* image is not made safe by that check — do not restore snapshots from
-  an untrusted source, and do not restore across guest builds.
-
+Details: [security model](https://langchain-ai.github.io/quickjs-rs/security),
+[threat model](https://langchain-ai.github.io/quickjs-rs/security/threat-model).
 
 ## Development
 
 ```bash
-# Build the wasm guests (needs the Rust toolchain + the wasm target):
-#   rustup target add wasm32-wasip1
-python scripts/build_guest.py        # cargo build -> quickjs_rs/_guest.wasm + _transform.wasm
+# Build the wasm guests (needs Rust + `rustup target add wasm32-wasip1`):
+python scripts/build_guest.py        # -> quickjs_rs/_guest.wasm + _transform.wasm
 
-# Dev install (pure-Python package; wasm is bundled above).
 pip install -e ".[dev]"
-
-# Run tests, type-check, lint.
 pytest
 mypy quickjs_rs
 ruff check
+
+# Docs site (Node 26+, pnpm via corepack or pnpm/action-setup):
+cd docs && pnpm install && pnpm dev
 ```
 
 ## License

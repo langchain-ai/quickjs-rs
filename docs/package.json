@@ -1,0 +1,17 @@
+{
+  "name": "quickjs-rs-docs",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "packageManager": "pnpm@11.26.0",
+  "scripts": {
+    "dev": "macaw-docs dev .",
+    "build": "macaw-docs build .",
+    "preview": "macaw-docs preview ."
+  },
+  "devDependencies": {
+    "macaw-docs": "workspace:*"
+  }
+}

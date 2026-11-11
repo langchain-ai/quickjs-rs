@@ -1,0 +1,154 @@
+---
+title: Architecture
+description: The two wasm modules, the shared engine, and why every context is its own instance.
+---
+
+> **In short.** quickjs-rs is a pure-Python package that drives two WebAssembly modules through wasmtime-py: a
+> QuickJS guest (rquickjs 0.12 over quickjs-ng, built for `wasm32-wasip1`) and an OXC-based TypeScript transform.
+> Both are compiled once per process. Every `Context` gets its own wasmtime `Store` and instance, so its JS heap is a
+> separate linear memory. Everything that crosses between Python and JS goes through a small, flat C ABI of
+> integers and `(pointer, length)` pairs.
+
+## The shape of the system
+
+<svg viewBox="0 0 860 420" role="img" aria-label="Python host process containing the public API, the host adapter, a shared wasmtime engine, and one wasm instance per context" style={{ width: "100%", height: "auto", margin: "1.5rem 0" }}>
+  <g fill="none" stroke="currentColor" strokeWidth="1.5">
+    <rect x="10" y="10" width="840" height="400" rx="10" strokeDasharray="6 4" />
+    <rect x="30" y="50" width="250" height="90" rx="8" />
+    <rect x="30" y="170" width="250" height="110" rx="8" />
+    <rect x="30" y="310" width="250" height="80" rx="8" />
+    <rect x="330" y="50" width="240" height="340" rx="8" />
+    <rect x="350" y="120" width="200" height="110" rx="6" />
+    <rect x="350" y="250" width="200" height="120" rx="6" />
+    <rect x="610" y="50" width="220" height="150" rx="8" />
+    <rect x="610" y="230" width="220" height="160" rx="8" />
+    <path d="M280 95 H330" />
+    <path d="M280 225 H330" />
+    <path d="M280 350 H330" />
+    <path d="M570 175 H610" />
+    <path d="M570 310 H610" />
+  </g>
+  <g fill="currentColor" fontFamily="inherit" fontSize="13">
+    <text x="24" y="34" fontWeight="600">Python process</text>
+    <text x="45" y="75" fontWeight="600">Public API</text>
+    <text x="45" y="97">Runtime, Context, Handle,</text>
+    <text x="45" y="117">Globals, Snapshot, ThreadWorker</text>
+    <text x="45" y="195" fontWeight="600">Your code</text>
+    <text x="45" y="217">host functions (tools)</text>
+    <text x="45" y="237">module loader: normalize / load</text>
+    <text x="45" y="257">clock callback</text>
+    <text x="45" y="335" fontWeight="600">wasmtime-py</text>
+    <text x="45" y="357">one shared Engine (Cranelift)</text>
+    <text x="45" y="377">compiled modules + Linkers, cached</text>
+    <text x="345" y="75" fontWeight="600">Host adapter (_engine.py)</text>
+    <text x="345" y="97">marshalling, bound-checked reads</text>
+    <text x="365" y="145" fontWeight="600">_Instance (per Context)</text>
+    <text x="365" y="167">Store + instance + memory</text>
+    <text x="365" y="187">name → host function table</text>
+    <text x="365" y="207">sync / async dispatchers</text>
+    <text x="365" y="275" fontWeight="600">env imports (shared)</text>
+    <text x="365" y="297">host_call</text>
+    <text x="365" y="317">host_interrupt</text>
+    <text x="365" y="337">host_module_normalize / load</text>
+    <text x="365" y="357">clock_time_get (clock only)</text>
+    <text x="625" y="75" fontWeight="600">QuickJS guest (_guest.wasm)</text>
+    <text x="625" y="97">one linear memory per context</text>
+    <text x="625" y="117">rquickjs Runtime + Context</text>
+    <text x="625" y="137">handles, deferreds, caches</text>
+    <text x="625" y="157">~55 flat exports</text>
+    <text x="625" y="255" fontWeight="600">Transform (_transform.wasm)</text>
+    <text x="625" y="277">OXC parser + transformer</text>
+    <text x="625" y="297">own Store per context,</text>
+    <text x="625" y="317">created on first transform</text>
+    <text x="625" y="337">TS / TSX stripping,</text>
+    <text x="625" y="357">const → var rewrite</text>
+  </g>
+</svg>
+
+Read it left to right. Your code talks to the public classes, which sit on a pure-Python host adapter
+(`quickjs_rs/_engine.py`). The adapter owns one `_Instance` per context: a wasmtime `Store`, the instantiated guest,
+its exported `memory`, and the tables that route calls coming back out of the guest. Calls go into the guest as
+wasm exports and come back as four `env` imports.
+
+## The package
+
+The wheel is `py3-none-any`: pure Python plus two `.wasm` files built from `crates/` by `scripts/build_guest.py`
+(the wheel build hook runs it; the artifacts are never committed). The only runtime dependency is `wasmtime>=45`,
+which brings the per-platform native runtime. Because the guest is ordinary WebAssembly, the same bytes run on every
+OS and architecture wasmtime supports.
+
+| Artifact | Source | What it is |
+| --- | --- | --- |
+| `_guest.wasm` | `crates/quickjs-wasm` | rquickjs 0.12 (vendoring quickjs-ng) compiled to `wasm32-wasip1` in reactor mode, `opt-level = "z"`, LTO, `panic = "unwind"` |
+| `_transform.wasm` | `crates/quickjs-wasm-transform` | OXC 0.137 parser, semantic analysis, transformer and codegen, same profile |
+
+## Compiled once per process
+
+Compiling the guest with Cranelift costs tens of milliseconds, so it happens once. `quickjs_rs/_wasmtime.py` keeps
+one process-wide `wasmtime.Engine` and a cache of compiled artifacts keyed by name. Each cached artifact holds the
+`Module`, a `Linker`, and a `build_id`: the SHA-256 of the wasm bytes. The `build_id` is what snapshots are checked
+against.
+
+The QuickJS guest's `Linker` is also built once, with the four `env` imports registered on it. This is load-bearing:
+wasmtime-py keeps host functions in a process-global table with no lock, mutated on registration and on
+`Store.close()`. Registering imports per instance raced that table under concurrent create/close across threads and
+corrupted it for the whole process. With a shared linker the table is touched a constant number of times, and
+instantiating a new context just calls `linker.instantiate(store, module)`, which doesn't touch it.
+
+A shared import can't close over a particular instance, so it needs another way to find its caller. That is `_CUR`,
+a thread-local: `_Instance.c()`, the wrapper every export call goes through, sets `_CUR.inst = self` for the
+duration of the call and restores the previous value afterwards. Imports only ever fire re-entrantly during an
+export call on the same thread, so the trampoline reading `_CUR.inst` always reaches the instance that is running.
+Saving and restoring (rather than set and clear) keeps nested calls right: a host function that mints a result
+calls back into the guest, which re-enters `c()`.
+
+A runtime with a `clock` takes a second shared linker that additionally shadows WASI `clock_time_get`. Only those
+instances pay for the Python call on every clock read; the default linker keeps native WASI.
+
+## One instance per context
+
+`Runtime` (and the engine's `QjsRuntime`) is a configuration object and factory, not a QuickJS runtime. It holds
+the memory and stack limits, the clock, the transform policy, the module loader and the interrupt handler, and it
+keeps a weak set of its instances so that later changes (a new loader, `run_gc`, `memory_usage`) fan out to them.
+
+Each `Context` gets a fresh `_Instance`:
+
+1. A new `wasmtime.Store` on the shared engine, with a `WasiConfig` that only inherits stdout and stderr. There are
+   no preopened directories, no environment variables and no arguments.
+2. The shared module instantiated through the right linker; its `memory` and `__stack_pointer` exports are kept
+   for marshalling and snapshots.
+3. `set_memory_limit` and `set_max_stack_size` are called before any eval.
+
+Inside the guest, the QuickJS runtime and context are created lazily by the first export that needs them, and live
+in a thread-local `ENGINE` slot. The runtime uses rquickjs's `RustAllocator`, which records each block's size so
+`JS_SetMemoryLimit` counts real bytes, installs the host-backed module resolver and loader, applies the limits, and
+installs an interrupt handler that calls the `host_interrupt` import. The context is `Context::full`: every standard
+intrinsic, and nothing else (no `console`, no timers, no I/O).
+
+The trade-off is memory: each context starts with about 1.3 MB of linear memory, and the QuickJS intrinsics are
+built per context rather than shared. What it buys is that two contexts cannot reach each other's objects at all,
+and that a context's entire state is one byte array, which is what makes [snapshots](/guide/snapshots) a copy.
+
+## The transform module
+
+TypeScript stripping lives in a separate wasm module so that the QuickJS guest stays small and so that a parser
+failure can't touch a JS heap. Each `_Instance` owns a `SourceTransformer`, which creates its own transform
+`Store` lazily on the first source that needs transforming, and caches results by
+`(build_id, name, sha256(source), flags)`. If a transform call raises, the transformer throws away its store and
+makes a new one next time, since a trap can leave a store unusable. The host decides flags (the transform never
+infers anything from a file name); see [modules and TypeScript](/guide/modules-and-typescript).
+
+## Where the code is
+
+| Path | What lives there |
+| --- | --- |
+| `quickjs_rs/runtime.py`, `context.py`, `handle.py`, `globals.py`, `snapshot.py`, `threading.py` | Public API, async drive loop, error classification |
+| `quickjs_rs/_engine.py` | Host adapter: instances, imports, marshalling, snapshot format |
+| `quickjs_rs/_wasmtime.py` | Shared engine and compiled-artifact cache |
+| `quickjs_rs/_transform.py`, `transforms.py` | Transform adapter and public flags |
+| `crates/quickjs-wasm/src/engine.rs` | Engine lifecycle, limits, interrupt, status codes |
+| `crates/quickjs-wasm/src/handles.rs` | Handles, value constructors and accessors, `eval_code`, JSON paths |
+| `crates/quickjs-wasm/src/hostfn.rs` | Host-function trampoline |
+| `crates/quickjs-wasm/src/promise.rs` | Deferreds, job pump, `eval_async` |
+| `crates/quickjs-wasm/src/modules.rs` | Resolver, loader, module evals |
+| `crates/quickjs-wasm/src/mem.rs`, `error.rs` | Allocation, result buffer, exception channel |

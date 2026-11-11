@@ -1,0 +1,85 @@
+---
+title: The eval lifecycle
+description: What sync and async evals do from entry to result, including the drive loop and error classification.
+---
+
+> **In short.** A sync eval sets the deadline, transforms the source if a policy says so, calls `eval_code`, converts
+> the result, and clears the deadline. An async eval does the same with `eval_async` (or `eval_module_async`), then
+> **drives** the resulting promise: drain microtasks, check the promise, and if it's still pending wait for an async
+> host call to finish, with the clock paused while it waits. Errors are classified on the way out.
+
+## Sync: `eval` and `eval_handle`
+
+1. Refuse if the context is closed. Clear the host-exception side channel and the sync-hit-async flag, and set
+   `in_sync_eval`.
+2. Write `deadline = now + timeout` to `Runtime._deadline`.
+3. Transform the source if the per-call or runtime policy has non-zero flags. A transform error becomes
+   `JSError("SyntaxError", ...)`.
+4. Copy the UTF-8 source into the guest and call `eval_code` (script) or `eval_module` (`module=True`). rquickjs
+   evaluates scripts in strict mode, which is why `strict=` has no effect.
+5. On `STATUS_JS_ERROR`, take the exception and classify it (below). Otherwise convert the result handle to Python
+   (`eval`) or wrap it (`eval_handle`).
+6. Always: clear `in_sync_eval` and the deadline. Then, if an async host function was hit, raise
+   `ConcurrentEvalError` even if the script caught the failure.
+
+No microtasks run in a sync eval.
+
+## Async: `eval_async` and friends
+
+The prologue checks `_eval_async_in_flight` (raising `ConcurrentEvalError` before touching the engine), sets the
+deadline, and opens an `asyncio.TaskGroup`. The initial eval runs **inside** the group so that async host calls made
+during the synchronous part of the script become children of the group, and so cancellation reaches them.
+
+Script mode calls the guest's `eval_async`, which uses `JS_EVAL_FLAG_ASYNC`: top-level `await` works and the result
+is a promise for a `{ value, done }` envelope. Module mode calls `eval_module_async`, which declares, links and
+evaluates the module and returns its evaluation promise, which resolves to `undefined`. If the initial result isn't
+a promise at all, it is returned as is.
+
+### The drive loop
+
+```text
+loop:
+  run_pending_jobs()                     # drain microtasks, at most 100,000 per call
+  state = promise_state(top)             # 0 pending, 1 fulfilled, 2 rejected
+  if fulfilled: return promise_result(top)
+  if rejected:  classify the reason and raise
+  if no async host tasks are pending:
+      if some settles failed: reject them now and loop
+      raise DeadlockError
+  pause the deadline; await the completion event; extend the deadline by the time waited
+  if now >= deadline: raise TimeoutError
+```
+
+Two details matter for limits. The deadline is set to `None` on the `Runtime` while waiting, so nothing is
+interrupted during the wait, and the wait time is added back to the deadline afterwards: awaited host time doesn't
+count. And `execute_pending_jobs` is bounded per call, so a script that keeps queueing microtasks yields back to the
+loop instead of stalling it inside one export call; the interrupt deadline still applies inside each drain.
+
+The epilogue unwraps `.value` from the script envelope (or returns `None` for modules), disposes the top-level
+promise handle, and clears the deadline and the in-flight flag in a `finally`.
+
+`Handle.await_promise()` runs the same loop on an existing promise handle.
+
+## Error classification
+
+Every JS error that reaches an eval boundary goes through `_raise_classified`:
+
+| Condition | Raised |
+| --- | --- |
+| `name == "HostError"`, message is the sanitized one, and a Python exception is stashed | That Python exception, unchanged |
+| `name == "HostError"` otherwise | `quickjs_rs.HostError`, with the stashed exception as `__cause__` if any |
+| `name == "InternalError"`, message contains `interrupted`, deadline passed | `TimeoutError` |
+| Same, deadline not passed | `InterruptError` |
+| `name == "InternalError"`, message contains `out of memory` | `MemoryLimitError` |
+| Anything else | `JSError(name, message, stack)` |
+
+The `InterruptError` row is defensive: the deadline is the only interrupt source, so an interrupt with time left
+means something unexpected happened, and the library says so instead of claiming a timeout. A
+`wasmtime.Trap` (stack exhaustion, a guest bug) is not a JS error and is not classified; it propagates as raised by
+wasmtime.
+
+## Closing
+
+`Context.close()` disposes the globals handle, closes the instance (the transform store, then the QuickJS store),
+and unregisters from the runtime. `Store.close()` frees the store's native state, including the linear memory,
+right away instead of waiting for garbage collection. `Runtime.close()` closes every context it created.

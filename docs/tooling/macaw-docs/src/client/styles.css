@@ -1,0 +1,185 @@
+/*
+ * The single stylesheet entry. Macaw's styles.css ships fonts, tokens, base
+ * rules, Tailwind's preflight, and its precompiled component utilities, so
+ * only Tailwind's theme and utilities layers are imported here; importing all
+ * of `tailwindcss` would emit preflight a second time. See README.
+ */
+@layer theme, base, components, utilities;
+
+@import "@langchain/macaw-components/styles.css";
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+/* Macaw preset → semantic utilities (Tailwind v4 needs an explicit @config). */
+@config "../../tailwind.config.cjs";
+
+/*
+ * Prose for compiled pages. Every selector is wrapped in :where() so it has
+ * zero specificity, and it lives in the components layer, so component and
+ * utility classes always win. Only class-less elements (authored Markdown)
+ * are styled; Macaw components bring their own classes.
+ */
+@layer components {
+  :where(.docs-prose) {
+    @apply text-sm leading-normal text-primary;
+    overflow-wrap: break-word;
+  }
+
+  /* Vertical rhythm between blocks. */
+  :where(.docs-prose > * + *) {
+    @apply mt-space-4;
+  }
+
+  :where(.docs-prose > .docs-block + *),
+  :where(.docs-prose > * + .docs-block) {
+    @apply mt-space-5;
+  }
+
+  /* Headings: sizes follow Macaw's Text variants. */
+  :where(.docs-prose > h1:not([class])) {
+    @apply text-2xl font-medium leading-tight tracking-tighter;
+  }
+
+  :where(.docs-prose > .docs-h2) {
+    @apply mt-space-7 border-t border-muted pt-space-6;
+  }
+
+  :where(.docs-prose > .docs-h2:first-child),
+  :where(.docs-prose > h1 + .docs-h2) {
+    @apply mt-0 border-t-0 pt-0;
+  }
+
+  :where(.docs-prose > .docs-h3) {
+    @apply mt-space-6;
+  }
+
+  :where(.docs-prose > :is(.docs-h2, .docs-h3) + *) {
+    @apply mt-space-3;
+  }
+
+  :where(.docs-prose > :is(h4, h5, h6):not([class])) {
+    @apply mt-space-5 text-sm font-semibold leading-tight tracking-tight;
+  }
+
+  :where(.docs-prose :is(p, ul, ol, blockquote):not([class])) {
+    max-width: 72ch;
+  }
+
+  /* Lists. */
+  :where(.docs-prose :is(ul, ol):not([class])) {
+    @apply flex flex-col gap-space-1 pl-space-5;
+  }
+
+  :where(.docs-prose ul:not([class])) {
+    list-style-type: disc;
+  }
+
+  :where(.docs-prose ol:not([class])) {
+    list-style-type: decimal;
+  }
+
+  :where(.docs-prose li > :is(ul, ol):not([class])) {
+    @apply mt-space-1;
+  }
+
+  :where(.docs-prose li::marker) {
+    @apply text-tertiary;
+  }
+
+  :where(.docs-prose .contains-task-list) {
+    @apply flex flex-col gap-space-1;
+  }
+
+  :where(.docs-prose .task-list-item) {
+    @apply flex items-center gap-space-2;
+  }
+
+  :where(.docs-prose .task-list-item input) {
+    @apply size-4 shrink-0 rounded-xs;
+  }
+
+  /* Checked boxes keep the forms plugin's fill; unchecked ones need an outline. */
+  :where(.docs-prose .task-list-item input:not(:checked)) {
+    @apply border border-default bg-input;
+  }
+
+  :where(.docs-prose li > p:not([class]) + p:not([class])) {
+    @apply mt-space-2;
+  }
+
+  /* Emphasis and inline elements. */
+  :where(.docs-prose :is(strong, b)) {
+    @apply font-semibold text-primary;
+  }
+
+  :where(.docs-prose blockquote:not([class])) {
+    @apply rounded-xs border-l-4 border-default bg-surface-level-2 py-space-2 pl-space-4 pr-space-3 text-secondary;
+  }
+
+  :where(.docs-prose hr:not([class])) {
+    @apply my-space-6 border-t border-muted;
+  }
+
+  :where(.docs-prose img:not([class])) {
+    @apply h-auto max-w-full rounded-lg border border-muted;
+  }
+
+  /* Tables (wrapped by the `table` override). */
+  :where(.docs-table th) {
+    @apply border-b border-default bg-surface-level-2 px-space-3 py-space-2 font-semibold text-primary;
+  }
+
+  :where(.docs-table td) {
+    @apply border-t border-subtle px-space-3 py-space-2 align-top text-secondary;
+  }
+
+  :where(.docs-table tr:first-child td) {
+    @apply border-t-0;
+  }
+
+  :where(.docs-table :is(th, td) + :is(th, td)) {
+    @apply border-l border-subtle;
+  }
+
+  /* Cards: prose inside a card body is supporting copy. */
+  :where(.docs-card-body > p:not([class])) {
+    @apply text-sm leading-normal;
+  }
+
+  :where(.docs-card-body > * + *) {
+    @apply mt-space-2;
+  }
+
+  /* Callout bodies may contain several paragraphs. */
+  :where(.docs-callout p:not([class]) + p:not([class])) {
+    @apply mt-space-2;
+  }
+
+  /* Steps: a numbered vertical procedure drawn with a CSS counter. */
+  :where(.docs-steps) {
+    counter-reset: docs-step;
+  }
+
+  :where(.docs-step) {
+    @apply relative pl-space-8;
+    counter-increment: docs-step;
+  }
+
+  :where(.docs-step)::before {
+    @apply absolute left-0 top-0 flex size-7 items-center justify-center rounded-full border border-default bg-surface-level-2 text-xs font-medium text-secondary;
+    content: counter(docs-step);
+  }
+
+  :where(.docs-step:not(:last-child))::after {
+    @apply absolute border-l border-muted;
+    content: "";
+    /* Centered under the 1.75rem marker; spans the gap-space-6 to the next one. */
+    left: calc(0.875rem - 0.5px);
+    top: 2.25rem;
+    bottom: -1.5rem;
+  }
+
+  :where(.docs-step-title) {
+    @apply flex min-h-7 items-center;
+  }
+}
