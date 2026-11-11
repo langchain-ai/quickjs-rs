@@ -1,0 +1,106 @@
+---
+title: Security model
+description: What the sandbox protects, what it leaves to you, and how to run untrusted code with it.
+sidebar:
+  label: Security model
+---
+
+<Callout type="warning" title="Experimental">
+  quickjs-rs is experimental and has not had an independent security audit. Read this page and the
+  [threat model](/security/threat-model) before running code you don't trust.
+</Callout>
+
+> **In short.** The isolation boundary is the WebAssembly sandbox: JavaScript runs in a guest whose only memory is
+> its own linear memory and whose only way out is a handful of imports the host controls. A bug in QuickJS stays inside one
+> context. What the sandbox does **not** contain is the capabilities you hand the script: every host function is
+> reachable by any code that runs, with arguments the script chooses. Most real risk lives there, in resource
+> limits you leave loose, and in snapshots you restore without knowing where they came from.
+
+## What the sandbox guarantees
+
+These hold for any script, including one that exploits a memory-safety bug in QuickJS:
+
+- **No access to host memory.** The guest can read and write only its own linear memory. Python objects, other
+  contexts and the rest of the process are outside it. The host bounds-checks every read it makes from guest memory
+  and treats pointers and lengths coming out of the guest as untrusted.
+- **No ambient I/O.** The guest is given no preopened directories, no environment variables and no arguments. The
+  JS globals contain no `console`, `print`, `fetch`, timers, `require` or `process`. Its imports are `host_call`,
+  `host_interrupt`, the two module-loader callbacks, and WASI clocks and randomness. Standard output and error are
+  inherited from the host process, but scripts have no API that writes to them.
+- **No cross-context access.** Each `Context` is its own wasm instance with its own memory. Handles are checked
+  against their owning context.
+- **No host strings on failure paths.** When a host function fails, the script sees a fixed
+  `HostError: Host function failed` created by the guest. Exception messages and tracebacks stay in Python.
+- **No self-extended deadline.** The deadline lives in the host. The script can't read it or move it, and the
+  interrupt it triggers can't be caught.
+
+## What the sandbox doesn't cover
+
+- **wasmtime itself.** wasmtime runs the guest in your process. A vulnerability in wasmtime or Cranelift could cross
+  the boundary. This is the residual risk of the design. Keep `wasmtime` current.
+- **Your host functions.** A host function that reads files, runs queries or calls APIs gives those powers to the
+  script. Its arguments are attacker-controlled and its return value becomes attacker-readable.
+- **Your module loader.** `normalize` and `load` receive attacker-chosen specifiers.
+- **Resource use you allow.** CPU, memory and host-call volume are bounded only as far as you configure them, and
+  some resources aren't bounded at all (see [threat model](/security/threat-model#resource-exhaustion)).
+- **Snapshots.** A snapshot is a full memory image with no signature. Restoring one runs whatever state it
+  contains.
+- **Side channels.** Scripts can read the wall clock and `performance.now()` unless you supply a `clock`, and they
+  share a CPU and a process with everything else.
+
+## Running untrusted code
+
+The common case is an agent that writes JavaScript to call tools (programmatic tool calling, or "code mode"). Treat
+the model's code as hostile: prompt injection in any tool result can steer what it writes next.
+
+<Steps>
+  <Step title="Expose the smallest set of tools">
+    Register only the functions the task needs. Never register something general-purpose: a Python `eval`, a shell,
+    raw file or HTTP access, or a function that dispatches to "any tool by name".
+  </Step>
+  <Step title="Validate inside every tool">
+    Treat arguments like an untrusted HTTP request body: check types and ranges against a schema, resolve paths and
+    URLs against an allowlist, and apply the end user's permissions, not the agent's. Assume anything you return is
+    shown to whoever wrote the script.
+  </Step>
+  <Step title="Budget the run">
+    Keep `memory_limit` set (the default is 64 MiB) and a `timeout` that fits the task. Since awaited host time
+    doesn't count toward the timeout, bound the run as a whole with `asyncio.timeout(...)` around `eval_async`.
+    Cap how many times, and how many at once, each tool can be called: a script can start thousands of async calls
+    with one `Promise.all`.
+  </Step>
+  <Step title="Use fresh state">
+    Run each untrusted program in a new context, or in one restored from a snapshot you created. Don't reuse a
+    context across users: globals and prototypes persist between evals.
+  </Step>
+  <Step title="Separate tenants">
+    Use one `Runtime` per tenant or trust domain, so the module loader, clock and limits are never shared. For
+    workloads where you must assume an attacker capable of exploiting wasmtime, add process or container isolation
+    and recycle workers after a timeout, an out-of-memory error, or a trap.
+  </Step>
+  <Step title="Handle every failure">
+    Catch `QuickJSError` and also `wasmtime.Trap` (deep recursion traps instead of raising a JS error). Discard the
+    context after a trap.
+  </Step>
+</Steps>
+
+## Checklist
+
+| Setting | Recommendation |
+| --- | --- |
+| `quickjs-rs` | A release that counts real allocation sizes against `memory_limit` (later than 0.2.6) |
+| `wasmtime` | Latest release; follow wasmtime security advisories |
+| `memory_limit` | Never `None` for untrusted code |
+| `timeout` | Set per task; wrap async evals in an overall `asyncio.timeout` |
+| `clock` | Supply one if scripts shouldn't see real time |
+| Host functions | Minimal, validated, rate- and concurrency-limited |
+| Module loader | `normalize` returns `None` for anything not explicitly allowed |
+| Contexts | One per run; never shared across tenants |
+| Runtimes | One per tenant, one per thread |
+| Snapshots | Only restore images you created, stored with integrity protection |
+| Errors | Catch `QuickJSError` and `wasmtime.Trap`; recycle after traps |
+
+## Reporting a vulnerability
+
+Report vulnerabilities privately through the repository's
+[security page](https://github.com/langchain-ai/quickjs-rs/security), not in a public issue.
