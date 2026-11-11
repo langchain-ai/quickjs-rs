@@ -1,0 +1,112 @@
+---
+title: Host calls
+description: What happens, step by step, when a script calls a Python function, sync or async.
+---
+
+> **In short.** A registered function is a guest-side JS function that captures only its **name**. Calling it mints
+> handles for `this` and the arguments, calls the `host_call` import, and turns whatever handle comes back into the
+> JS result. The host looks the name up in a per-instance table; an unknown name or any Python failure returns `-1`,
+> and the guest throws a fixed `HostError`. An async function returns a promise backed by a guest-side **deferred**
+> that the Python task settles later by id.
+
+## Registration
+
+`ctx.register(name, fn, is_async=...)` does three things:
+
+1. `Context` stores `fn` in `_host_registry` under a fresh integer `fn_id` (never reused).
+2. The adapter records `name → fn_id` in the instance's `name_to_fn_id`, and adds or removes `name` in
+   `async_names`.
+3. It calls the guest's `new_function(name)`, which builds an rquickjs `Function` whose closure holds the name,
+   and installs it as `globalThis[name]` with `set_prop`.
+
+Two consequences follow from the guest only holding a name. The JS function object is ordinary heap state, so it
+survives snapshots, while the Python table is not, so a restored context must register the same names again (see
+[snapshots](/guide/snapshots#what-carries-over-and-what-doesnt)). And registering a name again replaces both the
+global and the table entry.
+
+## A sync call
+
+<Steps>
+  <Step title="Guest: trampoline">
+    The closure mints a transient handle for `this` and one per argument, copies the name and the handle array into
+    scratch buffers, and calls `host_call(name_ptr, name_len, this, argc, argv_ptr)`.
+  </Step>
+  <Step title="Host: look up and read">
+    `_Instance._host_call` reads the name (bounds-checked) and looks it up. Unknown names return `-1`. Each argument
+    handle is converted to a Python value with `allow_opaque=False`, so a function or symbol argument fails the call.
+  </Step>
+  <Step title="Host: guard and dispatch">
+    If the name is async and a sync eval is running, it sets `sync_eval_hit_async` and returns `-1`; the eval later
+    raises `ConcurrentEvalError`. Otherwise `Context._dispatch_host_call` calls your function.
+  </Step>
+  <Step title="Host: result">
+    The return value is marshalled into a new guest handle with `python_to_handle`, which itself calls exports
+    re-entrantly, and that handle is returned to the guest. If anything raised, the exception goes to the
+    side channel (`_last_host_exception`) and the import returns `-1`.
+  </Step>
+  <Step title="Guest: finish">
+    The trampoline frees the transient handles. On `-1` it throws the pending exception if the host set one, or
+    else a fresh `Error` with `name = "HostError"` and the fixed message `"Host function failed"`. Otherwise it takes
+    ownership of the returned handle and returns its value to JS.
+  </Step>
+</Steps>
+
+At the eval boundary, `Context._raise_classified` checks for exactly that shape: name `HostError`, message
+`Host function failed`, and a stashed Python exception. If all three hold, the original exception is raised to the
+caller with its traceback (`raise original from None`). A JS `HostError` with any other message, thrown by script
+code, is raised as a `quickjs_rs.HostError`.
+
+The point of the fixed message is that the host never writes a string into JS on the failure path. Exception
+messages often contain paths, SQL, tokens or user data; none of it reaches the script. The cost is that scripts
+can't branch on why a tool failed. Tools that want to report a reason should return it as a value.
+
+## An async call
+
+<Steps>
+  <Step title="Mint a deferred">
+    For a name in `async_names` (outside sync eval), the host calls `new_promise`. The guest creates a promise with
+    `ctx.promise()`, stores its resolve and reject functions as `Persistent`s in a `DEFERREDS` map under a `u32` id,
+    and returns the promise handle and the id. Ids increment, wrap, and skip `0`.
+  </Step>
+  <Step title="Schedule">
+    The host passes `(fn_id, args, deferred_id)` to `Context._dispatch_async_host_call`, which creates the coroutine
+    and schedules it on the eval's `asyncio.TaskGroup`, recording it in `_pending_tasks` by id. The import returns
+    the promise handle, so JS gets a pending promise immediately. If scheduling fails, the deferred is rejected with
+    the sanitized `HostError` right away.
+  </Step>
+  <Step title="Run">
+    The task awaits your coroutine. The eval's [drive loop](/internals/eval-lifecycle) is meanwhile waiting for any
+    task to finish.
+  </Step>
+  <Step title="Settle">
+    On success the task calls `resolve_pending(id, value)`: marshal the value, then `resolve_deferred`. On failure
+    it stashes the exception and calls `reject_pending` with `HostError` / `Host function failed`. The guest removes
+    the map entry and calls the stored function. An unknown or already-settled id returns `STATUS_BAD_INPUT` and
+    does nothing.
+  </Step>
+  <Step title="Wake">
+    The task removes itself from `_pending_tasks` and sets the completion event. The drive loop drains microtasks,
+    which runs the script's `await` continuation.
+  </Step>
+</Steps>
+
+### When settling fails
+
+If the result can't be delivered (usually because the value doesn't marshal), the task retries the resolve once
+after draining jobs, then falls back to rejecting with the sanitized error, keeping the marshalling error as the
+side-channel exception. If even the rejection fails, the id goes into `_failed_settles`, and the drive loop rejects
+it before it would otherwise report a deadlock, so the caller sees the real cause rather than `DeadlockError`.
+
+### Cancellation
+
+When the task running `eval_async` is cancelled, the drive loop rejects every pending deferred with an error named
+`HostCancellationError` before the `TaskGroup` tears down (so the resolvers are still live), lets the group cancel
+the remaining tasks, then drains jobs once more so `catch` and `finally` blocks run. If the top-level promise ended
+up fulfilled, the script absorbed the cancellation and its value is returned; otherwise `CancelledError` propagates.
+
+## Interrupts
+
+The same import mechanism carries the timeout. QuickJS calls its interrupt handler periodically while executing
+bytecode. The guest's handler calls `host_interrupt`, which calls the runtime's `_interrupt` closure: a comparison
+of `time.monotonic()` against `Runtime._deadline`. A handler that raises counts as "stop", so a broken poll fails
+closed. Because the deadline lives on the `Runtime`, the guest has no way to read or extend it.

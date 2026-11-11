@@ -1,0 +1,82 @@
+---
+title: Design decisions
+description: The choices that shape quickjs-rs, what each one costs, and the alternatives that were not taken.
+---
+
+Each entry says what was chosen, why, what it costs, and what else was considered.
+
+## QuickJS in WebAssembly, not a native extension
+
+**Chosen.** quickjs-ng is compiled to `wasm32-wasip1` and run by wasmtime. Earlier versions of quickjs-rs embedded
+quickjs-ng as a PyO3 extension.
+
+**Why.** QuickJS is a C engine. In a native extension, a memory-safety bug reachable from JavaScript is a bug in
+the Python process. Inside wasm, the engine can only address its own linear memory, so the same bug corrupts at
+most one context. It also makes the package one universal wheel: no per-platform builds.
+
+**Cost.** Every crossing goes through wasmtime-py and `ctypes`, which is slower than PyO3 calls; contexts cost a
+linear memory each; and QuickJS's own stack check is compiled out on WASI (see [limits](/guide/limits#stack)).
+wasmtime and Cranelift become the code the isolation depends on.
+
+**Not taken.** Running V8 or another engine in a subprocess (much heavier per run, and process-level isolation is
+still available on top of this design when needed); a pure-Python interpreter (too slow, too far from spec).
+
+## One instance per context
+
+**Chosen.** Each `Context` is a separate wasm instance with its own QuickJS runtime.
+
+**Why.** QuickJS lets several contexts share one runtime and heap, but on the wasm plane the instance is the
+natural unit: one linear memory, one set of globals, one image to snapshot. Separate instances make cross-context
+leaks structurally impossible and make a snapshot a plain memory copy.
+
+**Cost.** About 1.3 MB of memory per context before any script runs, and builtins are initialized per context.
+
+## A flat ABI with handles
+
+**Chosen.** About fifty integer-only exports and four imports; JS values cross as handles (guest pointers).
+
+**Why.** Small on both sides, no code generation, works with wasmtime-py as it is, and keeps one source of truth
+for marshalling in the Python adapter. See [the wasm boundary](/internals/boundary).
+
+**Cost.** Deep values take many crossings, which led to the JSON fast path and its semantic differences (see
+[values](/guide/values#the-json-fast-path)).
+
+## Whole-memory snapshots
+
+**Chosen.** A snapshot is the entire linear memory plus the stack pointer, guarded by a header with the guest's
+`build_id`.
+
+**Why.** Closures, pending promises, aliasing and engine-internal state survive exactly, with no serializer to keep
+in sync with QuickJS. The earlier design serialized selected values and couldn't carry closures.
+
+**Cost.** Images are at least ~1.3 MB and as large as the memory high-water mark; they only load into the exact same
+guest build; they carry every secret the context ever held; and a crafted image is arbitrary guest state, so
+snapshots must be treated as trusted input. They are not signed.
+
+## Sanitized host errors
+
+**Chosen.** Any host-function failure reaches JS as `HostError: Host function failed`; the original exception is
+re-raised to the Python caller if the script doesn't catch it.
+
+**Why.** Exception messages leak paths, queries and secrets. A fixed string authored by the guest means nothing from
+the host's failure path is ever readable by the script.
+
+**Cost.** Scripts can't distinguish failure reasons. Tools that need to report one return it as data.
+
+## The host owns module resolution
+
+**Chosen.** `normalize` and `load` callbacks with no built-in scope or file-system loader.
+
+**Why.** Any built-in policy would be wrong for someone, and a file-system default would be a vulnerability waiting
+to be enabled. With callbacks, refusing is the default (no loader, no modules) and every allow is code the host
+wrote.
+
+## A host clock instead of a seed
+
+**Chosen.** One `clock` callback backs every WASI clock. There is no separate random seed.
+
+**Why.** QuickJS seeds `Math.random()` from the clock when a context is created and never calls WASI `random_get`,
+so a fixed clock already makes `Date.now()` and `Math.random()` reproducible. A second knob would have been
+redundant, and an earlier `random_seed` option was removed for that reason.
+
+**Cost.** Contexts created under a frozen clock share a `Math.random()` sequence.
