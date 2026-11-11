@@ -1,0 +1,124 @@
+---
+title: Limits and the clock
+description: Memory, time and stack limits, how each is enforced, what each does not cover, and the host-controlled clock.
+---
+
+A script can allocate, loop and recurse. quickjs-rs bounds the first two inside the engine and contains the third at
+the sandbox. Each limit has edges worth knowing before you rely on it.
+
+> **In short.** `memory_limit` (64 MiB by default) caps QuickJS's own heap per context, counted at real allocation
+> sizes. `timeout` (5 s by default) is a wall-clock budget for JavaScript execution per eval. Both leave the context
+> usable afterwards. Runaway recursion isn't caught by QuickJS on wasi; it traps the wasm instance and raises
+> `wasmtime.Trap`. Throw that context away.
+
+## Memory
+
+```python
+with Runtime(memory_limit=8 * 1024 * 1024) as rt, rt.new_context() as ctx:
+    try:
+        ctx.eval("let a = []; while (true) a.push('x'.repeat(50_000) + a.length)")
+    except MemoryLimitError:
+        pass
+    ctx.eval("a = null")
+    assert ctx.eval("1 + 1") == 2      # the context survives
+```
+
+**How it is enforced.** The limit is QuickJS's `JS_SetMemoryLimit`, applied when the guest creates its quickjs-ng
+runtime. Every allocation QuickJS makes goes through rquickjs's `RustAllocator`, which stores each block's size in a
+header, so the limit counts real bytes. An allocation that would cross it fails, QuickJS throws
+`InternalError: out of memory`, and the eval raises `MemoryLimitError`. Unlike the timeout, this error is
+catchable: a script can `catch` it, drop what it allocated and carry on, and the eval only raises if the error
+reaches it. Either way the script can't hold more than the limit.
+
+On 0.2.6 and earlier the guest used the default allocator, for which quickjs-ng on wasi reports a usable size of 0,
+so each allocation counted as 8 bytes and the limit only stopped single allocations near its size. Workloads that
+were over their limit unnoticed raise `MemoryLimitError` on newer versions.
+
+**What it doesn't cover.**
+
+- **The linear memory as a whole.** quickjs-rs sets no wasmtime memory limit on the store. The limit covers QuickJS's
+  heap; the guest's own Rust allocations (handle boxes, marshalling buffers, the deferred-promise table) sit outside
+  it. In practice the linear memory tracks the QuickJS heap plus a little, but nothing caps it below wasm32's 4 GiB.
+- **Memory never shrinks.** Wasm memory can grow but not shrink. After a script peaks at 60 MB and the garbage is
+  collected, the instance still holds 60 MB until the context is closed. Recycle contexts after heavy runs.
+- **The Python side.** Results you marshal out, and the values your host functions build, live in Python memory.
+- **Baseline.** Each context costs its linear memory (about 1.3 MB to start) plus a wasmtime store. The compiled
+  module is shared by the process.
+
+`memory_limit=None` removes the limit entirely.
+
+`rt.memory_usage()` returns QuickJS's counters (`malloc_size`, `malloc_limit`, `obj_count`, ...) summed over the
+runtime's live contexts.
+
+## Time
+
+```python
+with rt.new_context(timeout=0.2) as ctx:
+    try:
+        ctx.eval("while (true) {}")
+    except TimeoutError:
+        pass
+    assert ctx.eval("1 + 2") == 3      # the next eval gets a fresh budget
+```
+
+**How it is enforced.** Each eval writes an absolute deadline (monotonic clock) into its runtime. The guest installs
+QuickJS's interrupt handler, which QuickJS calls periodically while executing bytecode; it calls the `host_interrupt`
+import, which compares the time with the deadline. Once it has passed, QuickJS unwinds the script with an uncatchable
+`InternalError: interrupted` and the eval raises `TimeoutError`. The instance stays usable.
+
+- The default is `new_context(timeout=5.0)`; `eval_async(..., timeout=)` and `await_promise(timeout=)` override it
+  per call. Sync `eval` always uses the context's timeout.
+- In async evals, time spent waiting on host coroutines is excluded (see [Async evaluation](/guide/async)).
+- Marshalling a handle outside an eval sets a deadline too, because getters and `toJSON` are guest code.
+- If the interrupt handler itself fails, it reports "stop": a broken poll fails closed.
+
+**What it doesn't cover.**
+
+- **Host code.** A sync host function or module-loader callback runs in Python while the script is suspended; the
+  script is interrupted only after it returns. Bound host code yourself.
+- **Total wall time of async runs**, by design. Wrap `eval_async` in `asyncio.timeout()` for that.
+- **Concurrent use of one runtime from several threads.** The deadline lives on the `Runtime`, one slot for all its
+  contexts. Two threads evaluating on contexts of the same runtime overwrite and clear each other's deadline. Give
+  each thread its own `Runtime` (see [Threads](/guide/threads)).
+
+## Stack
+
+`Runtime(stack_limit=...)` is passed to QuickJS's `JS_SetMaxStackSize`, but it has no effect on this target:
+quickjs-ng compiles its stack check out for wasi (upstream issue quickjs-ng#774). Deep recursion instead exhausts
+the guest's shadow stack and **traps** the wasm instance:
+
+```python
+try:
+    ctx.eval("function r() { return r() } r()")
+except Exception as e:
+    type(e)     # wasmtime._trap.Trap, not a QuickJSError
+```
+
+The trap stops at the sandbox: the host process is unaffected. But it is not a `QuickJSError`, so code that only
+catches `QuickJSError` will let it through, and the guest's internal state after a trap is not guaranteed even if
+later evals appear to work. Catch it and close the context. There is a strict `xfail` test (`tests/test_limits.py`)
+waiting for a guest patch that restores a catchable `RangeError`.
+
+## The clock
+
+```python
+with Runtime(clock=lambda: 1_700_000_000_250_000_000) as rt, rt.new_context() as ctx:
+    assert ctx.eval("Date.now()") == 1_700_000_000_250
+    first = ctx.eval("Math.random()")       # the same on every run
+```
+
+By default the guest reads the host's real clocks through native WASI: `Date.now()` and `performance.now()` see real
+time. With `clock=`, every WASI clock the guest reads (realtime, monotonic, process and thread CPU time) calls your
+function instead.
+
+- It returns **integer nanoseconds since the Unix epoch**. Non-integers, `bool`s and values outside `[0, 2⁶⁴)` reach
+  the guest as `EINVAL`; an exception as `EIO`.
+- QuickJS seeds `Math.random()` from the clock when a context is created, so a fixed clock fixes both `Date.now()`
+  and `Math.random()`. Sibling contexts under a frozen clock get the **same** random sequence; use a stepping clock if
+  they should differ. Never use `Math.random()` for secrets.
+- WASI `random_get` is never redirected. Only Rust's standard library reads it, for hash seeds; no script can.
+- A snapshot keeps the `Math.random()` state; the restored context reads the destination runtime's clock.
+- Without `clock`, instances use a linker with no override, so the default costs nothing.
+
+A controlled clock is also a security tool: it takes high-resolution timers away from untrusted code. See
+[the threat model](/security/threat-model#t10-timing-and-determinism).

@@ -1,0 +1,97 @@
+---
+title: Async evaluation
+description: eval_async, top-level await, how the timeout is counted, deadlocks, and the one-at-a-time rule.
+---
+
+`eval_async` evaluates a script with top-level `await` and drives it to completion from asyncio: it runs the
+microtask queue, waits for async host calls, and returns the value of the last expression.
+
+> **In short.** Use `eval_async` whenever a script may call an async host function. Only JavaScript execution counts
+> against the timeout; time spent waiting on host coroutines doesn't. One `eval_async` at a time per context. If the
+> script waits on a promise nothing can settle, you get `DeadlockError` instead of a hang.
+
+## The four async entry points
+
+| Method | Returns |
+| --- | --- |
+| `await ctx.eval_async(code)` | The last expression's value, marshalled. |
+| `await ctx.eval_handle_async(code)` | The same value as a `Handle`. |
+| `await ctx.eval_async(code, module=True)` | `None`; the code is an ES module (see [Modules](/guide/modules-and-typescript)). |
+| `await handle.await_promise()` | A `Handle` to what an existing promise handle settles to. |
+
+All of them take `timeout=` to override the context's default for this call, and `eval_async`/`eval_handle_async`
+take `transform_flags=` and `filename=`.
+
+```python
+value = await ctx.eval_async("""
+    const user = await fetchUser(7);
+    const posts = await fetchPosts(user.id);
+    posts.length
+""", timeout=3.0)
+```
+
+In script mode the value is the completion value of the last statement, as in a REPL. Top-level `const` and `let`
+bindings persist into later evals, exactly like sync `eval`.
+
+## Sync eval doesn't run microtasks
+
+A sync `eval` runs the script and returns. It does not drain the job queue, so `.then` callbacks and the code after an
+`await` don't run until something drives the context:
+
+```python
+ctx.eval("Promise.resolve(1).then(v => globalThis.got = v); 0")
+ctx.eval("typeof got")                      # 'undefined'
+await ctx.eval_async("await null; got")     # 1: the drive loop ran the queued job
+```
+
+If a sync `eval` returns a promise, the result can't be marshalled (`MarshalError`); use `eval_handle` and
+`await_promise()`, or `eval_async`.
+
+## How the timeout is counted
+
+The deadline is set when the call starts. While the script runs, the guest polls it, and once it passes, QuickJS
+throws an uncatchable interrupt and the call raises `TimeoutError`. When the drive loop has nothing to run and waits
+for a host coroutine to finish, it clears the deadline, and when it wakes it extends the deadline by however long it
+waited:
+
+```python
+@ctx.function
+async def slow() -> int:
+    await asyncio.sleep(0.6)
+    return 1
+
+await ctx.eval_async("await slow()", timeout=0.2)   # succeeds: only JS time counts
+```
+
+So `timeout` bounds CPU-bound JavaScript, not the total wall time of a run. Bound total time from the caller, with
+`asyncio.timeout(...)` around the `eval_async`, which cancels it (see cancellation in
+[Host functions](/guide/host-functions#cancellation)), and give each host coroutine its own timeout.
+
+## Deadlocks
+
+If the top-level promise is pending, no microtasks are queued and no async host call is in flight, nothing can ever
+settle it. The drive loop raises `DeadlockError` instead of waiting forever:
+
+```python
+await ctx.eval_async("await new Promise(() => {})")   # DeadlockError
+```
+
+The usual causes are a promise whose `resolve` is never called, or an async Python function that was registered as
+sync because a decorator hid its coroutine marker (pass `is_async=True`).
+
+## One at a time
+
+A second `eval_async` (or `await_promise`) on a context that already has one in flight raises `ConcurrentEvalError`
+immediately, without touching the engine. Use one context per concurrent run; they are cheap.
+
+Snapshots need the same quiet: `create_snapshot()` raises while an `eval_async` is in flight or async host tasks are
+pending.
+
+## Errors
+
+A rejected top-level promise raises the same exceptions as a sync eval: `JSError` for script errors, your original
+exception for an uncaught host failure, `TimeoutError`, `MemoryLimitError`. The drive loop runs inside an asyncio
+`TaskGroup`; when exactly one exception comes out of the group it is re-raised by itself rather than as an
+`ExceptionGroup`.
+
+See [the eval lifecycle](/internals/eval-lifecycle) for the loop step by step.
