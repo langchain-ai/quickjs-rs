@@ -1,0 +1,3 @@
+# Standalone workspace for the docs site; the Python package doesn't use pnpm.
+packages:
+  - tooling/macaw-docs
