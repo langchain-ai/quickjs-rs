@@ -1,0 +1,149 @@
+---
+title: Python API
+description: Every public class and function in quickjs_rs, with signatures and behavior.
+---
+
+Everything below is importable from `quickjs_rs`.
+
+## Runtime
+
+```python
+Runtime(
+    *,
+    memory_limit: int | None = 64 * 1024 * 1024,
+    stack_limit: int | None = 1 * 1024 * 1024,
+    transform_flags: SourceTransform | int | Callable[[str], SourceTransform | int] | None = None,
+    clock: Callable[[], int] | None = None,
+)
+```
+
+Configuration and factory for contexts. Each context it creates gets its own wasm instance with these settings.
+Usable as a context manager.
+
+| Parameter | Meaning |
+| --- | --- |
+| `memory_limit` | QuickJS allocation limit per context, in bytes. `None` disables it. See [limits](/guide/limits#memory). |
+| `stack_limit` | Passed to QuickJS; has no effect on the WASI build. See [limits](/guide/limits#stack). |
+| `transform_flags` | Default source-transform policy for evals and loaded modules. |
+| `clock` | Returns integer nanoseconds since the Unix epoch; backs every guest clock. Must be callable. |
+
+| Method | Behavior |
+| --- | --- |
+| `new_context(*, timeout=5.0) -> Context` | Create a context with its own instance. `timeout` is the default per-eval wall-clock budget in seconds. |
+| `set_module_loader(*, normalize=None, load, transform_flags=None)` | Install the module loader for all current and future contexts. See [modules](/guide/modules-and-typescript). |
+| `create_snapshot(ctx) -> Snapshot` | Same as `ctx.create_snapshot()`. |
+| `async create_snapshot_async(ctx, *, timeout=None) -> Snapshot` | Same as `ctx.create_snapshot_async()`. |
+| `restore_snapshot(snapshot, ctx, *, inject_globals=True)` | Validate, then replace `ctx`'s memory with the image. `inject_globals=False` validates only. |
+| `run_gc()` | Run QuickJS's cycle collector in every live context. |
+| `memory_usage() -> dict[str, int]` | QuickJS memory counters, summed over live contexts. |
+| `close()` | Close every context, then the runtime. Idempotent. |
+
+`ctx` arguments must be contexts of this runtime; otherwise `QuickJSError`.
+
+## Context
+
+Created by `Runtime.new_context()`. Usable as a context manager.
+
+### Evaluation
+
+| Method | Returns |
+| --- | --- |
+| `eval(code, *, module=False, strict=False, filename="<eval>", transform_flags=None)` | Completion value, marshalled. |
+| `eval_handle(code, *, module=False, strict=False, filename="<eval>", transform_flags=None)` | Completion value as a `Handle`. |
+| `async eval_async(code, *, module=False, strict=False, filename="<eval>", timeout=None, transform_flags=None)` | Settled value, marshalled. `None` when `module=True`. |
+| `async eval_handle_async(...)` (same parameters) | Settled value as a `Handle`. |
+
+- Scripts always run in strict mode; `strict` has no effect.
+- `filename` is the name passed to a callable `transform_flags` policy.
+- `timeout` (async only) overrides the context default for this call. Awaited host time isn't counted.
+- `transform_flags` overrides the runtime policy for this call; `SourceTransform.NONE` disables transforms.
+- Sync evals raise `ConcurrentEvalError` if an async host function is called; async evals raise it if another
+  async eval or `await_promise` is in flight on the context.
+
+### Host functions
+
+| Method | Behavior |
+| --- | --- |
+| `register(name, fn, *, is_async=None) -> fn` | Install `fn` as global `name`. `is_async=None` auto-detects coroutine functions. Returns `fn`. |
+| `function(fn=None, *, name=None, is_async=None)` | Decorator form; the JS name defaults to `fn.__name__`. |
+
+### Other
+
+| Member | Behavior |
+| --- | --- |
+| `globals` | A `Globals` proxy for `globalThis`. |
+| `create_snapshot() -> Snapshot` | Whole-memory snapshot. Raises if an async eval or host task is in flight, or `NotImplementedError` after a `module=True` eval. |
+| `async create_snapshot_async(*, timeout=None) -> Snapshot` | Same capture, callable from async code. |
+| `close()` | Dispose the globals handle and free the instance. Idempotent. |
+
+## Handle
+
+A reference to a JS value in one context. Dispose it (or use `with`); an undisposed handle emits `ResourceWarning`
+when collected. Every method raises `InvalidHandleError` after `dispose()`, after the context closes, or when given a
+handle from another context.
+
+| Member | Behavior |
+| --- | --- |
+| `type_of` | `"undefined"`, `"null"`, `"boolean"`, `"number"`, `"bigint"`, `"string"`, `"symbol"`, `"object"`, `"array"` or `"function"`. |
+| `is_promise()` | Whether the value is a promise. |
+| `get(key)`, `get_index(i)` | Property or element as a new `Handle`. |
+| `set(key, value)` | Set a property from a Python value or a `Handle`. |
+| `has(key)` | True if the property exists and isn't `undefined`. |
+| `call(*args)`, `call_method(name, *args)`, `new(*args)` | Call, call a method, or construct. Args may be Python values or handles. Returns a `Handle`. |
+| `to_python(*, allow_opaque=False)` | Marshal. With `allow_opaque=True`, unmarshallable leaves become handles (which you must dispose) and the JSON fast path is skipped. |
+| `async await_promise(*, timeout=None) -> Handle` | Drive the promise to settlement like `eval_async`; returns `self` if not a promise. |
+| `dup()` | A second handle to the same value. |
+| `dispose()`, `disposed` | Release the reference (idempotent); check whether released. |
+
+## Globals
+
+`ctx.globals` behaves like a dict without deletion:
+
+| Operation | Behavior |
+| --- | --- |
+| `globals["x"]` | Marshalled value; `None` if missing. `MarshalError` for functions and other unmarshallable values. |
+| `globals["x"] = v` | Set from a Python value or a same-context `Handle`. |
+| `"x" in globals` | Exists and isn't `undefined`. |
+| `globals.get_handle("x")` | The value as a `Handle` (you dispose it). |
+
+## Snapshot
+
+| Member | Behavior |
+| --- | --- |
+| `Snapshot(data: bytes)` | Wrap bytes. No validation until restore. |
+| `Snapshot.from_bytes(data)` | Same, from `bytes`, `bytearray` or `memoryview`. |
+| `to_bytes() -> bytes` | The raw image, header included. |
+
+## ThreadWorker
+
+```python
+ThreadWorker(name: str = "quickjs-worker")
+```
+
+A daemon thread with its own event loop, started on first use.
+
+| Method | Behavior |
+| --- | --- |
+| `run_sync(coro)` | Run `coro` on the worker; block until done. |
+| `run_async(coro)` | Run `coro` on the worker; return an awaitable future on the caller's loop. |
+| `close()` | Stop the loop and join (up to 5 s). |
+| `async aclose()` | Cancel and await the worker's remaining tasks, then stop. |
+
+Supports `with` and `async with`.
+
+## Source transforms
+
+| Name | Behavior |
+| --- | --- |
+| `SourceTransform` | `IntFlag`: `NONE`, `SOURCE_TS`, `SOURCE_TSX`, `STRIP_TYPESCRIPT`, `TOP_LEVEL_CONST_TO_VAR`. |
+| `default_module_transform_flags(name)` | The default policy for a module name: TS for `.ts`/`.mts`/`.cts`, TSX for `.tsx`, else `NONE`. |
+| `transform_source(name, source, *, flags=None) -> str` | Run one transform in a temporary instance. `flags=None` uses the default policy for `name`. |
+
+## Values
+
+| Name | Meaning |
+| --- | --- |
+| `UNDEFINED` | The JS `undefined` value, distinct from `None`. Falsy. |
+| `Undefined` | Its type (a singleton). |
+
+Exceptions are listed in [errors](/reference/errors).
