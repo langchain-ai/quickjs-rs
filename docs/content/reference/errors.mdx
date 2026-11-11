@@ -1,0 +1,57 @@
+---
+title: Errors
+description: The exception hierarchy and how JavaScript errors are classified.
+---
+
+Every error quickjs-rs raises on purpose is a `QuickJSError`, with two exceptions: an uncaught host-function
+failure re-raises your original Python exception, and a wasm trap (deep recursion) surfaces as `wasmtime.Trap`.
+
+## Hierarchy
+
+```text
+QuickJSError
+├── JSError                 name, message, stack
+│   └── HostError           __cause__ is the host exception, when known
+├── MarshalError
+├── InterruptError
+│   └── TimeoutError        shadows the builtin inside quickjs_rs
+├── MemoryLimitError
+├── InvalidHandleError
+├── HostCancellationError
+├── ConcurrentEvalError
+└── DeadlockError
+```
+
+| Exception | Raised when |
+| --- | --- |
+| `JSError` | A script throws and nothing catches it. `name`, `message` and `stack` come from the thrown `Error`; a non-`Error` throw has `name="Error"` and its string value as `message`. |
+| `HostError` | A script throws an error named `HostError` itself, or a host-call failure has no original exception to re-raise. |
+| `MarshalError` | A value can't cross: unsupported Python type, non-`str` dict key, JS function/symbol/promise in a result, or nesting past depth 128 (including cycles). |
+| `InterruptError` | Execution was interrupted but the deadline had not passed (not expected in normal use). |
+| `TimeoutError` | The eval's deadline passed while JS was running. |
+| `MemoryLimitError` | A QuickJS allocation failed against `memory_limit` and the error reached the eval. |
+| `InvalidHandleError` | A handle was used after `dispose()`, after its context closed, or with another context. |
+| `HostCancellationError` | Rejects pending host-call promises when the task running `eval_async` is cancelled. Seen by JS; Python sees `CancelledError` unless the script absorbs it. |
+| `ConcurrentEvalError` | A sync eval or handle call reached an async host function, or a second async eval started on a busy context. |
+| `DeadlockError` | An async eval is pending with no host calls in flight and no jobs to run. |
+
+Python's `ValueError` comes from `restore_snapshot` for a bad magic, format version, `build_id`, size or stack
+pointer; `TypeError` for a non-`Snapshot` argument or a non-callable `clock`; `NotImplementedError` for snapshots of
+module-mode contexts.
+
+## Classification
+
+When a JS error reaches an eval, quickjs-rs reads its `name` and `message` and picks the class:
+
+| `name` | `message` contains | Raised |
+| --- | --- | --- |
+| `HostError` | exactly `Host function failed`, with a recorded host exception | The original Python exception |
+| `HostError` | anything else | `HostError` |
+| `InternalError` | `interrupted`, deadline passed | `TimeoutError` |
+| `InternalError` | `interrupted`, deadline not passed | `InterruptError` |
+| `InternalError` | `out of memory` | `MemoryLimitError` |
+| anything else | | `JSError` |
+
+Because classification is by name and message, a script can choose its class: `throw {name: "InternalError",
+message: "out of memory"}` is raised as `MemoryLimitError`. Don't make security
+decisions on the exception class alone.

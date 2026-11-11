@@ -54,4 +54,4 @@ corrupted it under concurrent creation and teardown. Registering once touches th
 
 A shared import can't close over a particular instance, so it finds the caller through a thread-local: every call
 into the guest records "this instance is running on this thread", and the imports, which only fire during such a
-call and on the same thread, read it back. See [Architecture](/internals/architecture#one-engine-many-instances).
+call and on the same thread, read it back. See [Architecture](/internals/architecture#compiled-once-per-process).

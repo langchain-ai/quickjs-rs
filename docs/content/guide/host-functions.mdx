@@ -74,7 +74,7 @@ loop to drive the coroutine.
 
 There is no limit on how many async calls a script can start at once. `Promise.all(Array.from({ length: 1e5 }, () =>
 search("x")))` schedules 100,000 tasks. Put a semaphore or a per-run budget inside the host function if that matters
-(see [Security](/security#resource-budgets)).
+(see [Security](/security#running-untrusted-code)).
 
 ## Failures
 
