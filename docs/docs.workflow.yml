@@ -1,3 +1,4 @@
+# Move to .github/workflows/docs.yml (the bot push that added this file cannot write workflows).
 name: docs
 
 # Builds the docs site (docs/, a Macaw static MDX site) on every PR that
