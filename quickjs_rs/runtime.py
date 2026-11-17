@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any, cast
@@ -62,8 +63,16 @@ class Runtime:
         self._contexts: list[Any] = []  # list[Context] once step 2 lands
 
         # Per-eval deadline slot (monotonic-clock absolute time, seconds).
-        # Context writes it before eval, clears it after.
+        # Context writes it before eval, clears it after; the setter hands it
+        # to the guest, which checks it without calling back into Python.
         self.__deadline: float | None = None
+
+        def _interrupt() -> bool:
+            # Hot-loop poll for instances with a host clock only.
+            d = self.__deadline
+            return d is not None and time.monotonic() >= d
+
+        self._engine_rt.set_interrupt_handler(_interrupt)
 
     @property
     def _deadline(self) -> float | None:

@@ -233,6 +233,10 @@ def _tramp_host_call(name_ptr: int, name_len: int, this: int, argc: int, argv_pt
     return cast("_Instance", _CUR.inst)._host_call(name_ptr, name_len, this, argc, argv_ptr)
 
 
+def _tramp_host_interrupt() -> int:
+    return cast("_Instance", _CUR.inst)._host_interrupt()
+
+
 def _tramp_host_module_normalize(
     base_ptr: int, base_len: int, spec_ptr: int, spec_len: int, out_len_ptr: int
 ) -> int:
@@ -281,6 +285,10 @@ def _build_shared_linker(engine: wasmtime.Engine, *, hosted: bool = False) -> wa
     # env.host_call(name_ptr, name_len, this, argc, argv_ptr) -> ret_handle
     linker.define_func(
         "env", "host_call", wasmtime.FuncType([i32()] * 5, [i32()]), _tramp_host_call
+    )
+    # env.host_interrupt() -> i32 (nonzero = stop). Hot-loop poll.
+    linker.define_func(
+        "env", "host_interrupt", wasmtime.FuncType([], [i32()]), _tramp_host_interrupt
     )
     # env.host_module_normalize(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> name_ptr
     linker.define_func(
@@ -354,6 +362,11 @@ class _Instance:
         self.store.set_wasi(wasi)
         self.clock = clock
 
+        # Interrupt poll: a callable () -> bool the host_interrupt import calls
+        # from the guest's hot loop (set by QjsRuntime; None = never interrupt).
+        # MUST be O(1) — it fires very frequently during JS execution.
+        self.interrupt_handler: Callable[[], bool] | None = None
+
         # Instantiate the SHARED precompiled module via a SHARED linker (no
         # recompile, no per-instance import registration — ~0.3ms). Only an
         # instance with a host clock takes the hosted linker; every other
@@ -367,15 +380,15 @@ class _Instance:
         # __stack_pointer global — captured/restored as part of a snapshot (§6).
         self.sp = cast(wasmtime.Global, e["__stack_pointer"])
         self._exports = e
-        # Host address of the guest's interrupt flag. Wasmtime reserves the
-        # whole 4 GiB range for a 32-bit memory up front, so the base never
-        # moves and the deadline timer can write the flag from its own thread
-        # without running anything inside the guest.
-        base = ctypes.addressof(self.mem.data_ptr(self.store).contents)
-        self._interrupt_flag = ctypes.c_int32.from_address(base + self.c("interrupt_flag_ptr"))
-        # Held by the watchdog's write and by close(), so the flag is never
-        # written after store.close() frees the memory.
-        self._flag_lock = threading.Lock()
+        # Host view of the guest's DeadlineSlot (dirty i32, host_poll i32,
+        # timeout_ns i64). Wasmtime reserves a 32-bit memory's whole range up
+        # front, so the base never moves.
+        slot = ctypes.addressof(self.mem.data_ptr(self.store).contents) + self.c(
+            "deadline_slot_ptr"
+        )
+        self._deadline_dirty = ctypes.c_int32.from_address(slot)
+        self._deadline_host_poll = ctypes.c_int32.from_address(slot + 4)
+        self._deadline_ns = ctypes.c_int64.from_address(slot + 8)
         # Set true once a module-mode eval runs — module snapshot is V1-guarded.
         self.module_touched = False
 
@@ -439,10 +452,9 @@ class _Instance:
         all that's needed — the other handles (`inst`/`mem`/`sp`) become inert
         (use raises `ValueError`) and are reclaimed with the wrapper. Idempotent.
         """
-        with self._flag_lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
         try:
             self.source_transformer.close()
         finally:
@@ -562,10 +574,32 @@ class _Instance:
             # inside JS.
             return HOST_CALL_ERROR
 
-    def set_interrupted(self, on: bool) -> None:
-        with self._flag_lock:
-            if not self._closed:
-                self._interrupt_flag.value = 1 if on else 0
+    def set_deadline(self, deadline: float | None) -> None:
+        """Hand the guest its deadline by writing the slot in linear memory.
+        A host clock makes WASI's clock a host callback, so those instances
+        keep polling `host_interrupt` while a deadline is set."""
+        if self._closed:
+            return
+        hosted = self.clock is not None
+        if deadline is None or hosted:
+            self._deadline_ns.value = -1
+        else:
+            self._deadline_ns.value = max(0, int((deadline - time.monotonic()) * 1e9))
+        self._deadline_host_poll.value = 1 if hosted and deadline is not None else 0
+        self._deadline_dirty.value = 1
+
+    # -- interrupt poll --
+    def _host_interrupt(self) -> int:
+        # Hot-loop poll: keep it O(1). Returns 1 to interrupt (deadline passed).
+        h = self.interrupt_handler
+        if h is None:
+            return 0
+        try:
+            return 1 if h() else 0
+        except Exception:
+            # A failing handler must not wedge the guest loop; treat as "stop"
+            # so a broken poll fails closed rather than spinning forever.
+            return 1
 
     # -- deferred promises (async host calls) --
     def _new_deferred(self) -> tuple[int, int]:
@@ -1230,9 +1264,7 @@ class QjsRuntime:
         self._stack_limit = stack_limit
         self._transform_flags = transform_flags
         self._closed = False
-        self._deadline: float | None = None
-        self._deadline_cv = threading.Condition()
-        self._watchdog: threading.Thread | None = None
+        self._interrupt_handler: Callable[[], Any] | None = None
         self._module_normalize: Callable[[str, str], str | None] | None = None
         self._module_load: Callable[[str], str | None] | None = None
         self._module_transform_flags: int | Callable[[str], int] | None = None
@@ -1250,42 +1282,31 @@ class QjsRuntime:
         inst.module_load = self._module_load
         inst.runtime_transform_flags = self._transform_flags
         inst.module_transform_flags = self._module_transform_flags
+        inst.interrupt_handler = self._interrupt_handler
         # Apply resource limits BEFORE any eval (the first eval creates the
         # guest runtime, which reads these). set_*_limit is idempotent.
         if self._memory_limit is not None:
             inst.c("set_memory_limit", self._memory_limit)
         if self._stack_limit is not None:
             inst.c("set_max_stack_size", self._stack_limit)
-        with self._deadline_cv:
-            self._instances.add(inst)
+        self._instances.add(inst)
         return inst
 
-    def set_deadline(self, deadline: float | None) -> None:
-        """Arm (or clear) the wall-clock deadline for every instance. One
-        watchdog thread sets the guest's interrupt flag when it passes; QuickJS
-        reads the flag on its hot loop, so no Python runs while JS spins."""
-        with self._deadline_cv:
-            self._deadline = deadline
-            for inst in self._instances:
-                inst.set_interrupted(False)
-            if deadline is not None and self._watchdog is None:
-                self._watchdog = threading.Thread(
-                    target=self._watch_deadline, name="quickjs-deadline", daemon=True
-                )
-                self._watchdog.start()
-            self._deadline_cv.notify()
+    def set_interrupt_handler(self, handler: Callable[[], Any]) -> None:
+        # The runtime.py _interrupt closure: () -> bool, reads self._deadline.
+        # Route it to every existing + future instance's hot-loop poll.
+        self._interrupt_handler = handler
+        for inst in self._instances:
+            inst.interrupt_handler = handler
 
-    def _watch_deadline(self) -> None:
-        with self._deadline_cv:
-            while not self._closed:
-                d = self._deadline
-                left = None if d is None else d - time.monotonic()
-                if left is not None and left <= 0:
-                    for inst in self._instances:
-                        inst.set_interrupted(True)
-                    self._deadline = None
-                    continue
-                self._deadline_cv.wait(left)
+    def set_deadline(self, deadline: float | None) -> None:
+        for inst in self._instances:
+            inst.set_deadline(deadline)
+
+    def clear_interrupt_handler(self) -> None:
+        self._interrupt_handler = None
+        for inst in self._instances:
+            inst.interrupt_handler = None
 
     def run_gc(self) -> None:
         """Run QuickJS cycle GC on every live context's heap. Each context is
@@ -1331,9 +1352,7 @@ class QjsRuntime:
             inst.module_transform_flags = transform_flags
 
     def close(self) -> None:
-        with self._deadline_cv:
-            self._closed = True
-            self._deadline_cv.notify()
+        self._closed = True
 
     def is_closed(self) -> bool:
         return self._closed

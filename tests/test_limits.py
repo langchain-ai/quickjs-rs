@@ -29,7 +29,7 @@ def test_memory_limit_counts_many_small_allocations() -> None:
 
 
 def test_timeout_terminates_infinite_loop() -> None:
-    """wall-clock deadline (guest interrupt flag) kicks QuickJS out of
+    """wall-clock deadline (checked in the guest) kicks QuickJS out of
     an infinite loop within the configured budget."""
     with Runtime() as rt:
         with rt.new_context(timeout=0.2) as ctx:
@@ -65,7 +65,8 @@ with Runtime() as rt, rt.new_context(timeout=10) as ctx:
 def test_async_exception_during_busy_eval_does_not_crash() -> None:
     """An exception raised into a thread mid-eval (Temporal's deadlock
     detector, Ctrl-C) used to land in a host callback's entry and segfault.
-    Busy JS now runs no host code, so it surfaces after the eval returns.
+    The guest checks the deadline itself, so busy JS runs no host code and
+    the exception surfaces after the eval returns.
     Runs in a subprocess so a regression fails the test, not the suite."""
     proc = subprocess.run(
         [sys.executable, "-c", _ASYNC_EXC_DURING_BUSY_EVAL], capture_output=True, timeout=30
