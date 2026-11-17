@@ -136,18 +136,18 @@ Use exception classes to decide how to report a failure, not to decide what the 
 ## Checklist for untrusted code
 
 <Steps>
-  <Step title="Register the fewest tools you can">
+  <Step title="Register the fewest host functions you can">
     Register only what the task needs. Never register a general-purpose function: a Python `eval`, a shell, raw file
-    or HTTP access, or a function that calls "any tool by name".
+    or HTTP access, or a function that calls "any function by name".
   </Step>
-  <Step title="Validate inside every tool">
+  <Step title="Validate inside every host function">
     Check types and ranges, resolve paths and URLs against an allowlist, and enforce the end user's permissions.
     Assume the script's author sees everything you return.
   </Step>
   <Step title="Budget the run">
     Keep `memory_limit` set and pick a `timeout` that fits the task. Wrap `eval_async` in `asyncio.timeout()` to bound
     total time, because awaited host calls do not count against `timeout`. Cap how often, and how many at once, each
-    tool can run.
+    host function can run.
   </Step>
   <Step title="Start from clean state">
     Run each untrusted program in a new context, or in one restored from a snapshot you made.

@@ -1,6 +1,6 @@
 ---
 title: Host functions
-description: Expose Python functions to JavaScript as tools, sync or async, and control what scripts see when they fail.
+description: Expose Python functions to JavaScript, sync or async, and control what scripts see when they fail.
 ---
 
 A host function is a Python function that scripts can call. It is the only way a script reaches anything outside the
@@ -193,10 +193,10 @@ asyncio.run(main())
 If the script handles the cancellation and returns a value, `eval_async` returns it. Otherwise `eval_async` raises
 `asyncio.CancelledError`.
 
-## Budget your tools
+## Budget your host functions
 
 quickjs-rs does not limit how many host calls a script makes, or how many run at once. A script can start 100,000 async
-calls with one `Promise.all`. Put the limit inside the tool:
+calls with one `Promise.all`. Put the limit inside the host function:
 
 ```python
 import asyncio
