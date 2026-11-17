@@ -150,7 +150,8 @@ export function macawDocs(config: ResolvedDocsConfig): PluginOption[] {
               title: documentTitle(undefined, site.title),
               description: site.description,
               theme: site.theme,
-              scripts: [path.posix.join(config.base, "@fs", CLIENT_ENTRY.split(path.sep).join("/"))],
+              // transformIndexHtml adds `base` to root-relative URLs, so leave it off here.
+              scripts: [path.posix.join("/@fs", CLIENT_ENTRY.split(path.sep).join("/"))],
             });
             res.statusCode = 200;
             res.setHeader("Content-Type", "text/html");
