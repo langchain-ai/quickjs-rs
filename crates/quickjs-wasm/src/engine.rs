@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::modules::{HostLoader, HostResolver};
 use rquickjs::allocator::RustAllocator;
@@ -25,13 +26,15 @@ pub const STATUS_BAD_INPUT: i32 = 2;
 pub const STATUS_PANIC: i32 = 3;
 pub const STATUS_NO_ENGINE: i32 = 4;
 
-extern "C" {
-    /// Host interrupt poll. Returns nonzero when the host wants
-    /// execution to stop (its per-eval deadline elapsed). Called from the
-    /// QuickJS interrupt handler on the guest's hot loop, so the host side
-    /// MUST be O(1) and allocation-free. The deadline is host-owned — the
-    /// guest cannot extend its own deadline.
-    fn host_interrupt() -> i32;
+/// Interrupt flag the host sets (from its deadline timer) by writing linear
+/// memory directly. The QuickJS interrupt handler reads it on the hot loop, so
+/// no host code runs while JS spins. The guest never writes it.
+static INTERRUPT_FLAG: AtomicI32 = AtomicI32::new(0);
+
+/// Export: address of the interrupt flag in linear memory.
+#[no_mangle]
+pub extern "C" fn interrupt_flag_ptr() -> *const AtomicI32 {
+    &INTERRUPT_FLAG
 }
 
 struct Engine {
@@ -73,10 +76,12 @@ fn ensure_engine() -> i32 {
             if let Some(limit) = STACK_LIMIT.with(|c| c.get()) {
                 rt.set_max_stack_size(limit);
             }
-            // Install the graceful interrupt handler: poll the host on the JS
-            // hot loop; `true` unwinds JS with `InternalError: interrupted`
-            // (the host maps it to TimeoutError) while the instance SURVIVES.
-            rt.set_interrupt_handler(Some(Box::new(|| unsafe { host_interrupt() != 0 })));
+            // Graceful interrupt: read the host-set flag on the JS hot loop;
+            // `true` unwinds JS with `InternalError: interrupted` (the host maps
+            // it to TimeoutError) while the instance SURVIVES.
+            rt.set_interrupt_handler(Some(Box::new(|| {
+                INTERRUPT_FLAG.load(Ordering::Relaxed) != 0
+            })));
             let ctx = match Context::full(&rt) {
                 Ok(ctx) => ctx,
                 Err(_) => return STATUS_NO_ENGINE,

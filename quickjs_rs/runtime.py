@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any, cast
@@ -64,13 +63,16 @@ class Runtime:
 
         # Per-eval deadline slot (monotonic-clock absolute time, seconds).
         # Context writes it before eval, clears it after.
-        self._deadline: float | None = None
+        self.__deadline: float | None = None
 
-        def _interrupt() -> bool:
-            d = self._deadline
-            return d is not None and time.monotonic() >= d
+    @property
+    def _deadline(self) -> float | None:
+        return self.__deadline
 
-        self._engine_rt.set_interrupt_handler(_interrupt)
+    @_deadline.setter
+    def _deadline(self, deadline: float | None) -> None:
+        self.__deadline = deadline
+        self._engine_rt.set_deadline(deadline)
 
     def __enter__(self) -> Runtime:
         return self

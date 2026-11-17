@@ -258,7 +258,7 @@ flowchart TD
 - **Flow**: DF1/DF4.
 - **Description**: attacker script loops/allocates aggressively; if limits are relaxed, execution can starve worker capacity.
 - **Preconditions**: caller deliberately overrides default limits/timeout or sets unbounded values (`memory_limit=None`, permissive timeout).
-- **Mitigations**: default runtime caps (`quickjs_rs/runtime.py:Runtime.__init__`), interrupt deadline checks (`quickjs_rs/runtime.py:Runtime.__init__` interrupt closure, `quickjs_rs/context.py:Context.eval`), and deployment guardrails that disallow unbounded settings for untrusted execution.
+- **Mitigations**: default runtime caps (`quickjs_rs/runtime.py:Runtime.__init__`), interrupt deadline checks (`quickjs_rs/_engine.py:QjsRuntime.set_deadline` watchdog setting the guest interrupt flag, `quickjs_rs/context.py:Context.eval`), and deployment guardrails that disallow unbounded settings for untrusted execution.
 - **Residual risk**: medium when guardrails are enforced; high if operators permit unbounded/relaxed limits.
 
 #### T3: Error-channel information disclosure
@@ -451,7 +451,7 @@ Evidence:
 
 - Default memory cap: `64 MiB` (`quickjs_rs/runtime.py:Runtime.__init__`).
 - Default stack cap: `1 MiB` (`quickjs_rs/runtime.py:Runtime.__init__`).
-- Per-eval deadline interrupt (`quickjs_rs/runtime.py:Runtime.__init__`, `src/runtime.rs:QjsRuntime::set_interrupt_handler`).
+- Per-eval deadline interrupt (`quickjs_rs/_engine.py:QjsRuntime.set_deadline`, `crates/quickjs-wasm/src/engine.rs` interrupt flag).
 - Context/handle boundary checks (`src/handle.rs:QjsHandle::set`, `quickjs_rs/handle.py:Handle._require_same_context`).
 - In-memory module loader (`src/modules.rs:StoreLoader::load`) reduces filesystem import exposure.
 
