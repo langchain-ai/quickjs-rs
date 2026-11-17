@@ -50,6 +50,10 @@ committed.
 Every `Context` is a separate WebAssembly instance with its own memory and its own JavaScript engine inside it. A
 `Runtime` holds settings and creates contexts. It is not a shared heap.
 
+This differs from [QuickJS's own model](https://bellard.org/quickjs/quickjs.html#Runtime-and-contexts). There, a `JSRuntime` is one object heap, and several `JSContext` realms
+inside it can share objects. In quickjs-rs, each instance holds exactly one QuickJS runtime and one context, created
+on first use. The Python `Runtime` has no QuickJS counterpart of its own.
+
 This is the core of the design:
 
 - **Contexts cannot reach each other.** There is no shared memory to reach through.

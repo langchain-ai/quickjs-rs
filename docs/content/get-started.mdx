@@ -23,8 +23,14 @@ and arm64.
 
 ## Evaluate a script
 
-A `Runtime` holds settings such as the memory limit. A `Context` is one JavaScript VM made from it.
-`eval` runs a script and returns the value of its last expression, converted to Python.
+The names come from QuickJS, but the meaning differs. In [QuickJS](https://bellard.org/quickjs/quickjs.html#Runtime-and-contexts), a `JSRuntime` is an object heap and a
+`JSContext` is a realm with its own globals inside it, so contexts on one runtime can share objects. In quickjs-rs,
+every `Context` is a separate WebAssembly instance with its own QuickJS runtime and context, and nothing is shared
+between contexts. A `Runtime` holds the settings its contexts are created with, such as the
+[memory limit](/concepts/resource-limits#memory) and the [module loader](/concepts/modules). See
+[one instance per context](/reference/architecture#one-instance-per-context) for why.
+
+`eval` runs a script and returns the value of its last expression, [converted to Python](/concepts/values).
 
 ```python
 from quickjs_rs import Runtime
@@ -47,12 +53,13 @@ with Runtime() as rt, rt.new_context() as ctx:
     #> HELLO
 ```
 
-Closing the context frees its memory. The `with` blocks do that for you.
+Closing the context frees its memory. The `with` blocks do that for you. Because state persists, do not reuse a
+context across users. See the [security model](/concepts/security-model#contexts-do-not-share-memory).
 
 ## Give the script a tool
 
-A script can only reach the outside world through functions you register.
-`@ctx.function` installs a Python function as a JavaScript global with the same name.
+A script can only reach the outside world through functions you register, called
+[host functions](/concepts/host-functions). `@ctx.function` installs a Python function as a JavaScript global with the same name.
 
 ```python
 from quickjs_rs import Runtime
@@ -73,7 +80,7 @@ Arguments and return values are converted on the way across. See [values](/conce
 
 ## Run async code
 
-Tools that do I/O are usually `async`. Register them the same way and run the script with `eval_async`.
+Tools that do I/O are usually `async`. Register them the same way and run the script with [`eval_async`](/concepts/async).
 Each call returns a promise, and the script can `await` it at the top level.
 
 ```python
@@ -101,12 +108,14 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The two searches run at the same time, so the script takes about 0.1 seconds, not 0.2.
+The two searches run at the same time, so the script takes about 0.1 seconds, not 0.2. See
+[async host functions](/concepts/host-functions#async-host-functions).
 
 ## Handle failures
 
-A script that throws raises `JSError`. A script that runs too long raises `TimeoutError`.
-Both are subclasses of `QuickJSError`, and the context is still usable afterwards.
+A script that throws raises `JSError`. A script that runs past its [timeout](/concepts/resource-limits#time) raises
+`TimeoutError`. Both are subclasses of `QuickJSError`, and the context is still usable afterwards. See
+[errors](/reference/errors) for the full list.
 
 ```python
 from quickjs_rs import JSError, Runtime, TimeoutError
