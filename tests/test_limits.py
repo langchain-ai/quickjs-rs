@@ -41,9 +41,8 @@ def test_timeout_terminates_infinite_loop() -> None:
         "own stack check (`#if defined(__wasi__)` sets stack_limit=0), so deep "
         "JS recursion exhausts the wasm shadow stack and HARD-TRAPS "
         "('wasm trap: call stack exhausted') before QuickJS can throw a "
-        "catchable InternalError. `set_max_stack_size` has no effect (verified "
-        "down to 64KB). Catchable stack overflow needs a vendored C patch "
-        "restoring the wasi stack check"
+        "catchable InternalError. Catchable stack overflow needs a vendored C "
+        "patch restoring the wasi stack check"
     ),
 )
 def test_stack_overflow_is_jserror_not_memory() -> None:

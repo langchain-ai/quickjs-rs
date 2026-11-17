@@ -48,7 +48,6 @@ thread_local! {
     /// Requested limits, applied to the Runtime when it is created. The host
     /// may set these before the first eval (which is what creates the runtime).
     static MEMORY_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
-    static STACK_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// Ensure the engine exists; returns STATUS_OK or STATUS_NO_ENGINE.
@@ -69,9 +68,6 @@ fn ensure_engine() -> i32 {
             // Apply any host-requested resource limits (spec §5).
             if let Some(limit) = MEMORY_LIMIT.with(|c| c.get()) {
                 rt.set_memory_limit(limit);
-            }
-            if let Some(limit) = STACK_LIMIT.with(|c| c.get()) {
-                rt.set_max_stack_size(limit);
             }
             // Install the graceful interrupt handler: poll the host on the JS
             // hot loop; `true` unwinds JS with `InternalError: interrupted`
@@ -152,13 +148,6 @@ fn with_runtime<F: FnOnce(&Runtime)>(f: F) {
 pub extern "C" fn set_memory_limit(limit: usize) {
     MEMORY_LIMIT.with(|c| c.set(Some(limit)));
     with_runtime(|rt| rt.set_memory_limit(limit));
-}
-
-/// Export: set the max JS stack size (bytes). Same apply-now-or-at-init policy.
-#[no_mangle]
-pub extern "C" fn set_max_stack_size(limit: usize) {
-    STACK_LIMIT.with(|c| c.set(Some(limit)));
-    with_runtime(|rt| rt.set_max_stack_size(limit));
 }
 
 /// Export: run the cyclic garbage collector. No-op if the engine isn't yet

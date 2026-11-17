@@ -176,7 +176,7 @@ Deep recursion (X1, A5).
 
 **Defense:** the wasm stack is finite, so recursion ends in a wasmtime trap rather than a host stack overflow.
 
-**Left over:** QuickJS's stack check is compiled out for WASI, so `stack_limit` has no effect and the failure is a
+**Left over:** QuickJS's stack check is compiled out for WASI, so there is no stack limit and the failure is a
 `wasmtime.Trap`, not a `QuickJSError`. Callers that only catch `QuickJSError` miss it. The context's state after a
 trap is not guaranteed. **Status: Partial.**
 

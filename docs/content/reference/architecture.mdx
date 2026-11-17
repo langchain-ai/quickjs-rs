@@ -121,7 +121,7 @@ integers. There is no generated interface layer.
 | Objects | `global_object`, `get_prop`, `set_prop`, `has_prop`, `get_index`, `set_index`, `get_own_property_names`, `call_function`, `call_constructor`, `dup_handle`, `free_value` |
 | Run code | `eval_code`, `eval_module`, `eval_async`, `eval_module_async`, `execute_pending_jobs`, `last_exception`, `throw` |
 | Async host calls | `resolve_deferred`, `reject_deferred` |
-| Limits and memory | `set_memory_limit`, `set_max_stack_size`, `run_gc`, `compute_memory_usage` |
+| Limits and memory | `set_memory_limit`, `run_gc`, `compute_memory_usage` |
 | State | `memory`, `__stack_pointer` |
 
 Fallible exports return a status code and write their result to a slot the host passes in:
