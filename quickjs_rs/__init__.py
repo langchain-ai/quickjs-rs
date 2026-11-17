@@ -1,6 +1,7 @@
 """quickjs-rs: JavaScript execution for Python."""
 
 from quickjs_rs._engine import UNDEFINED, Undefined
+from quickjs_rs._version import __version__
 from quickjs_rs.context import Context
 from quickjs_rs.errors import (
     ConcurrentEvalError,
@@ -25,9 +26,8 @@ from quickjs_rs.transforms import (
     transform_source,
 )
 
-__version__ = "0.2.6"
-
 __all__ = [
+    "__version__",
     "Runtime",
     "Context",
     "Handle",
