@@ -1,5 +1,7 @@
 """quickjs-rs: JavaScript execution for Python."""
 
+from importlib import metadata
+
 from quickjs_rs._engine import UNDEFINED, Undefined
 from quickjs_rs.context import Context
 from quickjs_rs.errors import (
@@ -25,7 +27,11 @@ from quickjs_rs.transforms import (
     transform_source,
 )
 
-__version__ = "0.3.0"
+try:
+    __version__ = metadata.version("quickjs-rs")
+except metadata.PackageNotFoundError:
+    # Case where package metadata is not available.
+    __version__ = ""
 
 __all__ = [
     "Runtime",
