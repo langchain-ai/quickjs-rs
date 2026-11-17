@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "macaw-docs dev .",
     "build": "macaw-docs build .",
-    "preview": "macaw-docs preview ."
+    "preview": "macaw-docs preview .",
+    "check": "macaw-docs build . && node scripts/check-links.mjs"
   },
   "devDependencies": {
     "macaw-docs": "workspace:*"

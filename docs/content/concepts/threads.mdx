@@ -1,0 +1,53 @@
+---
+title: Threads
+description: Which objects can be shared across threads, and how ThreadWorker keeps scripts off your event loop.
+---
+
+A context runs JavaScript on whichever thread calls it, and it is not safe to call from two threads at once.
+`ThreadWorker` gives your scripts a dedicated thread with its own event loop, so a busy script never blocks the rest of
+your application.
+
+## The basics
+
+```python
+import asyncio
+
+from quickjs_rs import Runtime, ThreadWorker
+
+
+async def run_script(code: str):
+    with Runtime() as rt, rt.new_context() as ctx:
+        return await ctx.eval_async(code)
+
+
+async def main() -> None:
+    async with ThreadWorker() as worker:
+        print(await worker.run_async(run_script("[1, 2, 3].map((n) => n * n)")))
+        #> [1, 4, 9]
+
+
+asyncio.run(main())
+```
+
+`run_async(coro)` runs a coroutine on the worker's thread and lets you await the result from your own loop.
+`run_sync(coro)` does the same but blocks the calling thread. The worker starts its thread on first use.
+
+Create, use, and close runtimes and contexts inside coroutines you submit to the same worker, so they never leave its
+thread. Close them before you close the worker. Closing the worker cancels whatever is still running on it.
+
+## The rules
+
+- **One thread per context at a time.** A context has no lock. Calling it from two threads at once is not supported.
+- **One thread per runtime.** A runtime's contexts share one timeout deadline. Evals on two of them from two threads
+  at the same time break each other's timeouts.
+- **Everything else is independent.** Runtimes and contexts on different threads do not interfere. The test suite runs
+  many threads that each create, use, and close their own runtimes, and checks that every host call reaches the right
+  context.
+
+The compiled engine is shared by the whole process and is safe to share. It is compiled once, on the first context,
+which can take up to a second on a small machine. Every later context reuses it.
+
+## See also
+
+- [Async evaluation](/concepts/async): how `eval_async` drives a script.
+- [Architecture](/reference/architecture#compiled-once-per-process): why the shared pieces are shared.

@@ -1,0 +1,136 @@
+---
+title: Resource limits
+description: Cap memory and running time for each script, control the clock it sees, and know what the limits do not cover.
+---
+
+A script can allocate without end, loop forever, or recurse until something breaks. quickjs-rs gives every context a
+memory limit and every eval a timeout. When a script hits either one, the eval raises and the context stays usable.
+
+| Limit | Set with | Default | Raises |
+| --- | --- | --- | --- |
+| Memory | `Runtime(memory_limit=...)` | 64 MiB per context | `MemoryLimitError` |
+| Time | `rt.new_context(timeout=...)`, or `timeout=` on async calls | 5 seconds per eval | `TimeoutError` |
+| Stack | Not enforced, see [recursion](#deep-recursion) | | `wasmtime.Trap` |
+
+## Memory
+
+```python
+from quickjs_rs import MemoryLimitError, Runtime
+
+with Runtime(memory_limit=8 * 1024 * 1024) as rt, rt.new_context() as ctx:
+    try:
+        ctx.eval("const chunks = []; while (true) chunks.push('x'.repeat(100_000) + chunks.length)")
+    except MemoryLimitError:
+        print("out of memory")
+        #> out of memory
+    print(ctx.eval("chunks.length = 0; 1 + 1"))
+    #> 2
+```
+
+The limit counts every allocation the JavaScript engine makes, at its real size. An allocation that would cross the
+limit fails, and the script sees `InternalError: out of memory`. A script can catch that error and free memory. It
+cannot hold more than the limit either way.
+
+`memory_limit=None` removes the limit. Do not do that for untrusted code.
+
+<Callout type="warning" title="quickjs-rs 0.2.6 and earlier">
+  Older releases counted each allocation as about 8 bytes, so a script could hold many times the limit. From 0.3.0,
+  the limit counts real sizes, and workloads that were silently over their limit start raising `MemoryLimitError`.
+</Callout>
+
+The limit does not cover everything:
+
+- **Memory never shrinks.** WebAssembly memory can grow but not shrink. A context that peaked at 60 MB keeps 60 MB
+  until you close it, even after its garbage is collected. Recycle contexts after heavy runs.
+- **Some memory sits outside the limit.** The engine's own bookkeeping, such as handle storage and conversion
+  buffers, is not counted. No hard cap is set on the WebAssembly memory as a whole.
+- **Python memory is yours.** Values you convert out of the sandbox, and values your host functions build, live in
+  Python.
+
+Each context starts at about 1.3 MB. `rt.memory_usage()` returns the engine's counters, such as `malloc_size` and
+`obj_count`, summed over the runtime's live contexts.
+
+## Time
+
+```python
+from quickjs_rs import Runtime, TimeoutError
+
+with Runtime() as rt, rt.new_context(timeout=0.1) as ctx:
+    try:
+        ctx.eval("try { while (true) {} } catch (e) { 'caught' }")
+    except TimeoutError:
+        print("timed out")
+        #> timed out
+    print(ctx.eval("1 + 2"))
+    #> 3
+```
+
+The timeout is a wall-clock budget for each eval, starting when the call starts. The engine checks it regularly while
+JavaScript runs. Once it passes, the script stops, and `catch` and `finally` blocks do not run. The next eval gets a
+fresh budget.
+
+`new_context(timeout=...)` sets the default for a context. Async calls such as `eval_async` also take `timeout=` for
+one call. Sync `eval` always uses the context's default.
+
+The timeout does not cover:
+
+- **Host code.** While a sync host function or a module loader callback runs, the script cannot be stopped. It stops
+  after they return.
+- **Awaited host calls.** In async evals, time spent waiting on async host functions does not count. Bound the whole
+  run with `asyncio.timeout()`. See [async evaluation](/concepts/async#only-javascript-time-counts).
+- **Several threads on one runtime.** A runtime has one deadline, shared by its contexts. Evals on two of its contexts
+  from two threads at the same time overwrite each other's deadline. Use one runtime per thread. See
+  [threads](/concepts/threads).
+
+## Deep recursion
+
+The engine's stack check does not work on WebAssembly, so `Runtime(stack_limit=...)` has no effect. Deep recursion
+runs out of WebAssembly stack and stops the instance with a `wasmtime.Trap`:
+
+```python
+import wasmtime
+
+from quickjs_rs import QuickJSError, Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    try:
+        ctx.eval("function recurse() { return recurse() } recurse()")
+    except QuickJSError:
+        print("not raised")
+    except wasmtime.Trap:
+        print("trapped")
+        #> trapped
+```
+
+The trap is contained by the sandbox, but it is not a `QuickJSError`, so code that only catches `QuickJSError` will
+miss it. After a trap, the context's state is not reliable. Close it and make a new one.
+
+## The clock
+
+By default, scripts read the real time. Pass `clock` to choose what they see. It returns integer nanoseconds since the
+Unix epoch, and it backs `Date`, `performance.now()`, and the seed for `Math.random()`:
+
+```python
+from quickjs_rs import Runtime
+
+
+def frozen() -> int:
+    return 1_700_000_000_250_000_000
+
+
+with Runtime(clock=frozen) as rt, rt.new_context() as a, rt.new_context() as b:
+    print(a.eval("new Date().toISOString()"))
+    #> 2023-11-14T22:13:20.250Z
+    print(a.eval("Math.random()") == b.eval("Math.random()"))
+    #> True
+```
+
+A fixed clock makes runs repeatable. It also means sibling contexts get the same random numbers, as shown above. Use
+a clock that moves if they should differ. `Math.random()` is never suitable for secrets.
+
+A controlled clock also takes precise timers away from untrusted code, which makes timing attacks harder.
+
+## See also
+
+- [Security model](/concepts/security-model): how the limits fit into running untrusted code.
+- [Threat model](/reference/threat-model#resource-exhaustion): every known gap, with its status.

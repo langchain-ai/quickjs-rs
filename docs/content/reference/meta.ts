@@ -1,4 +1,4 @@
 export default {
   title: "Reference",
-  order: ["api", "errors", "abi", "limitations"],
+  order: ["architecture", "threat-model", "api", "errors", "limitations"],
 };
