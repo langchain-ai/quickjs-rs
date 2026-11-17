@@ -252,7 +252,7 @@ By default, scripts read real time through `Date.now()` and `performance.now()`,
 (X1, A3).
 
 **Defense:** a `clock` callback replaces every clock the engine reads. A clock that only moves between evals leaves a
-script no timer at all, the approach Cloudflare Workers takes against Spectre. See
+script no timer at all. See
 [the clock](/concepts/resource-limits#the-clock).
 
 **Left over:** the default is real time. Host functions that return the time, or whose results depend on timing, can
