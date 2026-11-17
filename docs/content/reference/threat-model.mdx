@@ -167,7 +167,7 @@ survives. Value conversion stops at depth 128, and engine inputs at 64 MiB.
 
 **Left over:** in quickjs-rs 0.2.6 and earlier, each allocation counted as about 8 bytes, so a script could hold far
 more than the limit. No wasmtime memory limit is set, so allocations outside QuickJS are not counted. Engine memory
-only grows. `memory_limit=None` removes the bound. Each context costs about 1.3 MB before any script runs.
+only grows. `memory_limit=None` removes the bound.
 **Status: Partial.**
 
 ### T8: Stack exhaustion
@@ -251,10 +251,12 @@ needed. Do not share one across users. **Status: Accepted.**
 By default, scripts read real time through `Date.now()` and `performance.now()`, which helps them time host operations
 (X1, A3).
 
-**Defense:** a `clock` callback replaces every clock the engine reads.
+**Defense:** a `clock` callback replaces every clock the engine reads. A clock that only moves between evals leaves a
+script no timer at all, the approach Cloudflare Workers takes against Spectre. See
+[the clock](/concepts/resource-limits#the-clock).
 
-**Left over:** a script can still measure time by counting loop iterations. `Math.random()` is not cryptographically
-secure. **Status: Partial.**
+**Left over:** the default is real time. Host functions that return the time, or whose results depend on timing, can
+still leak it. `Math.random()` is not cryptographically secure. **Status: Partial.**
 
 ### T16: TypeScript parser bugs
 

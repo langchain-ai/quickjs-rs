@@ -160,12 +160,6 @@ asyncio.run(main())
 A sync `eval` whose result is a promise raises `MarshalError`. Use `eval_async`, or `eval_handle` and then
 `await_promise()`.
 
-## Keep scripts off your event loop
-
-`eval_async` runs JavaScript on the thread that awaits it. A script stuck in a loop blocks that event loop until it
-awaits a host function or hits its timeout. To keep your application responsive, run scripts on a
-[`ThreadWorker`](/concepts/threads).
-
 ## See also
 
 - [Host functions](/concepts/host-functions): writing the async functions scripts call.

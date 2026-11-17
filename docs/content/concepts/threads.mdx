@@ -37,7 +37,15 @@ thread. Close them before you close the worker. Closing the worker cancels whate
 
 ## The rules
 
-- **One thread per context at a time.** A context has no lock. Calling it from two threads at once is not supported.
+- **One thread per context at a time.** Two layers below a context are single-threaded, and quickjs-rs adds no lock
+  on top:
+  - The context's state lives in one wasmtime [`Store`](https://docs.wasmtime.dev/api/wasmtime/struct.Store.html).
+    Calling into an instance needs exclusive access to its store, so a store runs one call at a time. wasmtime-py does
+    not enforce that from Python.
+  - The QuickJS engine inside the instance supports
+    [no multi-threading within a runtime](https://bellard.org/quickjs/quickjs.html#Runtime-and-contexts).
+
+  What happens when two threads call one context at once is not defined.
 - **One thread per runtime.** A runtime's contexts share one timeout deadline. Evals on two of them from two threads
   at the same time break each other's timeouts.
 - **Everything else is independent.** Runtimes and contexts on different threads do not interfere. The test suite runs
@@ -50,4 +58,4 @@ which can take up to a second on a small machine. Every later context reuses it.
 ## See also
 
 - [Async evaluation](/concepts/async): how `eval_async` drives a script.
-- [Architecture](/reference/architecture#compiled-once-per-process): why the shared pieces are shared.
+- [Architecture](/reference/architecture#the-wasmtime-objects): why the shared pieces are shared.

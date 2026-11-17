@@ -1,180 +1,254 @@
 ---
 title: Architecture
-description: What runs where inside quickjs-rs, how values and calls cross the sandbox boundary, and why it is built this way.
+description: The wasmtime objects behind each context, what is shared and what is not, and how values, host calls, and evals cross the boundary.
 ---
 
-This page explains how quickjs-rs works inside, so you can judge its guarantees for yourself. You do not need it to
-use the library.
-
-## The pieces
-
-<figure className="docs-block">
-<svg viewBox="0 0 860 400" role="img" aria-label="The Python API sits on a host adapter, which drives a shared wasmtime engine. Each context is its own wasm instance with its own memory, plus a transform instance for TypeScript." style={{ width: "100%", height: "auto" }} fill="none" stroke="currentColor" fontFamily="inherit" fontSize="14">
-  <rect x="20" y="20" width="820" height="70" rx="8" strokeWidth="1.5" />
-  <text x="40" y="48" fill="currentColor" stroke="none" fontWeight="600">Python API (quickjs_rs)</text>
-  <text x="40" y="72" fill="currentColor" stroke="none" opacity="0.8">Runtime · Context · Handle · Snapshot · ThreadWorker</text>
-  <rect x="20" y="110" width="820" height="70" rx="8" strokeWidth="1.5" />
-  <text x="40" y="138" fill="currentColor" stroke="none" fontWeight="600">Host adapter (quickjs_rs/_engine.py)</text>
-  <text x="40" y="162" fill="currentColor" stroke="none" opacity="0.8">value conversion · host calls · timeout checks · module loading · snapshots</text>
-  <rect x="20" y="200" width="820" height="40" rx="8" strokeWidth="1.5" strokeDasharray="6 4" />
-  <text x="40" y="225" fill="currentColor" stroke="none">wasmtime: one engine and one compiled module for the whole process</text>
-  <rect x="20" y="260" width="250" height="120" rx="8" strokeWidth="2" />
-  <text x="36" y="286" fill="currentColor" stroke="none" fontWeight="600">Context A: wasm instance</text>
-  <text x="36" y="310" fill="currentColor" stroke="none" opacity="0.8">its own memory</text>
-  <text x="36" y="332" fill="currentColor" stroke="none" opacity="0.8">its own JavaScript engine</text>
-  <text x="36" y="354" fill="currentColor" stroke="none" opacity="0.8">objects, promises, modules</text>
-  <rect x="300" y="260" width="250" height="120" rx="8" strokeWidth="2" />
-  <text x="316" y="286" fill="currentColor" stroke="none" fontWeight="600">Context B: wasm instance</text>
-  <text x="316" y="310" fill="currentColor" stroke="none" opacity="0.8">its own memory</text>
-  <text x="316" y="332" fill="currentColor" stroke="none" opacity="0.8">nothing shared with A</text>
-  <rect x="580" y="260" width="260" height="120" rx="8" strokeWidth="1.5" />
-  <text x="596" y="286" fill="currentColor" stroke="none" fontWeight="600">Transform instance</text>
-  <text x="596" y="310" fill="currentColor" stroke="none" opacity="0.8">strips TypeScript types</text>
-  <text x="596" y="332" fill="currentColor" stroke="none" opacity="0.8">one per context, made on first use</text>
-</svg>
-</figure>
-
-quickjs-rs is a pure-Python package that carries two WebAssembly modules:
+quickjs-rs is a pure-Python package around two WebAssembly modules: a JavaScript engine and a TypeScript stripper.
+[wasmtime](https://wasmtime.dev/) runs them inside your Python process. This page names every piece, says what is
+shared and what is not, and follows a value, a host call, and an eval across the boundary.
 
 | File | Built from | What it is |
 | --- | --- | --- |
-| `_guest.wasm` | `crates/quickjs-wasm` | The JavaScript engine: [quickjs-ng](https://quickjs-ng.github.io/quickjs/) through the [rquickjs](https://github.com/DelSkayn/rquickjs) Rust bindings, compiled to `wasm32-wasip1` |
+| `_guest.wasm` | `crates/quickjs-wasm` | [quickjs-ng](https://quickjs-ng.github.io/quickjs/) through the [rquickjs](https://github.com/DelSkayn/rquickjs) Rust bindings, compiled to `wasm32-wasip1` |
 | `_transform.wasm` | `crates/quickjs-wasm-transform` | A TypeScript stripper built on [OXC](https://oxc.rs/) |
 
-[wasmtime](https://wasmtime.dev/) runs both inside your Python process. The wheel is `py3-none-any`, so the same bytes
-run on every platform wasmtime supports. The `.wasm` files are built from source when the wheel is built and are never
-committed.
+Both files are compiled from source when the wheel is built and ship inside it. Because they are WebAssembly, the
+wheel has no platform-specific code of its own. wasmtime is the only native dependency.
 
-## One instance per context
+<figure className="docs-block">
+<svg viewBox="0 0 860 430" role="img" aria-label="One process-wide wasmtime Engine, Module and Linkers, shared read-only by every context; each Context owns a Store holding its Instance and linear memory" style={{ width: "100%", height: "auto" }} fill="none" stroke="currentColor" fontFamily="inherit" fontSize="14">
+  <rect x="20" y="20" width="820" height="60" rx="8" strokeWidth="1.5" />
+  <text x="40" y="45" fill="currentColor" stroke="none" fontWeight="600">Python API: Runtime, Context, Handle, Snapshot</text>
+  <text x="40" y="67" fill="currentColor" stroke="none" opacity="0.8">quickjs_rs/runtime.py, context.py, handle.py → host adapter quickjs_rs/_engine.py</text>
+  <rect x="20" y="100" width="820" height="90" rx="8" strokeWidth="1.5" strokeDasharray="6 4" />
+  <text x="40" y="125" fill="currentColor" stroke="none" fontWeight="600">Shared by the whole process (read-only after setup)</text>
+  <text x="40" y="150" fill="currentColor" stroke="none" opacity="0.8">Engine: compiler settings · Module: compiled _guest.wasm, no state</text>
+  <text x="40" y="172" fill="currentColor" stroke="none" opacity="0.8">Linker: definitions of the imports the module needs (env.* and WASI)</text>
+  <rect x="20" y="210" width="400" height="200" rx="8" strokeWidth="2" />
+  <text x="40" y="236" fill="currentColor" stroke="none" fontWeight="600">Context A owns a Store</text>
+  <text x="40" y="262" fill="currentColor" stroke="none" opacity="0.8">Instance of the shared Module</text>
+  <text x="40" y="286" fill="currentColor" stroke="none" opacity="0.8">Linear memory: the whole JS heap</text>
+  <text x="40" y="310" fill="currentColor" stroke="none" opacity="0.8">QuickJS runtime + context inside it</text>
+  <text x="40" y="334" fill="currentColor" stroke="none" opacity="0.8">Handles, pending promises, module cache</text>
+  <text x="40" y="370" fill="currentColor" stroke="none" opacity="0.8">Transform Store + Instance (on first use)</text>
+  <rect x="440" y="210" width="400" height="200" rx="8" strokeWidth="2" />
+  <text x="460" y="236" fill="currentColor" stroke="none" fontWeight="600">Context B owns a Store</text>
+  <text x="460" y="262" fill="currentColor" stroke="none" opacity="0.8">Its own Instance and linear memory</text>
+  <text x="460" y="286" fill="currentColor" stroke="none" opacity="0.8">Nothing mutable is shared with A</text>
+</svg>
+</figure>
 
-Every `Context` is a separate WebAssembly instance with its own memory and its own JavaScript engine inside it. A
-`Runtime` holds settings and creates contexts. It is not a shared heap.
+## The wasmtime objects
 
-This differs from [QuickJS's own model](https://bellard.org/quickjs/quickjs.html#Runtime-and-contexts). There, a `JSRuntime` is one object heap, and several `JSContext` realms
-inside it can share objects. In quickjs-rs, each instance holds exactly one QuickJS runtime and one context, created
-on first use. The Python `Runtime` has no QuickJS counterpart of its own.
+Two kinds of wasmtime object exist here: code, which is shared, and state, which is not. A
+[`Module`](https://docs.wasmtime.dev/api/wasmtime/struct.Module.html) is compiled code with no state of its own.
+Instantiating it inside a [`Store`](https://docs.wasmtime.dev/api/wasmtime/struct.Store.html) creates an
+[`Instance`](https://docs.wasmtime.dev/api/wasmtime/struct.Instance.html), and that instance's memory, globals, and
+tables belong to the store. Sharing a module between contexts is like two processes running the same binary: the code
+is shared, and every running copy has its own memory.
 
-This is the core of the design:
+| Object | How many | What it holds | Where in quickjs-rs |
+| --- | --- | --- | --- |
+| [`Engine`](https://docs.wasmtime.dev/api/wasmtime/struct.Engine.html) | One per process | Compiler settings and compiled code | `shared_wasmtime_engine()` in `_wasmtime.py` |
+| [`Module`](https://docs.wasmtime.dev/api/wasmtime/struct.Module.html) | One per `.wasm` file per process | `_guest.wasm` compiled to machine code. No state. | `shared_wasm_artifact()` in `_wasmtime.py` |
+| [`Linker`](https://docs.wasmtime.dev/api/wasmtime/struct.Linker.html) | Two per process | The host functions the module imports. A second linker adds a clock override, used only by runtimes with `clock=`. | `_build_shared_linker()`, `_hosted_linker()` in `_engine.py` |
+| [`Store`](https://docs.wasmtime.dev/api/wasmtime/struct.Store.html) | One per context | Everything mutable: the instance, its memory, its globals, and its WASI settings | `_Instance.store` |
+| [`Instance`](https://docs.wasmtime.dev/api/wasmtime/struct.Instance.html) | One per context | The module instantiated in that store, with its exports | `_Instance.inst` |
+| [`Memory`](https://docs.wasmtime.dev/api/wasmtime/struct.Memory.html) | One per context | The instance's linear memory: the whole JavaScript heap | `_Instance.mem` (the `memory` export) |
 
-- **Contexts cannot reach each other.** There is no shared memory to reach through.
-- **A context's whole state is one byte array.** That is what makes a [snapshot](/concepts/snapshots) a plain copy.
-- **An engine bug stays in one context.** Memory corruption in the engine can only touch that instance's memory.
+A wasm instance can read and write only its own linear memory, and it can call only the functions its linker gave it.
+That is the isolation every other guarantee rests on. See WebAssembly's
+[security model](https://webassembly.org/docs/security/) and the
+[linear memory concept](https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Concepts).
 
-The cost is memory. Each context starts at about 1.3 MB, and the engine's built-in objects are set up per context
-rather than shared.
+Compiling the module is slow, up to about a second on a small machine. It happens once, on the first context.
+Instantiating the compiled module in a new store is fast, which is what makes a context cheap.
 
-The instance gets no files, no environment variables, and no arguments. Inside it, the JavaScript context has the
-standard built-ins and nothing else: no `console`, no timers, no I/O.
+## The Python layers
 
-## Compiled once per process
+Each public class sits on a thin engine class in `_engine.py`, which drives the wasm exports.
 
-Compiling the engine to machine code is slow: up to about a second on a small machine. It happens once, on the first
-context, and every later context reuses the compiled module. Creating a context after that costs a couple of
-milliseconds.
+| Public class | Engine class | What the engine class does |
+| --- | --- | --- |
+| `Runtime` | `QjsRuntime` | Holds the settings, the module loader, and the interrupt handler. Keeps a weak set of its instances so changes reach all of them. |
+| `Context` | `QjsContext`, which owns one `_Instance` | `_Instance` owns the store and instance, calls exports through `_Instance.c()`, and implements the imports. |
+| `Handle` | `QjsHandle` | One reference to a value inside the engine, with a disposed flag. |
+| `Snapshot` | none | Wraps the bytes from `_Instance.snapshot()`. |
 
-The functions the engine imports from the host are also registered once, on a shared linker. wasmtime-py keeps
-registered host functions in a process-wide table without a lock, and registering them per instance corrupted that
-table when threads created and closed contexts at the same time. A shared import cannot remember which instance it
-belongs to, so each call into the engine records the running instance in a thread-local, and imports read it back.
+`Runtime` creates no QuickJS object itself. Each `_Instance` creates its own QuickJS runtime and context inside the
+engine the first time an export needs them.
+
+## What an instance can reach
+
+An instance can call only what its linker defines. quickjs-rs defines four functions of its own, under `env`:
+
+| Import | Signature | When the engine calls it |
+| --- | --- | --- |
+| `host_call` | `(name_ptr, name_len, this, argc, argv_ptr) -> handle` | A script calls a host function. Returns a result handle, or `-1` for failure. |
+| `host_interrupt` | `() -> i32` | The engine checks whether to stop. Non-zero stops the script. |
+| `host_module_normalize` | `(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> ptr` | An import needs a canonical module name. `0` refuses. |
+| `host_module_load` | `(name_ptr, name_len, out_len_ptr) -> ptr` | A module's source is needed. `0` means not found. |
+
+The engine also imports a few [WASI](https://wasi.dev/) functions, which wasmtime implements from each store's
+`WasiConfig`. quickjs-rs gives that config no preopened directories, no environment variables, and no arguments, so
+these functions have nothing to reach:
+
+| WASI import | What it can do here |
+| --- | --- |
+| `clock_time_get` | Read the time. With `clock=`, it calls your function instead. |
+| `random_get` | Read entropy. Only the Rust standard library uses it, to seed hash tables. Scripts cannot reach it. |
+| `fd_write`, `fd_seek`, `fd_close`, `fd_fdstat_get` | Write to stdout and stderr, which are inherited from your process. The Rust standard library uses them, for example for a panic message. No JavaScript API reaches them. |
+| `environ_get`, `environ_sizes_get` | Read the environment, which is empty. |
+| `proc_exit` | Stop the instance. |
 
 ## How values cross
 
-The host and the engine share only the engine's memory and a flat list of functions that take and return integers.
-There is no generated interface layer.
+The host and the engine share only the engine's memory and the functions above. Every export takes and returns
+integers. There is no generated interface layer.
 
-- **Bytes in:** the host asks the engine to allocate a buffer, writes into it, and passes the pointer and length.
-- **Bytes out:** the engine leaves the result in a buffer, and the host copies it out right away.
-- **JavaScript values:** stay inside the engine. Python refers to them by a handle, which is a pointer into engine
-  memory. Converting a value to Python reads it through these functions.
+- **Bytes in.** The host calls `qjs_alloc(len)`, writes into the buffer, passes `(ptr, len)` to an export, and calls
+  `qjs_free` afterwards.
+- **Bytes out.** The export leaves its result in one buffer. The host reads `qjs_last_ptr()` and `qjs_last_len()`,
+  copies the bytes out, and calls `qjs_result_free()`.
+- **JavaScript values** stay in the engine. Python refers to each one by a handle: a pointer into engine memory to a
+  boxed rquickjs `Persistent<Value>`, which holds one reference. `free_value` releases it.
 
-After untrusted code has run, nothing in engine memory can be trusted. The host checks that every pointer and length it
-reads falls inside the engine's memory. Inputs have size caps: 64 MiB for big integers, binary data, and JSON, 4096
-bytes for a module name, and 16 MiB for module source. Every engine function catches Rust panics and returns a status code
-instead.
+| Export group | Exports |
+| --- | --- |
+| Memory | `qjs_alloc`, `qjs_free`, `qjs_last_ptr`, `qjs_last_len`, `qjs_result_free` |
+| Create values | `new_null`, `new_undefined`, `new_bool`, `new_number`, `new_string`, `new_bigint`, `new_array`, `new_object`, `new_arraybuffer`, `new_uint8array`, `new_from_json`, `new_error`, `new_function`, `new_promise` |
+| Read values | `type_of`, `get_bool`, `get_number`, `get_string`, `get_bigint`, `get_arraybuffer`, `get_typed_array_buffer`, `to_json`, `is_promise`, `promise_state`, `promise_result` |
+| Objects | `global_object`, `get_prop`, `set_prop`, `has_prop`, `get_index`, `set_index`, `get_own_property_names`, `call_function`, `call_constructor`, `dup_handle`, `free_value` |
+| Run code | `eval_code`, `eval_module`, `eval_async`, `eval_module_async`, `execute_pending_jobs`, `last_exception`, `throw` |
+| Async host calls | `resolve_deferred`, `reject_deferred` |
+| Limits and memory | `set_memory_limit`, `set_max_stack_size`, `run_gc`, `compute_memory_usage` |
+| State | `memory`, `__stack_pointer` |
 
-Arrays and objects cross as a single JSON string when they can, instead of one call per property. That is faster, and
-it is why nested values follow JSON rules. See [values](/concepts/values).
+Fallible exports return a status code and write their result to a slot the host passes in:
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| `0` | `STATUS_OK` | Success |
+| `1` | `STATUS_JS_ERROR` | A JavaScript exception is pending. The host takes it with `last_exception`. |
+| `2` | `STATUS_BAD_INPUT` | A null pointer, bad UTF-8, the wrong value type, an input over its cap, or an unknown deferred ID |
+| `3` | `STATUS_PANIC` | A Rust panic, caught at the export |
+| `4` | `STATUS_NO_ENGINE` | The QuickJS runtime or context could not be created |
+
+After untrusted code has run, nothing in engine memory can be trusted:
+
+- `_Instance.read()` checks every pointer and length the host reads against the size of engine memory.
+- Inputs have size caps: 64 MiB for big integers, binary data, and JSON, 4096 bytes for a module name, and 16 MiB for
+  module source.
+- Every export runs inside `catch_unwind`, and the engine is built with `panic = "unwind"`, so a panic becomes
+  `STATUS_PANIC` instead of crossing the boundary.
+
+Arrays and objects cross as one JSON string when they can (`to_json` and `new_from_json`), instead of one call per
+property. That is why nested values follow JSON rules. See [values](/concepts/values).
 
 ## How a host call works
 
-When you register a function, the engine creates a JavaScript function that remembers only the name. Calling it:
+Registering a function (`QjsContext.register_host_function`) records `name → fn_id` in the instance, calls
+`new_function(name)` to build a JavaScript function that remembers only the name, and sets it on `globalThis`.
+
+When a script calls it:
 
 <Steps>
   <Step title="The engine calls out">
-    The function passes the name and handles for its arguments to the host.
+    The function makes temporary handles for `this` and each argument, then calls the `host_call` import with the
+    name and the handles.
+  </Step>
+  <Step title="The import finds its instance">
+    The import is shared by every instance, so `_tramp_host_call` reads the running instance from the thread-local
+    `_CUR` and forwards to `_Instance._host_call`. See [routing across threads](#routing-across-threads).
   </Step>
   <Step title="The host looks up the name">
-    It finds your Python function in the context's table and converts the arguments. An unknown name fails the call.
+    `_Instance._host_call` reads the name with a bounds check and looks it up. An unknown name fails the call. Each
+    argument is converted to Python, so a function or promise argument fails it too.
   </Step>
-  <Step title="Your function runs">
-    A sync function runs right away, on the evaluating thread, while the script waits. An async function becomes an
-    asyncio task, and the script gets a pending promise straight back.
+  <Step title="A sync function runs">
+    `Context._dispatch_host_call` calls your function on the evaluating thread. Its return value is converted into a
+    new handle and returned to the engine.
   </Step>
-  <Step title="The result goes back">
-    The return value is converted into the engine. When an async task finishes, it resolves or rejects the promise
-    it was given.
+  <Step title="An async function is scheduled">
+    The host calls `new_promise`, which stores the promise's resolve and reject functions under a numeric ID.
+    `Context._dispatch_async_host_call` starts your coroutine as a task in the eval's `asyncio.TaskGroup`, and the
+    script gets the pending promise straight back. When the task finishes, `resolve_deferred` or `reject_deferred`
+    settles the promise by ID. An unknown or already-settled ID is rejected with `STATUS_BAD_INPUT`.
   </Step>
 </Steps>
 
-On any failure, the host returns only a failure flag, and the engine itself creates
-`HostError: Host function failed`. No host text is written into JavaScript on this path. The original exception stays
-in Python and is raised from the eval if the script does not catch it.
+On any failure, the import returns `-1` and the engine itself creates `HostError: Host function failed`. No text from
+the host is written into JavaScript on this path. The Python exception is kept, and `Context._raise_classified`
+raises it from the eval if the script does not catch the `HostError`.
 
-Because the engine only stores a name, the JavaScript function is part of a snapshot and the Python function is not.
+The engine stores only the name, so the JavaScript function is part of a snapshot and the Python function is not.
 That is why you register again after a restore.
 
 ## How an eval runs
 
-A sync `eval` writes a deadline into its runtime, runs the code, converts the result, and clears the deadline. While
-JavaScript runs, the engine regularly calls back to check the deadline. Once it passes, the engine stops the script
-with an error the script cannot catch.
+A sync eval (`Context.eval`):
 
-An async eval does the same, then drives the result to completion:
+1. Writes an absolute deadline into `Runtime._deadline`.
+2. Strips TypeScript if a transform policy asks for it.
+3. Calls `eval_code`, or `eval_module` for `module=True`.
+4. While JavaScript runs, QuickJS calls its interrupt handler every so often. The handler calls `host_interrupt`, which
+   compares the time with the deadline. Once it has passed, QuickJS throws an error that scripts cannot catch.
+5. On `STATUS_JS_ERROR`, takes the exception with `last_exception` and classifies it (see [errors](/reference/errors)).
+   Otherwise converts the result to Python.
+6. Clears the deadline.
+
+An async eval (`Context._eval_and_drive`) runs the code with `eval_async` or `eval_module_async`, inside an
+`asyncio.TaskGroup`, then drives the resulting promise:
 
 ```text
 loop:
-    run queued promise callbacks (at most 100,000 per pass)
-    if the result promise settled: return its value, or raise its error
+    execute_pending_jobs()                   # run queued promise callbacks, at most 100,000 per pass
+    state = promise_state(result)
+    if fulfilled: return promise_result(result)
+    if rejected:  classify the reason and raise
     if no async host call is in flight: raise DeadlockError
-    pause the deadline, wait for a host call to finish, extend the deadline by the time waited
+    clear the deadline, wait for a host call to finish, then extend the deadline by the time waited
 ```
 
-Pausing the deadline is why time spent awaiting host calls does not count against the timeout. The cap on callbacks
-per pass keeps a script that queues callbacks forever from stalling the loop. The timeout still applies inside each
-pass.
+Clearing the deadline while waiting is why awaited host time does not count against the timeout. The cap per pass
+keeps a script that queues callbacks forever from stalling the loop, and the deadline still applies inside each pass.
 
-When a JavaScript error reaches the eval, it becomes a Python exception based on its name and message. See
-[errors](/reference/errors).
+## Routing across threads
+
+wasmtime-py keeps registered host functions in a process-wide table without a lock. Registering them per instance
+corrupted that table when threads created and closed contexts at the same time. So the four `env` imports are
+registered once, on the shared linkers.
+
+A shared import cannot know which instance called it. Every export call goes through `_Instance.c()`, which sets the
+thread-local `_CUR.inst` to its instance for the duration of the call and restores the previous value afterwards.
+Imports only fire during an export call, on the same thread, so `_CUR.inst` always names the caller. Nested calls,
+such as a host function building its return value, restore correctly because the previous value is saved.
+
+Inside the engine, `with_context` in `engine.rs` does the same for re-entry: the outer call records the live QuickJS
+context in `CURRENT_RAW_CTX`, and a nested call reuses it instead of locking again.
+
+## Snapshots
+
+A snapshot is the `memory` export's bytes plus the `__stack_pointer` global, behind a 52-byte header
+(`_Instance.snapshot()`). Restore (`_Instance.restore()`) checks the header, grows the destination memory if needed,
+copies the image in, and sets the stack pointer. Because all engine state lives in linear memory, nothing else is
+needed. See [snapshots](/concepts/snapshots#format) for the header.
 
 ## TypeScript
 
-The TypeScript stripper is a separate module so that the engine stays small and a parser bug cannot touch a JavaScript
-heap. Each context gets its own transform instance on first use. Results are cached by build, name, source hash, and
-flags. If a transform fails, its instance is thrown away and recreated on the next call.
+The TypeScript stripper is a separate module, so the engine stays small and a parser bug cannot touch a JavaScript
+heap. Each `_Instance` owns a `SourceTransformer` (`_transform.py`), which creates its own store and instance of
+`_transform.wasm` on first use. Results are cached by build, name, source hash, and flags. If a transform call fails,
+the transformer drops its store and makes a new one next time.
 
 ## Design decisions
 
 | Decision | Why | What it costs |
 | --- | --- | --- |
 | Run the engine in WebAssembly, not as a native extension | A memory bug in a C engine stays in its sandbox instead of the Python process. One universal wheel. | Slower calls across the boundary. The engine's stack check does not work, so deep recursion traps. Isolation depends on wasmtime. |
-| One instance per context | No shared heap between contexts. A snapshot is a memory copy. | About 1.3 MB per context. |
-| Integer-only functions and handles | Small on both sides. No code generation. Value conversion lives in one place, the Python adapter. | Deep values need many calls, which led to the JSON fast path and its rules. |
+| One store and instance per context | No mutable state is shared between contexts. A snapshot is a memory copy. | A linear memory per context, and built-in objects set up per context. |
+| Integer-only exports and handles | Small on both sides. No code generation. Value conversion lives in one place, the Python adapter. | Deep values need many calls, which led to the JSON fast path and its rules. |
 | Whole-memory snapshots | Closures, pending promises, and engine state survive exactly, with no serializer to maintain. | Large images, tied to one build, holding every secret, not signed. |
 | Fixed host error message | Exception text often holds paths, queries, or secrets. None of it reaches scripts. | Scripts cannot tell failures apart. Host functions that need to say why should return it as data. |
 | The host owns module resolution | No built-in policy to get wrong. With no loader, nothing loads. | You write the loader. |
 | One host clock, no separate seed | The engine seeds `Math.random()` from the clock, so one setting makes runs repeatable. | Contexts under a frozen clock share random numbers. |
-
-Running a full engine such as V8 in a subprocess was the main alternative. It costs far more per run, and process
-isolation can still be added on top of quickjs-rs when a workload needs it.
-
-## Where the code is
-
-| Path | What lives there |
-| --- | --- |
-| `quickjs_rs/runtime.py`, `context.py`, `handle.py`, `snapshot.py`, `threading.py` | The public API, the async loop, and error classification |
-| `quickjs_rs/_engine.py` | The host adapter: instances, imports, value conversion, snapshot format |
-| `quickjs_rs/_wasmtime.py` | The shared engine and compiled-module cache |
-| `crates/quickjs-wasm/src/engine.rs` | Engine setup, limits, the timeout check |
-| `crates/quickjs-wasm/src/hostfn.rs` | The host-call trampoline |
-| `crates/quickjs-wasm/src/promise.rs` | Pending promises and the callback queue |
-| `crates/quickjs-wasm/src/modules.rs` | Module resolution and loading |

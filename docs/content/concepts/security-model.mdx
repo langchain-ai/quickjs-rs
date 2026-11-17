@@ -4,27 +4,21 @@ description: What the quickjs-rs sandbox protects, what it leaves to you, and ho
 ---
 
 quickjs-rs is built to run code that a language model wrote and nobody reviewed.
-This page describes what that buys you and what it does not.
 
-<Callout type="warning" title="Not yet audited">
-  quickjs-rs has not had an independent security audit. If you find a way out of the sandbox, do not open a public
-  issue. Report it privately through the repository's [security page](https://github.com/langchain-ai/quickjs-rs/security).
-</Callout>
+## Sandboxing
 
-## Where the boundary is
+Scripts run inside WebAssembly. The JavaScript engine is compiled to a wasm module, and each `Context` is its own
+instance of that module with its own memory. A wasm instance can only touch its own memory and call the functions its
+host hands it, so a script has no way to reach your Python objects, your files, or another context.
 
-The boundary is WebAssembly. The JavaScript engine is compiled to a wasm module, and every `Context` is a separate
-instance of it with its own linear memory. Code inside an instance can read and write that memory and nothing else.
-It cannot address Python objects, other contexts, or the rest of your process.
+What a script gets:
 
-Everything else follows from that:
-
-- **No ambient authority.** The instance gets no files, no environment variables, and no network. The JavaScript
-  globals have no `console`, `fetch`, timers, `require`, or `process`.
-- **The only way out is a short list of imports.** The guest can call the host to run a host function, to ask
-  whether its deadline has passed, and to resolve and load a module. Each of those does only what you configured.
-- **An engine bug stays inside one context.** A memory-safety bug in QuickJS lets an attacker control that context's
-  memory. That memory holds nothing of yours that you did not put there.
+- **No ambient access.** No files, environment variables, or network. No `console`, `fetch`, timers, `require`, or
+  `process`.
+- **A short list of ways out.** The engine can ask the host to run a host function, to check its deadline, and to
+  resolve and load a module. Each of these does only what you configured.
+- **Containment of engine bugs.** A memory-safety bug in QuickJS gives an attacker that context's memory, which holds
+  only what you put there.
 
 ```python
 from quickjs_rs import Runtime
@@ -41,14 +35,61 @@ The remaining escape path is wasmtime itself. wasmtime compiles and runs the gue
 wasmtime or its Cranelift compiler could cross the boundary. Keep `wasmtime` up to date. If you must assume an
 attacker who can exploit wasmtime, also run quickjs-rs in a container or a separate process.
 
-## Host functions are capabilities
+## Host functions are the attack surface
 
-The sandbox guarantees that a script reaches nothing you did not hand it. It cannot guarantee that what you handed
-it is safe.
+The sandbox guarantees that a script reaches nothing you did not hand it. It cannot make what you handed it safe, and
+a badly written host function is the easiest way out of a sound sandbox.
 
-Every function you register can be called by any code in the context, with any arguments, as many times as it likes.
-A host function that takes a path and reads it is a file-system primitive that you wrote. Validate arguments the way
-you would validate an HTTP request body, and apply the permissions of the end user, not of the agent.
+A host function runs in your Python process with all of its permissions. Any code in the context can call it, with
+any arguments, as many times as it likes. If it reads a file by path, the script can read any file the path reaches.
+If it runs a query, the script can run any query the function lets through. Prompt injection in any data the model
+read can choose those arguments.
+
+### Validate every argument
+
+Treat arguments like an untrusted HTTP request body. This host function looks harmless and is a file-system
+escape:
+
+```python
+import tempfile
+from pathlib import Path
+
+from quickjs_rs import Runtime
+
+with tempfile.TemporaryDirectory() as tmp:
+    notes = Path(tmp).resolve() / "notes"
+    notes.mkdir()
+    (notes / "todo.txt").write_text("buy milk")
+    (notes.parent / "secret.txt").write_text("hunter2")
+
+    def read_note_unsafe(name: str) -> str:
+        return (notes / name).read_text()
+
+    def read_note(name: str) -> str:
+        path = (notes / name).resolve()
+        if not path.is_relative_to(notes):
+            raise PermissionError(name)
+        return path.read_text()
+
+    with Runtime() as rt, rt.new_context() as ctx:
+        ctx.register("read_note", read_note_unsafe)
+        print(ctx.eval("read_note('../secret.txt')"))
+        #> hunter2
+
+        ctx.register("read_note", read_note)
+        print(ctx.eval("read_note('todo.txt')"))
+        #> buy milk
+        print(ctx.eval("try { read_note('../secret.txt') } catch (e) { e.message }"))
+        #> Host function failed
+```
+
+- Check types and ranges. Resolve paths and URLs, then compare them against an allowlist.
+- Apply the permissions of the end user the script runs for, not the permissions of your service.
+- Assume the script's author sees everything you return, and leave out what they should not see.
+- Never register a general-purpose function: a Python `eval`, a shell, raw file or HTTP access, or a function that
+  calls "any function by name".
+
+### Do not leak through errors
 
 When a host function raises, the script sees a fixed error with no detail. Exception messages often contain paths,
 queries, or secrets, and anything a script can read can end up in model output. The original exception stays in
@@ -73,7 +114,17 @@ with Runtime() as rt, rt.new_context() as ctx:
         #> Python sees: cannot connect: password=hunter2
 ```
 
-The values a host function returns are another matter. The script can read all of them.
+Return values get no such protection. If a host function returns a secret, the script has it.
+
+### Limit what host functions can be made to do
+
+quickjs-rs does not limit how many host calls a script makes or how many run at once. One `Promise.all` can start
+100,000 async calls, and a loop can make millions of sync calls within one timeout. Every call is real work in your
+process, and often a request to someone else's API.
+
+Put the limits inside your host functions: a total call budget per run, a semaphore for concurrency, and the same
+rate limits you would put on a public endpoint. See
+[budget your host functions](/concepts/host-functions#budget-your-host-functions) for an example.
 
 ## Contexts do not share memory
 
@@ -160,6 +211,11 @@ Use exception classes to decide how to report a failure, not to decide what the 
     Catch `QuickJSError` and `wasmtime.Trap`. Close the context after a trap.
   </Step>
 </Steps>
+
+## Report a vulnerability
+
+quickjs-rs has not had an independent security audit. If you find a way out of the sandbox, report it privately
+through the repository's [security page](https://github.com/langchain-ai/quickjs-rs/security), not in a public issue.
 
 ## See also
 

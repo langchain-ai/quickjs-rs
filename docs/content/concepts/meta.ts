@@ -1,7 +1,6 @@
 export default {
   title: "Concepts",
   order: [
-    "security-model",
     "host-functions",
     "values",
     "async",
@@ -9,5 +8,6 @@ export default {
     "resource-limits",
     "snapshots",
     "threads",
+    "security-model",
   ],
 };

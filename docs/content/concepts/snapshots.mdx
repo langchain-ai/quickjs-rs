@@ -65,17 +65,26 @@ with Runtime() as rt:
 
 The restored context reads the clock of the runtime it now belongs to.
 
-## When you can take one
+## Limitations
 
-The context must be idle: no `eval_async` running and no async host calls waiting. Otherwise `create_snapshot()`
-raises. Async code can use `await ctx.create_snapshot_async()`.
-
-A context that ran code with `module=True` cannot be snapshotted, and `create_snapshot()` raises
-`NotImplementedError`. Dynamic `import()` is fine.
+- **The context must be idle.** No `eval_async` can be running and no async host call can be waiting, or
+  `create_snapshot()` raises. Async code can use `await ctx.create_snapshot_async()`.
+- **No module-mode contexts.** A context that ran code with `module=True` raises `NotImplementedError`. Dynamic
+  `import()` is fine.
+- **Python state does not travel.** Host functions and `Handle` objects stay behind. Register host functions again
+  after restoring.
+- **Some settings travel and some do not.** The memory limit comes from the runtime that took the snapshot. The clock
+  and module loader come from the runtime you restore into.
+- **All or nothing.** A restore replaces everything in the destination context. There is no way to restore part of a
+  snapshot or merge two of them.
+- **Same build only.** A snapshot restores only into the exact engine build that made it. See
+  [tied to one build](#snapshots-are-tied-to-one-build).
+- **Size is peak memory.** A snapshot is never smaller than the most memory the context ever used. See [size](#size).
+- **Not signed.** Restoring a snapshot trusts its bytes completely. See [treat snapshots like code](#treat-snapshots-like-code).
 
 ## Size
 
-A snapshot is as large as the context's memory: about 1.3 MB for a new context. Memory never shrinks, so a context
+A snapshot is as large as the context's memory. Memory never shrinks, so a context
 that once used 60 MB snapshots at 60 MB or more, even after its garbage is collected. Take snapshots before heavy work
 when size matters.
 
