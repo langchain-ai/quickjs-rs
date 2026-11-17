@@ -1,3 +1,3 @@
 export default {
-  order: ["index", "quickstart", "guide", "internals", "security", "reference"],
+  order: ["index", "get-started", "concepts", "reference"],
 };

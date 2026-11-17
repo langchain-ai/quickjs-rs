@@ -1,62 +1,58 @@
 ---
-title: Known limitations
-description: Behavior that surprises people, and gaps that are known but not fixed.
+title: Limitations
+description: Known gaps in quickjs-rs, what happens today, and what to do about each one.
 ---
 
 Each item says what happens today and what to do about it.
 
 ## Engine
 
-- **Stack overflow traps.** QuickJS's stack check is compiled out for WASI, so deep recursion exhausts the wasm
-  shadow stack and the eval raises `wasmtime.Trap`, not a `QuickJSError`. `stack_limit` has no effect. Catch the trap
-  and discard the context. `tests/test_limits.py` tracks the gap as a strict `xfail`.
-- **Always strict.** Scripts run in strict mode; the `strict` parameter on the eval methods is accepted and ignored.
-- **No web or Node APIs.** No `console`, timers, `fetch`, `TextEncoder` or `require`. Provide what you need as host
-  functions.
-- **Memory never shrinks.** Linear memory grows to its high-water mark and stays there for the context's life, which
-  also sets snapshot size.
+- **Deep recursion traps.** QuickJS's stack check is compiled out for WASI, so deep recursion raises `wasmtime.Trap`,
+  not a `QuickJSError`. `stack_limit` has no effect. Catch the trap and discard the context. See
+  [resource limits](/concepts/resource-limits#deep-recursion).
+- **Always strict.** Scripts run in strict mode. The `strict` parameter on the eval methods is ignored.
+- **No web or Node APIs.** There is no `console`, `setTimeout`, `fetch`, `TextEncoder`, or `require`. Provide what you
+  need as [host functions](/concepts/host-functions).
+- **Memory never shrinks.** A context keeps its peak memory until it is closed, and its snapshots are that size.
 
 ## Values
 
-- **Nested values use JSON semantics.** When marshalling arrays and objects to Python, functions and symbols inside
-  are dropped, nested `undefined` becomes `None` (or the key disappears), `NaN` and `Infinity` become `None`, `Date`
-  becomes an ISO string, and typed arrays become index-keyed dicts. Top-level values follow the per-type rules. Use
-  `allow_opaque=True` to skip the fast path. Details in [values](/guide/values#the-json-fast-path).
-- **Large nested integers.** Integer-valued numbers of magnitude 2⁵³ and up become floats at the top level, but come
-  back as rounded `int`s inside containers.
+- **Nested values follow JSON rules.** Inside arrays and objects, functions are dropped, `NaN` becomes `None`, and a
+  `Date` becomes a string. See [values](/concepts/values#nested-values-follow-json-rules).
+- **Large nested integers are rounded.** Integer-valued numbers of 2⁵³ or more come back as rounded `int` values when
+  nested. Return exact values as strings or `BigInt`.
 - **`__proto__` keys** in Python dicts set the prototype instead of creating a property.
-- **Sets, custom classes, dataclasses** can't be passed to JS; convert them first.
+- **Sets, dataclasses, and custom classes** cannot be passed to JavaScript. Convert them to lists and dicts first.
 
 ## Async
 
-- **Awaited host time is free.** The timeout counts only time spent running JS, so a script awaiting slow tools can
-  run far longer than `timeout`. Bound the whole call with `asyncio.timeout`.
-- **Sync host functions can't be interrupted.** A blocking host function holds the eval until it returns.
-- **No concurrency cap on host calls.** Limit concurrency inside your host functions.
-- **Sync evals don't run microtasks.** `.then` callbacks queued by a sync eval run on the next async eval or
-  `await_promise`.
+- **Awaited host time does not count toward the timeout.** Bound the whole call with `asyncio.timeout`.
+- **Sync host functions cannot be interrupted.** A host function that blocks holds the eval until it returns.
+- **There is no cap on concurrent host calls.** Limit concurrency inside your host functions.
+- **Sync evals do not run promise callbacks.** They run on the next async eval.
 
-## Threads and runtimes
+## Threads
 
-- **One deadline per runtime.** Contexts of one `Runtime` share a deadline slot, so evals on them from different
-  threads can disturb each other's timeouts. Use one runtime per thread.
-- **Contexts are single-threaded** and have no lock. Use `ThreadWorker` to own them from one thread.
+- **One deadline per runtime.** Evals on one runtime's contexts from different threads disturb each other's timeouts.
+  Use one runtime per thread.
+- **Contexts have no lock.** Drive each one from a single thread, for example with `ThreadWorker`.
 
 ## Snapshots
 
-- **No module-mode snapshots.** A context that ran `module=True` can't be snapshotted (`NotImplementedError`).
-  Dynamic `import()` from scripts is fine.
-- **No signature.** Images aren't signed or encrypted; protect them yourself.
-- **Same build only.** A snapshot only restores into the exact guest wasm that produced it.
-- **Host functions don't travel.** Register the same names on the destination before running restored code.
+- **No snapshots after `module=True`.** `create_snapshot` raises `NotImplementedError`. Dynamic `import()` from a
+  script is fine.
+- **No signature.** Images are not signed or encrypted. Protect them yourself.
+- **Same build only.** A snapshot restores only into the exact engine build that created it.
+- **Host functions do not travel.** Register them again after restoring.
 
 ## Modules
 
-- **Modules are cached for the context's life.** Changing what `load` returns doesn't affect a context that already
-  imported the module.
-- **Module evals return `None`.** Read results from globals the module sets.
+- **Modules are cached for the life of the context.** Changing what `load` returns does not affect a module the
+  context already imported.
+- **`module=True` evals return `None`.** Read results from globals the module sets.
 
 ## Versions
 
 - **quickjs-rs 0.2.6 and earlier undercount memory.** Each allocation counted as about 8 bytes toward
-  `memory_limit`, so a script could hold several times the limit. Later releases count real sizes (#58).
+  `memory_limit`, so a script could hold far more than the limit. Later releases count real sizes
+  ([#58](https://github.com/langchain-ai/quickjs-rs/pull/58)).

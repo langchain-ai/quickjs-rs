@@ -7,7 +7,7 @@ Everything below is importable from `quickjs_rs`.
 
 ## Runtime
 
-```python
+```python test="skip"
 Runtime(
     *,
     memory_limit: int | None = 64 * 1024 * 1024,
@@ -22,15 +22,15 @@ Usable as a context manager.
 
 | Parameter | Meaning |
 | --- | --- |
-| `memory_limit` | QuickJS allocation limit per context, in bytes. `None` disables it. See [limits](/guide/limits#memory). |
-| `stack_limit` | Passed to QuickJS; has no effect on the WASI build. See [limits](/guide/limits#stack). |
+| `memory_limit` | QuickJS allocation limit per context, in bytes. `None` disables it. See [limits](/concepts/resource-limits#memory). |
+| `stack_limit` | Passed to QuickJS; has no effect on the WASI build. See [limits](/concepts/resource-limits#deep-recursion). |
 | `transform_flags` | Default source-transform policy for evals and loaded modules. |
 | `clock` | Returns integer nanoseconds since the Unix epoch; backs every guest clock. Must be callable. |
 
 | Method | Behavior |
 | --- | --- |
 | `new_context(*, timeout=5.0) -> Context` | Create a context with its own instance. `timeout` is the default per-eval wall-clock budget in seconds. |
-| `set_module_loader(*, normalize=None, load, transform_flags=None)` | Install the module loader for all current and future contexts. See [modules](/guide/modules-and-typescript). |
+| `set_module_loader(*, normalize=None, load, transform_flags=None)` | Install the module loader for all current and future contexts. See [modules](/concepts/modules). |
 | `create_snapshot(ctx) -> Snapshot` | Same as `ctx.create_snapshot()`. |
 | `async create_snapshot_async(ctx, *, timeout=None) -> Snapshot` | Same as `ctx.create_snapshot_async()`. |
 | `restore_snapshot(snapshot, ctx, *, inject_globals=True)` | Validate, then replace `ctx`'s memory with the image. `inject_globals=False` validates only. |
@@ -55,7 +55,7 @@ Created by `Runtime.new_context()`. Usable as a context manager.
 
 - Scripts always run in strict mode; `strict` has no effect.
 - `filename` is the name passed to a callable `transform_flags` policy.
-- `timeout` (async only) overrides the context default for this call. Awaited host time isn't counted.
+- `timeout` (async only) overrides the context default for this call. Awaited host time is not counted.
 - `transform_flags` overrides the runtime policy for this call; `SourceTransform.NONE` disables transforms.
 - Sync evals raise `ConcurrentEvalError` if an async host function is called; async evals raise it if another
   async eval or `await_promise` is in flight on the context.
@@ -88,7 +88,7 @@ handle from another context.
 | `is_promise()` | Whether the value is a promise. |
 | `get(key)`, `get_index(i)` | Property or element as a new `Handle`. |
 | `set(key, value)` | Set a property from a Python value or a `Handle`. |
-| `has(key)` | True if the property exists and isn't `undefined`. |
+| `has(key)` | True if the property exists and is not `undefined`. |
 | `call(*args)`, `call_method(name, *args)`, `new(*args)` | Call, call a method, or construct. Args may be Python values or handles. Returns a `Handle`. |
 | `to_python(*, allow_opaque=False)` | Marshal. With `allow_opaque=True`, unmarshallable leaves become handles (which you must dispose) and the JSON fast path is skipped. |
 | `async await_promise(*, timeout=None) -> Handle` | Drive the promise to settlement like `eval_async`; returns `self` if not a promise. |
@@ -103,7 +103,7 @@ handle from another context.
 | --- | --- |
 | `globals["x"]` | Marshalled value; `None` if missing. `MarshalError` for functions and other unmarshallable values. |
 | `globals["x"] = v` | Set from a Python value or a same-context `Handle`. |
-| `"x" in globals` | Exists and isn't `undefined`. |
+| `"x" in globals` | Exists and is not `undefined`. |
 | `globals.get_handle("x")` | The value as a `Handle` (you dispose it). |
 
 ## Snapshot
@@ -116,7 +116,7 @@ handle from another context.
 
 ## ThreadWorker
 
-```python
+```python test="skip"
 ThreadWorker(name: str = "quickjs-worker")
 ```
 

@@ -9,11 +9,11 @@ TypeScript is type-stripped by a separate OXC-based wasm module. The package is 
 runtime dependency is `wasmtime`.
 
 **Documentation: https://langchain-ai.github.io/quickjs-rs/** (source in [`docs/`](docs/)): usage guide,
-architecture, [security model](https://langchain-ai.github.io/quickjs-rs/security) and
-[threat model](https://langchain-ai.github.io/quickjs-rs/security/threat-model).
+architecture, [security model](https://langchain-ai.github.io/quickjs-rs/concepts/security-model) and
+[threat model](https://langchain-ai.github.io/quickjs-rs/reference/threat-model).
 
 > [!WARNING]
-> `quickjs-rs` is experimental. Read the [security model](https://langchain-ai.github.io/quickjs-rs/security)
+> `quickjs-rs` is experimental. Read the [security model](https://langchain-ai.github.io/quickjs-rs/concepts/security-model)
 > before running untrusted code with it.
 
 ## Install
@@ -68,14 +68,14 @@ asyncio.run(main())
 
 - **Limits.** `Runtime(memory_limit=...)` caps QuickJS allocations per context (default 64 MiB) and
   `new_context(timeout=...)` sets a wall-clock budget per eval (default 5 s). Both raise (`MemoryLimitError`,
-  `TimeoutError`) and leave the context usable. [Limits](https://langchain-ai.github.io/quickjs-rs/guide/limits)
+  `TimeoutError`) and leave the context usable. [Limits](https://langchain-ai.github.io/quickjs-rs/concepts/resource-limits)
   covers what they don't bound.
 - **ES modules** through a host loader: `rt.set_module_loader(normalize=..., load=...)`. The host owns all resolution
-  policy. [Modules](https://langchain-ai.github.io/quickjs-rs/guide/modules-and-typescript)
+  policy. [Modules](https://langchain-ai.github.io/quickjs-rs/concepts/modules)
 - **TypeScript.** Modules named `.ts`/`.mts`/`.cts`/`.tsx` are type-stripped before QuickJS sees them; evals can opt in
   with `transform_flags`. No type checking.
 - **Snapshots.** `ctx.create_snapshot()` copies the whole guest memory: closures, aliasing and the job queue survive a
-  restore into another context. [Snapshots](https://langchain-ai.github.io/quickjs-rs/guide/snapshots)
+  restore into another context. [Snapshots](https://langchain-ai.github.io/quickjs-rs/concepts/snapshots)
 - **Host clock.** `Runtime(clock=lambda: ns)` backs every guest clock, which also fixes `Math.random()`'s seed.
 
 ```python
@@ -118,8 +118,8 @@ with Runtime() as rt:
 - **Use one `Runtime` per tenant and per thread.** Contexts never share memory, but a runtime shares its loader, clock
   and timeout slot.
 
-Details: [security model](https://langchain-ai.github.io/quickjs-rs/security),
-[threat model](https://langchain-ai.github.io/quickjs-rs/security/threat-model).
+Details: [security model](https://langchain-ai.github.io/quickjs-rs/concepts/security-model),
+[threat model](https://langchain-ai.github.io/quickjs-rs/reference/threat-model).
 
 ## Development
 
