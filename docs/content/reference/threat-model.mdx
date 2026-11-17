@@ -60,7 +60,7 @@ internal correctness of wasmtime, and this docs site.
 | --- | --- | --- |
 | A1 | The host process | Code execution in the Python process means full compromise of what it can reach. |
 | A2 | Host capabilities | Files, network, databases, and credentials reachable through host functions. |
-| A3 | Data in a context | Tool results, secrets, and user data passed in or produced by the script. |
+| A3 | Data in a context | Host function results, secrets, and user data passed in or produced by the script. |
 | A4 | Other contexts and tenants | Other users' state in the same process. |
 | A5 | Availability | CPU, memory, and event-loop time of the host. |
 | A6 | Integrity of results | Applications act on the values evals return. |
@@ -154,7 +154,7 @@ callbacks. Scripts cannot catch the interrupt. Each pass of the async loop runs 
 survives a timeout.
 
 **Left over:** time inside host functions and loader callbacks cannot be interrupted. Awaited host time does not count,
-so a script can keep a run alive by awaiting slow tools. There is no CPU-time budget. Bound runs with
+so a script can keep a run alive by awaiting slow host functions. There is no CPU-time budget. Bound runs with
 `asyncio.timeout`. **Status: Partial.**
 
 ### T7: Memory exhaustion
@@ -237,7 +237,7 @@ control, and check their size before restoring. **Status: Accepted.**
 
 ### T14: Snapshot disclosure
 
-A snapshot holds the whole heap: every string, every tool result, and anything not yet overwritten (A3).
+A snapshot holds the whole heap: every string, every host function result, and anything not yet overwritten (A3).
 
 **Defense:** none in the library.
 

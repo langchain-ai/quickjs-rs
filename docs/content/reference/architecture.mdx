@@ -160,7 +160,7 @@ flags. If a transform fails, its instance is thrown away and recreated on the ne
 | One instance per context | No shared heap between contexts. A snapshot is a memory copy. | About 1.3 MB per context. |
 | Integer-only functions and handles | Small on both sides. No code generation. Value conversion lives in one place, the Python adapter. | Deep values need many calls, which led to the JSON fast path and its rules. |
 | Whole-memory snapshots | Closures, pending promises, and engine state survive exactly, with no serializer to maintain. | Large images, tied to one build, holding every secret, not signed. |
-| Fixed host error message | Exception text often holds paths, queries, or secrets. None of it reaches scripts. | Scripts cannot tell failures apart. Tools that need to say why should return it as data. |
+| Fixed host error message | Exception text often holds paths, queries, or secrets. None of it reaches scripts. | Scripts cannot tell failures apart. Host functions that need to say why should return it as data. |
 | The host owns module resolution | No built-in policy to get wrong. With no loader, nothing loads. | You write the loader. |
 | One host clock, no separate seed | The engine seeds `Math.random()` from the clock, so one setting makes runs repeatable. | Contexts under a frozen clock share random numbers. |
 

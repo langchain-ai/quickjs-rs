@@ -3,7 +3,7 @@ title: Async evaluation
 description: Run scripts that use await and async host functions, and how quickjs-rs counts time while they wait.
 ---
 
-Tool calls are usually slow and usually async. `eval_async` runs a script that can `await` at the top level, drives
+Host functions that do I/O are usually slow and usually async. `eval_async` runs a script that can `await` at the top level, drives
 its promises from asyncio, and returns the value of the last expression.
 
 ## The basics
@@ -73,8 +73,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The tool took 0.5 seconds, more than the 0.2-second timeout, and the eval still succeeded. This keeps slow tools from
-eating a script's budget. It also means a script that keeps awaiting tools can run for as long as the tools keep
+The host function took 0.5 seconds, more than the 0.2-second timeout, and the eval still succeeded. This keeps slow host functions from
+eating a script's budget. It also means a script that keeps awaiting host functions can run for as long as they keep
 answering. To bound the whole run, wrap it in `asyncio.timeout()`:
 
 ```python

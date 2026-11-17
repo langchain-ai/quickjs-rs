@@ -12,8 +12,8 @@ sidebar:
 
 quickjs-rs runs JavaScript from Python, inside a sandbox, in the same process.
 
-It exists for one job: a language model writes a short script that calls your tools, and you run it.
-The script is untrusted, its tools may take seconds, and it has to stop if it loops forever or allocates without end.
+It exists for one job: a language model writes a short script that calls functions you provide, and you run it.
+The script is untrusted, the functions it calls may take seconds, and it has to stop if it loops forever or allocates without end.
 A container per script is slow and heavy for that.
 quickjs-rs starts a fresh JavaScript VM in a couple of milliseconds, after a one-time compile when the process
 creates its first one. The VM runs under wasmtime, with no access to anything you did not hand it.
@@ -41,12 +41,12 @@ There is no file system, no network, no `console`, and no `fetch`, because the V
 ## Why quickjs-rs
 
 - **A real sandbox in your process.** The engine, [quickjs-ng](https://quickjs-ng.github.io/quickjs/), is compiled
-  to WebAssembly. Each context is its own wasm instance with its own memory, so a bug in the engine stays inside
-  that memory.
-- **Tools are plain Python functions.** Register a function, sync or `async`, and scripts call it like any other
-  JavaScript function. Async tools return promises, so `Promise.all` runs them concurrently.
-- **Limits that hold.** Each context has a memory limit (64 MiB by default) and each eval a timeout (5 seconds by
-  default). A script that hits either raises a Python exception and leaves the context usable.
+  to WebAssembly, and each context runs in its own wasm instance. WebAssembly's sandboxing keeps every context
+  walled off from your Python process and from every other context.
+- **Host functions are plain Python functions.** Register a function, sync or `async`, and scripts call it like any
+  other JavaScript function. Async host functions return promises.
+- **Resource limits.** Each context has a memory limit (64 MiB by default) and each eval a timeout (5 seconds by
+  default).
 - **TypeScript without a build step.** Modules named `.ts` or `.tsx` have their types stripped on the way in.
 - **Snapshots.** Copy a context's whole state to bytes and restore it later, closures and pending promises included.
 - **Easy to ship.** One pure-Python wheel that carries the compiled `.wasm`. The only runtime dependency is
@@ -65,6 +65,6 @@ There is no file system, no network, no `console`, and no `fetch`, because the V
 <Cards cols={2}>
   <Card title="Get started" href="/get-started">Install the package and run your first script.</Card>
   <Card title="Security model" href="/concepts/security-model">What the sandbox protects, and what it leaves to you.</Card>
-  <Card title="Host functions" href="/concepts/host-functions">Give scripts tools to call.</Card>
+  <Card title="Host functions" href="/concepts/host-functions">Give scripts Python functions to call.</Card>
   <Card title="Architecture" href="/reference/architecture">What runs where, and why it is built that way.</Card>
 </Cards>

@@ -94,7 +94,7 @@ The header check catches accidents, not attacks. Snapshots are not signed. Whoev
 everything the restored context does and returns, and the header decides how much memory a restore allocates. The
 sandbox still contains the result, the same way it contains any script.
 
-A snapshot also holds everything the context ever had in memory, including tool results and secrets.
+A snapshot also holds everything the context ever had in memory, including host function results and secrets.
 
 - Only restore snapshots you created, from storage only you can write.
 - Sign or MAC snapshots that are stored or sent anywhere less trusted, and verify them before restoring.

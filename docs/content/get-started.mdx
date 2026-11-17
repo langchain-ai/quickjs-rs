@@ -1,6 +1,6 @@
 ---
 title: Get started
-description: Install quickjs-rs, evaluate a script, give it a tool, and run async code.
+description: Install quickjs-rs, evaluate a script, give it a host function, and run async code.
 ---
 
 ## Install
@@ -18,17 +18,13 @@ description: Install quickjs-rs, evaluate a script, give it a tool, and run asyn
   </Tab>
 </Tabs>
 
-quickjs-rs needs Python 3.11 or later. It runs anywhere `wasmtime` has a wheel: Linux, macOS, and Windows, on x86_64
-and arm64.
+quickjs-rs runs anywhere `wasmtime` has a wheel: Linux, macOS, and Windows, on x86_64 and arm64.
 
 ## Evaluate a script
 
-The names come from QuickJS, but the meaning differs. In [QuickJS](https://bellard.org/quickjs/quickjs.html#Runtime-and-contexts), a `JSRuntime` is an object heap and a
-`JSContext` is a realm with its own globals inside it, so contexts on one runtime can share objects. In quickjs-rs,
-every `Context` is a separate WebAssembly instance with its own QuickJS runtime and context, and nothing is shared
-between contexts. A `Runtime` holds the settings its contexts are created with, such as the
-[memory limit](/concepts/resource-limits#memory) and the [module loader](/concepts/modules). See
-[one instance per context](/reference/architecture#one-instance-per-context) for why.
+A `Runtime` holds the settings its contexts are created with, such as the
+[memory limit](/concepts/resource-limits#memory) and the [module loader](/concepts/modules). A `Context` is an
+isolated JavaScript environment with its own globals. Nothing is shared between contexts.
 
 `eval` runs a script and returns the value of its last expression, [converted to Python](/concepts/values).
 
@@ -56,7 +52,7 @@ with Runtime() as rt, rt.new_context() as ctx:
 Closing the context frees its memory. The `with` blocks do that for you. Because state persists, do not reuse a
 context across users. See the [security model](/concepts/security-model#contexts-do-not-share-memory).
 
-## Give the script a tool
+## Give the script a host function
 
 A script can only reach the outside world through functions you register, called
 [host functions](/concepts/host-functions). `@ctx.function` installs a Python function as a JavaScript global with the same name.
@@ -80,7 +76,7 @@ Arguments and return values are converted on the way across. See [values](/conce
 
 ## Run async code
 
-Tools that do I/O are usually `async`. Register them the same way and run the script with [`eval_async`](/concepts/async).
+Host functions that do I/O are usually `async`. Register them the same way and run the script with [`eval_async`](/concepts/async).
 Each call returns a promise, and the script can `await` it at the top level.
 
 ```python
@@ -141,7 +137,7 @@ with Runtime() as rt, rt.new_context(timeout=0.1) as ctx:
 
 <Cards cols={2}>
   <Card title="Security model" href="/concepts/security-model">Read this before you run untrusted code.</Card>
-  <Card title="Host functions" href="/concepts/host-functions">Arguments, errors, async tools, and cancellation.</Card>
+  <Card title="Host functions" href="/concepts/host-functions">Arguments, errors, async host functions, and cancellation.</Card>
   <Card title="Resource limits" href="/concepts/resource-limits">Memory, time, and what each limit does not cover.</Card>
   <Card title="Modules and TypeScript" href="/concepts/modules">Let scripts `import` code you provide.</Card>
 </Cards>
