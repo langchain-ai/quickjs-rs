@@ -3,8 +3,8 @@ title: Host functions
 description: Expose Python functions to JavaScript, sync or async, and control what scripts see when they fail.
 ---
 
-A host function is a Python function that scripts can call. It is the only way a script reaches anything outside the
-sandbox, so it is both the main feature and the main risk.
+A host function is a Python function that scripts call like any other JavaScript function. Scripts use host
+functions to read data, call APIs, and do anything else you write for them.
 
 ## The basics
 
@@ -112,7 +112,43 @@ To tell the script what went wrong, return a value that says so, such as `{"erro
 
 ## Async host functions
 
-An `async def` host function returns a promise. Run scripts that call one with `eval_async`.
+An `async def` host function returns a promise to the script. Run scripts that call one with
+[`eval_async`](/concepts/async), which runs the event loop the function needs.
+
+```python
+import asyncio
+
+from quickjs_rs import Runtime
+
+
+async def main() -> None:
+    with Runtime() as rt, rt.new_context() as ctx:
+
+        @ctx.function
+        async def fetch_user(user_id: int) -> dict:
+            await asyncio.sleep(0.1)
+            return {"id": user_id, "name": "Ada"}
+
+        print(await ctx.eval_async("(await fetch_user(7)).name"))
+        #> Ada
+
+
+asyncio.run(main())
+```
+
+A sync `eval` has no event loop, so calling an async host function from one raises `ConcurrentEvalError`.
+
+If the function raises, the promise rejects with the same `HostError` as a sync failure.
+
+## Concurrency
+
+Calling an async host function starts it right away, as an asyncio task, and hands the script a promise. The script
+decides when to wait for it. That makes the order of `await`s decide what runs at the same time:
+
+- `await a(); await b()` runs `a`, waits for it, then runs `b`.
+- `await Promise.all([a(), b()])` starts both, then waits for both.
+- A call the script never awaits still runs. `eval_async` does not return until every call the script started has
+  finished.
 
 ```python
 import asyncio
@@ -130,33 +166,52 @@ async def main() -> None:
             return {"id": user_id}
 
         start = time.perf_counter()
-        ids = await ctx.eval_async("""
-            const users = await Promise.all([1, 2, 3].map((id) => fetch_user(id)));
-            users.map((u) => u.id)
-        """)
-        print(ids, round(time.perf_counter() - start, 1))
-        #> [1, 2, 3] 0.2
+        await ctx.eval_async("await fetch_user(1); await fetch_user(2)")
+        print("one after another:", time.perf_counter() - start > 0.35)
+        #> one after another: True
+
+        start = time.perf_counter()
+        await ctx.eval_async("await Promise.all([fetch_user(1), fetch_user(2)])")
+        print("together:", time.perf_counter() - start < 0.35)
+        #> together: True
 
 
 asyncio.run(main())
 ```
 
-Each call runs as an asyncio task, so the three calls above run at the same time. The script takes about 0.2
-seconds, not 0.6. When a task finishes, its result
-resolves the promise, or its exception rejects it with the same `HostError` as a sync failure.
+Sync host functions never overlap. Each one runs to completion on the evaluating thread while the script waits.
 
-Async host functions need an event loop to run on. Calling one from a sync `eval` raises `ConcurrentEvalError`.
+## Sync host functions and the timeout
 
-quickjs-rs detects async functions with `inspect.iscoroutinefunction`. If a decorator hides that, registration raises
-`TypeError` rather than guessing. Pass `is_async=True` or `is_async=False` to `register` or `function` to decide.
+The [timeout](/concepts/resource-limits#time) keeps running while a sync host function runs, but it cannot stop the
+function. The engine only checks the deadline while JavaScript runs, so a sync function that takes 10 seconds holds
+the context for 10 seconds. As soon as JavaScript runs again with the deadline already passed, the eval raises
+`TimeoutError`:
 
-## Sync host functions block
+```python
+import time
 
-A sync host function runs on the thread that is evaluating, while the script waits. The timeout cannot interrupt it:
-a sync function that blocks for 10 seconds holds the context for 10 seconds. Keep sync functions fast, and make
-anything that does I/O `async`.
+from quickjs_rs import Runtime, TimeoutError
 
-A sync host function must not call `eval` on its own context.
+with Runtime() as rt, rt.new_context(timeout=0.2) as ctx:
+
+    @ctx.function
+    def slow_lookup() -> int:
+        time.sleep(0.5)
+        return 1
+
+    try:
+        ctx.eval("const n = slow_lookup(); let total = 0; for (let i = 0; i < 1e6; i++) total += n; total")
+    except TimeoutError:
+        print("timed out after the host function returned")
+        #> timed out after the host function returned
+```
+
+Async host functions work the other way: time spent awaiting them does not count against the timeout at all. See
+[async evaluation](/concepts/async#only-javascript-time-counts).
+
+Keep sync host functions fast, and make anything that does I/O `async`. A sync host function must not call `eval` on
+its own context.
 
 ## Cancellation
 
@@ -196,7 +251,8 @@ If the script handles the cancellation and returns a value, `eval_async` returns
 ## Budget your host functions
 
 quickjs-rs does not limit how many host calls a script makes, or how many run at once. A script can start 100,000 async
-calls with one `Promise.all`. Put the limit inside the host function:
+calls with one `Promise.all`. Put the limit inside the host function, and see the
+[security model](/concepts/security-model#limit-what-host-functions-can-be-made-to-do) for why it matters:
 
 ```python
 import asyncio
@@ -235,4 +291,4 @@ asyncio.run(main())
 ## See also
 
 - [Async evaluation](/concepts/async): how `eval_async` drives promises and counts time.
-- [Security model](/concepts/security-model): why host functions are where most of the risk is.
+- [Security model](/concepts/security-model): writing host functions that are safe to expose.

@@ -36,12 +36,26 @@ with Runtime() as rt, rt.new_context() as ctx:
 | `int` | `number` | Above 2⁵³ in size, a `BigInt` instead, so no digits are lost. |
 | `float` | `number` | `nan` and `inf` pass through. |
 | `str` | `string` | |
-| `bytes`, `bytearray` | `Uint8Array` | A copy. |
+| `bytes`, `bytearray` | `Uint8Array` | |
 | `list`, `tuple` | `Array` | |
 | `dict` with `str` keys | `Object` | Other key types raise `MarshalError`. |
 | `Handle` | the value it points to | Must belong to the same context. |
 
 Anything else, such as a `set` or a dataclass, raises `MarshalError`. Convert it first.
+
+Every conversion copies the value into the sandbox. A script that changes a list or a `bytearray` you passed in
+changes its own copy, not your Python object:
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    data = bytearray(b"abc")
+    ctx.globals["data"] = data
+    ctx.eval("data[0] = 120")
+    print(data, ctx.eval("data[0]"))
+    #> bytearray(b'abc') 120
+```
 
 ## JavaScript to Python
 
