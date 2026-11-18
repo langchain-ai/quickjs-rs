@@ -112,10 +112,9 @@ miss it. After a trap, the context's state is not reliable. Close it and make a 
 
 Precise timers are the raw material of timing side channels. A script that can measure how long something takes can
 learn things it was never handed, and Spectre-style attacks use fine timers to read memory across a sandbox boundary.
-[Cloudflare Workers](https://developers.cloudflare.com/workers/reference/security-model/#step-1-disallow-timers-and-multi-threading)
-defends against this by freezing `Date.now()` while code runs.
+The defense is to take the timer away: keep the clock still while code runs.
 
-quickjs-rs lets you do the same. Pass `clock` to a `Runtime`, and every clock a script can read calls it instead of the
+Pass `clock` to a `Runtime`, and every clock a script can read calls it instead of the
 real time: `Date`, `performance.now()`, and the seed for `Math.random()`. It returns integer nanoseconds since the
 Unix epoch. This clock only moves between evals, so a script cannot time anything it does:
 

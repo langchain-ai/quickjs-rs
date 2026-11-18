@@ -15,37 +15,68 @@ shared and what is not, and follows a value, a host call, and an eval across the
 Both files are compiled from source when the wheel is built and ship inside it. Because they are WebAssembly, the
 wheel has no platform-specific code of its own. wasmtime is the only native dependency.
 
-<figure className="docs-block">
-<svg viewBox="0 0 860 430" role="img" aria-label="One process-wide wasmtime Engine, Module and Linkers, shared read-only by every context; each Context owns a Store holding its Instance and linear memory" style={{ width: "100%", height: "auto" }} fill="none" stroke="currentColor" fontFamily="inherit" fontSize="14">
-  <rect x="20" y="20" width="820" height="60" rx="8" strokeWidth="1.5" />
-  <text x="40" y="45" fill="currentColor" stroke="none" fontWeight="600">Python API: Runtime, Context, Handle, Snapshot</text>
-  <text x="40" y="67" fill="currentColor" stroke="none" opacity="0.8">quickjs_rs/runtime.py, context.py, handle.py → host adapter quickjs_rs/_engine.py</text>
-  <rect x="20" y="100" width="820" height="90" rx="8" strokeWidth="1.5" strokeDasharray="6 4" />
-  <text x="40" y="125" fill="currentColor" stroke="none" fontWeight="600">Shared by the whole process (read-only after setup)</text>
-  <text x="40" y="150" fill="currentColor" stroke="none" opacity="0.8">Engine: compiler settings · Module: compiled _guest.wasm, no state</text>
-  <text x="40" y="172" fill="currentColor" stroke="none" opacity="0.8">Linker: definitions of the imports the module needs (env.* and WASI)</text>
-  <rect x="20" y="210" width="400" height="200" rx="8" strokeWidth="2" />
-  <text x="40" y="236" fill="currentColor" stroke="none" fontWeight="600">Context A owns a Store</text>
-  <text x="40" y="262" fill="currentColor" stroke="none" opacity="0.8">Instance of the shared Module</text>
-  <text x="40" y="286" fill="currentColor" stroke="none" opacity="0.8">Linear memory: the whole JS heap</text>
-  <text x="40" y="310" fill="currentColor" stroke="none" opacity="0.8">QuickJS runtime + context inside it</text>
-  <text x="40" y="334" fill="currentColor" stroke="none" opacity="0.8">Handles, pending promises, module cache</text>
-  <text x="40" y="370" fill="currentColor" stroke="none" opacity="0.8">Transform Store + Instance (on first use)</text>
-  <rect x="440" y="210" width="400" height="200" rx="8" strokeWidth="2" />
-  <text x="460" y="236" fill="currentColor" stroke="none" fontWeight="600">Context B owns a Store</text>
-  <text x="460" y="262" fill="currentColor" stroke="none" opacity="0.8">Its own Instance and linear memory</text>
-  <text x="460" y="286" fill="currentColor" stroke="none" opacity="0.8">Nothing mutable is shared with A</text>
-</svg>
-</figure>
 
 ## The wasmtime objects
 
-Two kinds of wasmtime object exist here: code, which is shared, and state, which is not. A
-[`Module`](https://docs.wasmtime.dev/api/wasmtime/struct.Module.html) is compiled code with no state of its own.
-Instantiating it inside a [`Store`](https://docs.wasmtime.dev/api/wasmtime/struct.Store.html) creates an
-[`Instance`](https://docs.wasmtime.dev/api/wasmtime/struct.Instance.html), and that instance's memory, globals, and
-tables belong to the store. Sharing a module between contexts is like two processes running the same binary: the code
-is shared, and every running copy has its own memory.
+wasmtime splits code from state. Code is compiled once and shared by every context. State lives in a store, and each
+context owns one. Sharing a module between contexts is like two processes running the same binary: the code is shared,
+and every running copy has its own memory.
+
+<figure className="docs-block">
+<svg viewBox="0 0 860 560" role="img" aria-label="Shared by the process: the Engine compiles _guest.wasm into a Module, and two Linkers define its imports. Each Context owns a Store. The Module and a Linker are instantiated into it, giving an Instance with its exports and __stack_pointer global, and a linear Memory holding the QuickJS runtime and context, the JS heap, handles, pending promises and module cache. Context B has its own Store, Instance and Memory." style={{ width: "100%", height: "auto" }} fill="none" stroke="currentColor" fontFamily="inherit" fontSize="14">
+  <defs>
+    <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" stroke="none" />
+    </marker>
+  </defs>
+  <rect x="20" y="10" width="820" height="54" rx="8" strokeWidth="1.5" />
+  <text x="40" y="34" fill="currentColor" stroke="none" fontWeight="600">Python API: Runtime, Context, Handle, Snapshot</text>
+  <text x="40" y="54" fill="currentColor" stroke="none" opacity="0.8">runtime.py, context.py, handle.py → the host adapter in _engine.py</text>
+  <rect x="20" y="84" width="820" height="170" rx="8" strokeWidth="1.5" strokeDasharray="6 4" />
+  <text x="40" y="108" fill="currentColor" stroke="none" fontWeight="600">Shared by the whole process, read-only after setup</text>
+  <rect x="40" y="124" width="230" height="110" rx="6" strokeWidth="1.5" />
+  <text x="55" y="148" fill="currentColor" stroke="none" fontWeight="600">Engine</text>
+  <text x="55" y="172" fill="currentColor" stroke="none" opacity="0.8">compiler settings</text>
+  <text x="55" y="194" fill="currentColor" stroke="none" opacity="0.8">one per process</text>
+  <rect x="315" y="124" width="230" height="110" rx="6" strokeWidth="1.5" />
+  <text x="330" y="148" fill="currentColor" stroke="none" fontWeight="600">Module</text>
+  <text x="330" y="172" fill="currentColor" stroke="none" opacity="0.8">_guest.wasm as machine code</text>
+  <text x="330" y="194" fill="currentColor" stroke="none" opacity="0.8">no state</text>
+  <text x="330" y="216" fill="currentColor" stroke="none" opacity="0.8">compiled once, on first use</text>
+  <rect x="590" y="124" width="230" height="110" rx="6" strokeWidth="1.5" />
+  <text x="605" y="148" fill="currentColor" stroke="none" fontWeight="600">Linker (two)</text>
+  <text x="605" y="172" fill="currentColor" stroke="none" opacity="0.8">env.* host imports</text>
+  <text x="605" y="194" fill="currentColor" stroke="none" opacity="0.8">WASI imports</text>
+  <text x="605" y="216" fill="currentColor" stroke="none" opacity="0.8">second one: clock= override</text>
+  <line x1="270" y1="179" x2="313" y2="179" strokeWidth="1.5" markerEnd="url(#arch-arrow)" />
+  <text x="292" y="170" fill="currentColor" stroke="none" textAnchor="middle" fontSize="11">compiles</text>
+  <path d="M 430 234 L 430 262 L 220 262 L 220 300" strokeWidth="1.5" markerEnd="url(#arch-arrow)" />
+  <path d="M 430 262 L 640 262 L 640 300" strokeWidth="1.5" markerEnd="url(#arch-arrow)" />
+  <path d="M 705 234 L 705 262 L 640 262" strokeWidth="1.5" />
+  <text x="430" y="286" fill="currentColor" stroke="none" textAnchor="middle" fontSize="12">instantiate Module + Linker into a new Store (fast)</text>
+  <rect x="20" y="302" width="400" height="246" rx="8" strokeWidth="2" />
+  <text x="40" y="326" fill="currentColor" stroke="none" fontWeight="600">Context A owns Store A</text>
+  <text x="40" y="346" fill="currentColor" stroke="none" opacity="0.8" fontSize="12">all mutable state, plus its WASI settings</text>
+  <rect x="40" y="358" width="360" height="62" rx="6" strokeWidth="1.5" />
+  <text x="55" y="382" fill="currentColor" stroke="none" fontWeight="600">Instance</text>
+  <text x="55" y="404" fill="currentColor" stroke="none" opacity="0.8">exports, __stack_pointer global</text>
+  <rect x="40" y="430" width="360" height="104" rx="6" strokeWidth="1.5" />
+  <text x="55" y="454" fill="currentColor" stroke="none" fontWeight="600">Memory (linear)</text>
+  <text x="55" y="476" fill="currentColor" stroke="none" opacity="0.8">QuickJS runtime + context, the JS heap</text>
+  <text x="55" y="498" fill="currentColor" stroke="none" opacity="0.8">handles, pending promises, module cache</text>
+  <text x="55" y="520" fill="currentColor" stroke="none" opacity="0.8">a snapshot is a copy of this</text>
+  <rect x="440" y="302" width="400" height="246" rx="8" strokeWidth="2" />
+  <text x="460" y="326" fill="currentColor" stroke="none" fontWeight="600">Context B owns Store B</text>
+  <text x="460" y="346" fill="currentColor" stroke="none" opacity="0.8" fontSize="12">nothing mutable shared with A</text>
+  <rect x="460" y="358" width="360" height="62" rx="6" strokeWidth="1.5" />
+  <text x="475" y="382" fill="currentColor" stroke="none" fontWeight="600">Instance</text>
+  <text x="475" y="404" fill="currentColor" stroke="none" opacity="0.8">its own exports and globals</text>
+  <rect x="460" y="430" width="360" height="104" rx="6" strokeWidth="1.5" />
+  <text x="475" y="454" fill="currentColor" stroke="none" fontWeight="600">Memory (linear)</text>
+  <text x="475" y="476" fill="currentColor" stroke="none" opacity="0.8">its own JS heap</text>
+  <text x="475" y="498" fill="currentColor" stroke="none" opacity="0.8">unreachable from A</text>
+</svg>
+</figure>
 
 | Object | How many | What it holds | Where in quickjs-rs |
 | --- | --- | --- | --- |
@@ -78,72 +109,18 @@ Each public class sits on a thin engine class in `_engine.py`, which drives the 
 `Runtime` creates no QuickJS object itself. Each `_Instance` creates its own QuickJS runtime and context inside the
 engine the first time an export needs them.
 
-## What an instance can reach
+## The boundary
 
-An instance can call only what its linker defines. quickjs-rs defines four functions of its own, under `env`:
-
-| Import | Signature | When the engine calls it |
-| --- | --- | --- |
-| `host_call` | `(name_ptr, name_len, this, argc, argv_ptr) -> handle` | A script calls a host function. Returns a result handle, or `-1` for failure. |
-| `host_interrupt` | `() -> i32` | The engine checks whether to stop. Non-zero stops the script. |
-| `host_module_normalize` | `(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> ptr` | An import needs a canonical module name. `0` refuses. |
-| `host_module_load` | `(name_ptr, name_len, out_len_ptr) -> ptr` | A module's source is needed. `0` means not found. |
-
-The engine also imports a few [WASI](https://wasi.dev/) functions, which wasmtime implements from each store's
-`WasiConfig`. quickjs-rs gives that config no preopened directories, no environment variables, and no arguments, so
-these functions have nothing to reach:
-
-| WASI import | What it can do here |
-| --- | --- |
-| `clock_time_get` | Read the time. With `clock=`, it calls your function instead. |
-| `random_get` | Read entropy. Only the Rust standard library uses it, to seed hash tables. Scripts cannot reach it. |
-| `fd_write`, `fd_seek`, `fd_close`, `fd_fdstat_get` | Write to stdout and stderr, which are inherited from your process. The Rust standard library uses them, for example for a panic message. No JavaScript API reaches them. |
-| `environ_get`, `environ_sizes_get` | Read the environment, which is empty. |
-| `proc_exit` | Stop the instance. |
-
-## How values cross
-
-The host and the engine share only the engine's memory and the functions above. Every export takes and returns
-integers. There is no generated interface layer.
-
-- **Bytes in.** The host calls `qjs_alloc(len)`, writes into the buffer, passes `(ptr, len)` to an export, and calls
-  `qjs_free` afterwards.
-- **Bytes out.** The export leaves its result in one buffer. The host reads `qjs_last_ptr()` and `qjs_last_len()`,
-  copies the bytes out, and calls `qjs_result_free()`.
-- **JavaScript values** stay in the engine. Python refers to each one by a handle: a pointer into engine memory to a
-  boxed rquickjs `Persistent<Value>`, which holds one reference. `free_value` releases it.
-
-| Export group | Exports |
-| --- | --- |
-| Memory | `qjs_alloc`, `qjs_free`, `qjs_last_ptr`, `qjs_last_len`, `qjs_result_free` |
-| Create values | `new_null`, `new_undefined`, `new_bool`, `new_number`, `new_string`, `new_bigint`, `new_array`, `new_object`, `new_arraybuffer`, `new_uint8array`, `new_from_json`, `new_error`, `new_function`, `new_promise` |
-| Read values | `type_of`, `get_bool`, `get_number`, `get_string`, `get_bigint`, `get_arraybuffer`, `get_typed_array_buffer`, `to_json`, `is_promise`, `promise_state`, `promise_result` |
-| Objects | `global_object`, `get_prop`, `set_prop`, `has_prop`, `get_index`, `set_index`, `get_own_property_names`, `call_function`, `call_constructor`, `dup_handle`, `free_value` |
-| Run code | `eval_code`, `eval_module`, `eval_async`, `eval_module_async`, `execute_pending_jobs`, `last_exception`, `throw` |
-| Async host calls | `resolve_deferred`, `reject_deferred` |
-| Limits and memory | `set_memory_limit`, `run_gc`, `compute_memory_usage` |
-| State | `memory`, `__stack_pointer` |
-
-Fallible exports return a status code and write their result to a slot the host passes in:
-
-| Code | Name | Meaning |
-| --- | --- | --- |
-| `0` | `STATUS_OK` | Success |
-| `1` | `STATUS_JS_ERROR` | A JavaScript exception is pending. The host takes it with `last_exception`. |
-| `2` | `STATUS_BAD_INPUT` | A null pointer, bad UTF-8, the wrong value type, an input over its cap, or an unknown deferred ID |
-| `3` | `STATUS_PANIC` | A Rust panic, caught at the export |
-| `4` | `STATUS_NO_ENGINE` | The QuickJS runtime or context could not be created |
-
-After untrusted code has run, nothing in engine memory can be trusted:
-
-- `_Instance.read()` checks every pointer and length the host reads against the size of engine memory.
-- Inputs have size caps: 64 MiB for big integers, binary data, and JSON, 4096 bytes for a module name, and 16 MiB for
-  module source.
-- Every export runs inside `catch_unwind`, and the engine is built with `panic = "unwind"`, so a panic becomes
-  `STATUS_PANIC` instead of crossing the boundary.
+An instance can call only what its linker defines: four functions of quickjs-rs's own under `env`, and a few
+[WASI](https://wasi.dev/) functions with nothing behind them. The host and the engine share only those imports, the
+engine's exports, and the engine's linear memory. Every export takes and returns integers, and a JavaScript value
+stays in the engine, where the host refers to it by a handle.
 
 Arrays and objects cross as one JSON string when they can (`to_json` and `new_from_json`), instead of one call per
 property. That is why nested values follow JSON rules. See [values](/concepts/values).
+
+[Engine ABI](/reference/abi) has every import and export, the memory and handle ownership rules, and diagrams of each
+crossing.
 
 ## How a host call works
 

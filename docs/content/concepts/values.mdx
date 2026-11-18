@@ -109,11 +109,6 @@ property by property.
 
 Containers nested more than 128 levels deep raise `MarshalError`. So do cycles.
 
-<Callout type="note" title="Large integers in containers">
-  In quickjs-rs 0.2.6 and earlier, a whole number of 2⁵³ or more inside a container can come back as a slightly
-  different `int`. Return such values as strings or `BigInt` if they must be exact.
-</Callout>
-
 ## Globals
 
 `ctx.globals` reads and writes `globalThis` like a dict:
