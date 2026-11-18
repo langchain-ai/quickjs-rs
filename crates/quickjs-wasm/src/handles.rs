@@ -16,7 +16,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use rquickjs::{Array, ArrayBuffer, Ctx, Function, Object, Persistent, TypedArray, Value};
+use rquickjs::{qjs, Array, ArrayBuffer, Ctx, Function, Object, Persistent, TypedArray, Value};
 
 use crate::engine::{
     with_context, STATUS_BAD_INPUT, STATUS_JS_ERROR, STATUS_NO_ENGINE, STATUS_OK, STATUS_PANIC,
@@ -149,10 +149,7 @@ pub extern "C" fn new_number(bits: u64) -> i32 {
 pub extern "C" fn new_string(ptr: *const u8, len: usize) -> i32 {
     guard_to_handle(move |ctx| {
         let bytes = read_input(ptr, len)?;
-        let text = std::str::from_utf8(bytes).ok()?;
-        rquickjs::String::from_str(ctx.clone(), text)
-            .ok()
-            .map(|s| s.into_value())
+        js_string(ctx, bytes)
     })
 }
 
@@ -309,7 +306,7 @@ pub extern "C" fn get_prop(
     out_handle: *mut i32,
 ) -> i32 {
     guard_handle(out_handle, |ctx| {
-        let key = match read_str(key_ptr, key_len) {
+        let key = match read_key(ctx, key_ptr, key_len) {
             Some(k) => k,
             None => return (STATUS_BAD_INPUT, NULL_HANDLE),
         };
@@ -341,7 +338,7 @@ pub extern "C" fn get_index(obj: i32, index: u32, out_handle: *mut i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn set_prop(obj: i32, key_ptr: *const u8, key_len: usize, value: i32) -> i32 {
     guard(|ctx| {
-        let key = match read_str(key_ptr, key_len) {
+        let key = match read_key(ctx, key_ptr, key_len) {
             Some(k) => k,
             None => return STATUS_BAD_INPUT,
         };
@@ -368,7 +365,7 @@ pub extern "C" fn has_prop(
     out_bool: *mut i32,
 ) -> i32 {
     guard(|ctx| {
-        let key = match read_str(key_ptr, key_len) {
+        let key = match read_key(ctx, key_ptr, key_len) {
             Some(k) => k,
             None => return STATUS_BAD_INPUT,
         };
@@ -445,10 +442,34 @@ pub extern "C" fn call_constructor(
 // Internal helpers.
 // ---------------------------------------------------------------------------
 
-/// Read + validate an untrusted utf8 key from linear memory.
-fn read_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
-    let bytes = read_input(ptr, len)?;
-    std::str::from_utf8(bytes).ok()
+/// Read an untrusted key from linear memory as a JS string.
+fn read_key<'js>(ctx: &Ctx<'js>, ptr: *const u8, len: usize) -> Option<Value<'js>> {
+    js_string(ctx, read_input(ptr, len)?)
+}
+
+/// Build a JS string from WTF-8 bytes. JS strings can hold lone surrogates and
+/// `str` can't, so skip Rust's UTF-8 check and let QuickJS decode them.
+fn js_string<'js>(ctx: &Ctx<'js>, bytes: &[u8]) -> Option<Value<'js>> {
+    let raw = unsafe {
+        qjs::JS_NewStringLen(
+            ctx.as_raw().as_ptr(),
+            bytes.as_ptr().cast(),
+            bytes.len() as _,
+        )
+    };
+    let value = unsafe { Value::from_raw(ctx.clone(), raw) };
+    if value.is_exception() {
+        clear_pending(ctx);
+        return None;
+    }
+    Some(value)
+}
+
+/// A JS string's bytes as QuickJS encodes them: UTF-8, with lone surrogates
+/// kept as WTF-8 (the host decodes with `surrogatepass`).
+fn wtf8_bytes(s: &rquickjs::String<'_>) -> Option<Vec<u8>> {
+    let c = s.clone().to_cstring().ok()?;
+    Some(unsafe { std::slice::from_raw_parts(c.as_ptr().cast::<u8>(), c.len()) }.to_vec())
 }
 
 fn as_object<'js>(handle: i32, ctx: &Ctx<'js>) -> Option<Object<'js>> {
@@ -565,12 +586,12 @@ pub extern "C" fn get_string(handle: i32) -> i32 {
             Some(s) => s,
             None => return STATUS_BAD_INPUT,
         };
-        match s.to_string() {
-            Ok(text) => {
-                set_result(text.into_bytes());
+        match wtf8_bytes(s) {
+            Some(bytes) => {
+                set_result(bytes);
                 STATUS_OK
             }
-            Err(_) => STATUS_JS_ERROR,
+            None => STATUS_JS_ERROR,
         }
     })
 }

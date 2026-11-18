@@ -764,7 +764,7 @@ class _Instance:
         """
         data = json.dumps(
             value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-        ).encode()
+        ).encode(errors="surrogatepass")
         p = self.alloc_write(data)
         out = self.alloc_out()
         try:
@@ -779,7 +779,8 @@ class _Instance:
             self.free(out, 4)
 
     def _new_string(self, s: str) -> int:
-        data = s.encode()
+        # JS strings can hold lone surrogates; they cross as WTF-8.
+        data = s.encode(errors="surrogatepass")
         p = self.alloc_write(data)
         try:
             return int(self.c("new_string", p, len(data)))
@@ -812,7 +813,7 @@ class _Instance:
             self.free(out, 4)
 
     def _set_prop(self, obj: int, key: str, value_handle: int) -> None:
-        data = key.encode()
+        data = key.encode(errors="surrogatepass")
         p = self.alloc_write(data)
         try:
             st = self.c("set_prop", obj, p, len(data), value_handle)
@@ -972,7 +973,7 @@ class _Instance:
         st = self.c("get_string", handle)
         if st != STATUS_OK:
             raise MarshalError(f"get_string status={st}")
-        return self.take_result().decode()
+        return self.take_result().decode(errors="surrogatepass")
 
     def _get_bigint(self, handle: int) -> str:
         st = self.c("get_bigint", handle)
@@ -998,7 +999,7 @@ class _Instance:
         return None
 
     def _get_prop(self, obj: int, key: str) -> int:
-        data = key.encode()
+        data = key.encode(errors="surrogatepass")
         p = self.alloc_write(data)
         out = self.alloc_out()
         try:
@@ -1728,7 +1729,7 @@ class QjsHandle:
         `in` contract). Implemented as: exists (has_prop) and its value's
         type is not "undefined"."""
         inst = self._inst
-        data = key.encode()
+        data = key.encode(errors="surrogatepass")
         p = inst.alloc_write(data)
         out = inst.alloc_out()
         try:
