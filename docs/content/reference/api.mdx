@@ -11,7 +11,6 @@ Everything below is importable from `quickjs_rs`.
 Runtime(
     *,
     memory_limit: int | None = 64 * 1024 * 1024,
-    stack_limit: int | None = 1 * 1024 * 1024,
     transform_flags: SourceTransform | int | Callable[[str], SourceTransform | int] | None = None,
     clock: Callable[[], int] | None = None,
 )
@@ -23,7 +22,6 @@ Usable as a context manager.
 | Parameter | Meaning |
 | --- | --- |
 | `memory_limit` | QuickJS allocation limit per context, in bytes. `None` disables it. See [limits](/concepts/resource-limits#memory). |
-| `stack_limit` | Passed to QuickJS; has no effect on the WASI build. See [limits](/concepts/resource-limits#deep-recursion). |
 | `transform_flags` | Default source-transform policy for evals and loaded modules. |
 | `clock` | Returns integer nanoseconds since the Unix epoch; backs every guest clock. Must be callable. |
 

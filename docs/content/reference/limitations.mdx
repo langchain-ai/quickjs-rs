@@ -8,7 +8,7 @@ Each item says what happens today and what to do about it.
 ## Engine
 
 - **Deep recursion traps.** QuickJS's stack check is compiled out for WASI, so deep recursion raises `wasmtime.Trap`,
-  not a `QuickJSError`. `stack_limit` has no effect. Catch the trap and discard the context. See
+  not a `QuickJSError`. Catch the trap and discard the context. See
   [resource limits](/concepts/resource-limits#deep-recursion).
 - **Always strict.** Scripts run in strict mode. The `strict` parameter on the eval methods is ignored.
 - **No web or Node APIs.** There is no `console`, `setTimeout`, `fetch`, `TextEncoder`, or `require`. Provide what you
