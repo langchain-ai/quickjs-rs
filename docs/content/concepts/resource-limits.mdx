@@ -87,8 +87,8 @@ same time overwrite each other's deadline, so use one runtime per thread. See [t
 
 ## Deep recursion
 
-The engine's stack check does not work on WebAssembly, so there is no stack limit to set. Deep recursion
-runs out of WebAssembly stack and stops the instance with a `wasmtime.Trap`:
+The engine's stack check does not work on WebAssembly. Deep recursion runs out of WebAssembly stack and stops the
+instance with a `wasmtime.Trap`:
 
 ```python
 import wasmtime

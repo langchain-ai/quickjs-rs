@@ -398,11 +398,9 @@ class Context:
           MemoryLimitError. QuickJS raises this from
           JS_ThrowOutOfMemory when an allocation fails past the
           memory limit set by JS_SetMemoryLimit.
-        - Everything else, including stack overflow (rquickjs-0.11
-          surfaces it as RangeError "Maximum call stack size
-          exceeded"), falls through to plain JSError. The
-          test_stack_overflow_is_jserror_not_memory tripwire
-          asserts this routing.
+        - Everything else falls through to plain JSError. Deep
+          recursion never gets here: it traps the wasm instance
+          (see the test_stack_overflow_is_jserror_not_memory xfail).
         """
         if name == "HostError":
             cause = self._last_host_exception

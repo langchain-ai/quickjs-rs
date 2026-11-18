@@ -38,7 +38,7 @@ def test_timeout_terminates_infinite_loop() -> None:
     strict=True,
     reason=(
         "UPSTREAM GAP (quickjs-ng #774): the wasi build compiles OUT QuickJS's "
-        "own stack check (`#if defined(__wasi__)` sets stack_limit=0), so deep "
+        "own stack check (`#if defined(__wasi__)`), so deep "
         "JS recursion exhausts the wasm shadow stack and HARD-TRAPS "
         "('wasm trap: call stack exhausted') before QuickJS can throw a "
         "catchable InternalError. Catchable stack overflow needs a vendored C "
