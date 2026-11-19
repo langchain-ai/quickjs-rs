@@ -13,6 +13,8 @@
 use std::cell::{Cell, RefCell};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::modules::{HostLoader, HostResolver};
 use rquickjs::allocator::RustAllocator;
@@ -26,12 +28,60 @@ pub const STATUS_PANIC: i32 = 3;
 pub const STATUS_NO_ENGINE: i32 = 4;
 
 extern "C" {
-    /// Host interrupt poll. Returns nonzero when the host wants
+    /// Host interrupt poll, used only when the deadline slot asks for it
+    /// (instances with a host clock). Returns nonzero when the host wants
     /// execution to stop (its per-eval deadline elapsed). Called from the
     /// QuickJS interrupt handler on the guest's hot loop, so the host side
     /// MUST be O(1) and allocation-free. The deadline is host-owned — the
     /// guest cannot extend its own deadline.
     fn host_interrupt() -> i32;
+}
+
+/// Per-eval deadline the host writes straight into linear memory: no export
+/// call and no host code on the JS hot loop. The guest picks it up on its next
+/// interrupt poll and checks it against WASI's monotonic clock.
+#[repr(C)]
+pub struct DeadlineSlot {
+    /// Set by the host after writing the fields below; cleared by the guest.
+    dirty: AtomicI32,
+    /// Nonzero: poll `host_interrupt` instead (instances with a host clock,
+    /// whose WASI clock is itself a host callback).
+    host_poll: AtomicI32,
+    /// Time left in nanoseconds; negative means no deadline.
+    timeout_ns: AtomicI64,
+}
+
+static DEADLINE_SLOT: DeadlineSlot = DeadlineSlot {
+    dirty: AtomicI32::new(0),
+    host_poll: AtomicI32::new(0),
+    timeout_ns: AtomicI64::new(-1),
+};
+
+/// Export: address of the deadline slot in linear memory.
+#[no_mangle]
+pub extern "C" fn deadline_slot_ptr() -> *const DeadlineSlot {
+    &DEADLINE_SLOT
+}
+
+fn interrupted() -> bool {
+    thread_local! {
+        static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+        static HOST_POLL: Cell<bool> = const { Cell::new(false) };
+    }
+    if DEADLINE_SLOT.dirty.swap(0, Ordering::Acquire) != 0 {
+        let ns = DEADLINE_SLOT.timeout_ns.load(Ordering::Relaxed);
+        let deadline = u64::try_from(ns)
+            .ok()
+            .map(|ns| Instant::now() + Duration::from_nanos(ns));
+        DEADLINE.with(|d| d.set(deadline));
+        HOST_POLL.with(|h| h.set(DEADLINE_SLOT.host_poll.load(Ordering::Relaxed) != 0));
+    }
+    if HOST_POLL.with(Cell::get) {
+        return unsafe { host_interrupt() != 0 };
+    }
+    DEADLINE
+        .with(Cell::get)
+        .is_some_and(|d| Instant::now() >= d)
 }
 
 struct Engine {
@@ -73,10 +123,10 @@ fn ensure_engine() -> i32 {
             if let Some(limit) = STACK_LIMIT.with(|c| c.get()) {
                 rt.set_max_stack_size(limit);
             }
-            // Install the graceful interrupt handler: poll the host on the JS
-            // hot loop; `true` unwinds JS with `InternalError: interrupted`
+            // Install the graceful interrupt handler: check the deadline on the
+            // JS hot loop; `true` unwinds JS with `InternalError: interrupted`
             // (the host maps it to TimeoutError) while the instance SURVIVES.
-            rt.set_interrupt_handler(Some(Box::new(|| unsafe { host_interrupt() != 0 })));
+            rt.set_interrupt_handler(Some(Box::new(interrupted)));
             let ctx = match Context::full(&rt) {
                 Ok(ctx) => ctx,
                 Err(_) => return STATUS_NO_ENGINE,

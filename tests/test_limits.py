@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 from quickjs_rs import JSError, MemoryLimitError, Runtime, TimeoutError
@@ -26,12 +29,49 @@ def test_memory_limit_counts_many_small_allocations() -> None:
 
 
 def test_timeout_terminates_infinite_loop() -> None:
-    """wall-clock deadline in host_interrupt kicks QuickJS out of
+    """wall-clock deadline (checked in the guest) kicks QuickJS out of
     an infinite loop within the configured budget."""
     with Runtime() as rt:
         with rt.new_context(timeout=0.2) as ctx:
             with pytest.raises(TimeoutError):
                 ctx.eval("while(true){}")
+
+
+_ASYNC_EXC_DURING_BUSY_EVAL = """
+import ctypes, threading, time
+from quickjs_rs import Runtime
+
+class Injected(BaseException):
+    pass
+
+with Runtime() as rt, rt.new_context(timeout=10) as ctx:
+    caught = []
+
+    def run():
+        try:
+            ctx.eval("const end = Date.now() + 1500; while (Date.now() < end) {}")
+        except Injected:
+            caught.append(True)
+
+    t = threading.Thread(target=run)
+    t.start()
+    time.sleep(0.5)
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(t.ident), ctypes.py_object(Injected))
+    t.join()
+    assert caught
+"""
+
+
+def test_async_exception_during_busy_eval_does_not_crash() -> None:
+    """An exception raised into a thread mid-eval (Temporal's deadlock
+    detector, Ctrl-C) used to land in a host callback's entry and segfault.
+    The guest checks the deadline itself, so busy JS runs no host code and
+    the exception surfaces after the eval returns.
+    Runs in a subprocess so a regression fails the test, not the suite."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _ASYNC_EXC_DURING_BUSY_EVAL], capture_output=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
 
 
 @pytest.mark.xfail(

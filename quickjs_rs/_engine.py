@@ -27,10 +27,12 @@ sentinel). Lengths are capped. The wasm sandbox is the isolation boundary.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import struct
 import threading
+import time
 import weakref
 from collections.abc import Callable
 from typing import Any, cast
@@ -378,6 +380,15 @@ class _Instance:
         # __stack_pointer global — captured/restored as part of a snapshot (§6).
         self.sp = cast(wasmtime.Global, e["__stack_pointer"])
         self._exports = e
+        # Host view of the guest's DeadlineSlot (dirty i32, host_poll i32,
+        # timeout_ns i64). Wasmtime reserves a 32-bit memory's whole range up
+        # front, so the base never moves.
+        slot = ctypes.addressof(self.mem.data_ptr(self.store).contents) + self.c(
+            "deadline_slot_ptr"
+        )
+        self._deadline_dirty = ctypes.c_int32.from_address(slot)
+        self._deadline_host_poll = ctypes.c_int32.from_address(slot + 4)
+        self._deadline_ns = ctypes.c_int64.from_address(slot + 8)
         # Set true once a module-mode eval runs — module snapshot is V1-guarded.
         self.module_touched = False
 
@@ -562,6 +573,20 @@ class _Instance:
             # original Python exception at the Python eval boundary — never
             # inside JS.
             return HOST_CALL_ERROR
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Hand the guest its deadline by writing the slot in linear memory.
+        A host clock makes WASI's clock a host callback, so those instances
+        keep polling `host_interrupt` while a deadline is set."""
+        if self._closed:
+            return
+        hosted = self.clock is not None
+        if deadline is None or hosted:
+            self._deadline_ns.value = -1
+        else:
+            self._deadline_ns.value = max(0, int((deadline - time.monotonic()) * 1e9))
+        self._deadline_host_poll.value = 1 if hosted and deadline is not None else 0
+        self._deadline_dirty.value = 1
 
     # -- interrupt poll --
     def _host_interrupt(self) -> int:
@@ -1286,6 +1311,10 @@ class QjsRuntime:
         self._interrupt_handler = handler
         for inst in self._instances:
             inst.interrupt_handler = handler
+
+    def set_deadline(self, deadline: float | None) -> None:
+        for inst in self._instances:
+            inst.set_deadline(deadline)
 
     def clear_interrupt_handler(self) -> None:
         self._interrupt_handler = None
