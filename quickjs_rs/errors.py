@@ -32,6 +32,15 @@ class HostError(JSError):
     """
 
 
+class ExposedHostError(Exception):
+    """Raise from a host function to let JS read the message.
+
+    JS catches it as a ``HostError`` with this exception's message. Any other
+    exception reads ``Host function failed``, so only put text here that the
+    script may see. Uncaught, it escapes ``eval`` as itself, like any host raise.
+    """
+
+
 class MarshalError(QuickJSError):
     """A value could not be marshaled (function in eval result, circular ref)."""
 

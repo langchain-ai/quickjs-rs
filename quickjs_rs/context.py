@@ -13,6 +13,7 @@ import quickjs_rs._engine as _engine
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
+    ExposedHostError,
     HostError,
     InterruptError,
     JSError,
@@ -30,6 +31,13 @@ from quickjs_rs.snapshot import Snapshot
 from quickjs_rs.transforms import TransformFlagsProvider
 
 _HOST_ERROR_SANITIZED_MESSAGE = "Host function failed"
+
+
+def _host_error_message(exc: BaseException) -> str:
+    """The message JS sees for a host raise: hidden unless it is an ExposedHostError."""
+    if isinstance(exc, ExposedHostError):
+        return str(exc)
+    return _HOST_ERROR_SANITIZED_MESSAGE
 
 
 def _public_engine_error(exc: Exception) -> Exception:
@@ -345,8 +353,9 @@ class Context:
     ) -> NoReturn:
         """Raise the exception that should surface for this rejection.
 
-        For an uncaught host-callback rejection (name == "HostError"
-        with a stashed Python exception in the side channel), re-raise
+        For an uncaught host-callback rejection (name == "HostError",
+        the message the bridge gave it, and a stashed Python exception in
+        the side channel), re-raise
         the original Python exception so callers see the underlying
         ValueError / RuntimeError / etc. directly. Otherwise classify
         the JS error and raise the synthesized QuickJSError.
@@ -356,8 +365,8 @@ class Context:
         """
         if (
             name == "HostError"
-            and message == _HOST_ERROR_SANITIZED_MESSAGE
             and self._last_host_exception is not None
+            and message == _host_error_message(self._last_host_exception)
         ):
             # The (name, message) shape matches what the bridge
             # produces, so this rejection is from a host raise rather
@@ -1010,10 +1019,11 @@ class Context:
             except BaseException as exc:
                 resolve_ok = False
                 self._last_host_exception = exc
-                # Stable sanitized payload for the JS-visible rejection;
-                # the side-channel carries the original for re-raise at
-                # the eval boundary if JS doesn't catch.
-                err_message = _HOST_ERROR_SANITIZED_MESSAGE
+                # The JS-visible rejection carries only the sanitized
+                # message or an ExposedHostError's own; the side-channel
+                # carries the original for re-raise at the eval boundary
+                # if JS doesn't catch.
+                err_message = _host_error_message(exc)
                 err_stack = None
 
             try:
@@ -1068,7 +1078,9 @@ class Context:
         On user-fn exception: stash the Python exception on the side
         channel and re-raise a sanitized ``_engine.JSError("HostError",
         "Host function failed", None)`` so JS try/catch sees only the
-        stable message. If the rejection bubbles out of eval uncaught,
+        stable message. An ExposedHostError first throws its own message
+        into the guest, which JS then sees instead. If the rejection
+        bubbles out of eval uncaught,
         ``_raise_classified`` consumes the side-channel and re-raises
         the original Python exception.
         """
@@ -1083,4 +1095,6 @@ class Context:
             return fn(*args)
         except BaseException as exc:
             self._last_host_exception = exc
+            if isinstance(exc, ExposedHostError):
+                self._engine_ctx.throw_error("HostError", str(exc))
             raise _engine.JSError("HostError", _HOST_ERROR_SANITIZED_MESSAGE, None) from None

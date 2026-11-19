@@ -6,6 +6,7 @@ from quickjs_rs.context import Context
 from quickjs_rs.errors import (
     ConcurrentEvalError,
     DeadlockError,
+    ExposedHostError,
     HostCancellationError,
     HostError,
     InterruptError,
@@ -41,6 +42,7 @@ __all__ = [
     "QuickJSError",
     "JSError",
     "HostError",
+    "ExposedHostError",
     "MarshalError",
     "InterruptError",
     "MemoryLimitError",

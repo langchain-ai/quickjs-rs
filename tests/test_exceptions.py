@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from quickjs_rs import HostError, JSError, Runtime
+from quickjs_rs import ExposedHostError, HostError, JSError, Runtime
 
 
 def test_js_thrown_error_surfaces_name_message_stack() -> None:
@@ -121,6 +121,39 @@ def test_js_catches_hosterror_and_reads_name_and_message() -> None:
                 )
                 == "HostError: Host function failed"
             )
+
+
+class RateLimited(ExposedHostError):
+    pass
+
+
+def test_js_reads_the_message_of_an_exposed_host_error() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            def limited() -> None:
+                raise RateLimited("retry in 5s")
+
+            assert (
+                ctx.eval(
+                    "try { limited(); 'unreachable'; }"
+                    " catch (e) { `${e.name}: ${e.message}` }"
+                )
+                == "HostError: retry in 5s"
+            )
+
+
+def test_uncaught_exposed_host_error_bubbles_out_as_original() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            def limited() -> None:
+                raise RateLimited("retry in 5s")
+
+            with pytest.raises(RateLimited, match="retry in 5s"):
+                ctx.eval("limited()")
 
 
 def test_non_error_throw_coerces_to_jserror() -> None:

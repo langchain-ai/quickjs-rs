@@ -554,8 +554,9 @@ class _Instance:
             return self.python_to_handle(result)
         except Exception:
             # ANY dispatcher failure → return the error sentinel and let the
-            # GUEST synthesize a generic sanitized HostError. The host authors
-            # NO JS-visible string on the failure path (no host→guest leak). The
+            # GUEST synthesize a generic sanitized HostError, unless the
+            # dispatcher already threw an ExposedHostError's message into the
+            # guest (QjsContext.throw_error). No other host string crosses. The
             # original exception (incl. a host JSError carrying detail) stays
             # host-side; context.py's side channel recognizes the guest's
             # sanitized "HostError"/"Host function failed" and unwraps to the
@@ -1611,8 +1612,26 @@ class QjsContext:
         self, pending_id: int, name: str, message: str, stack: str | None = None
     ) -> None:
         """Reject the deferred with a JS Error(name, message). context.py passes
-        its already-sanitized ("HostError"/"Host function failed") values here —
-        the deliberate, recognized rejection shape, not a host leak."""
+        only the sanitized ("HostError"/"Host function failed") values or an
+        ExposedHostError's own message here, never other host detail."""
+        self._inst.reject_deferred(pending_id, self._new_error(name, message))
+
+    def throw_error(self, name: str, message: str) -> None:
+        """Set a pending JS Error(name, message) during a sync host call.
+
+        The guest then raises it from the call instead of its own sanitized
+        HostError. context.py uses this only for an ExposedHostError.
+        """
+        err = self._new_error(name, message)
+        if err == NULL_HANDLE:
+            return
+        try:
+            self._inst.c("throw", err)
+        finally:
+            self._inst.c("free_value", err)
+
+    def _new_error(self, name: str, message: str) -> int:
+        """Mint a JS Error(message) with ``name`` set; NULL_HANDLE if minting fails."""
         inst = self._inst
         data = (message or "").encode()
         p = inst.alloc_write(data)
@@ -1632,7 +1651,7 @@ class QjsContext:
                     inst.c("free_value", nh)
             except Exception:
                 pass
-        inst.reject_deferred(pending_id, err)
+        return err
 
     def close(self) -> None:
         if self._closed:

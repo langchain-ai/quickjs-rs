@@ -7,7 +7,7 @@ import functools
 
 import pytest
 
-from quickjs_rs import Runtime
+from quickjs_rs import ExposedHostError, Runtime
 
 
 async def test_async_def_auto_detected_via_decorator() -> None:
@@ -411,6 +411,45 @@ async def test_async_host_function_raises_propagates_original() -> None:
 
             with pytest.raises(CustomError, match="specific failure mode"):
                 await ctx.eval_async("await broken()")
+
+
+async def test_settled_rejection_carries_exposed_message_only() -> None:
+    """A caught rejection shows an ExposedHostError's message; other raises stay hidden."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            async def exposed() -> None:
+                await asyncio.sleep(0)
+                raise ExposedHostError("budget exceeded")
+
+            async def hidden() -> None:
+                await asyncio.sleep(0)
+                raise ValueError("internal detail")
+
+            ctx.register("exposed", exposed)
+            ctx.register("hidden", hidden)
+
+            assert await ctx.eval_async(
+                "(await Promise.allSettled([exposed(), hidden()]))"
+                ".map((o) => `${o.reason.name}: ${o.reason.message}`)"
+            ) == ["HostError: budget exceeded", "HostError: Host function failed"]
+
+
+async def test_uncaught_async_exposed_host_error_propagates_original() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            class BudgetExceeded(ExposedHostError):
+                pass
+
+            async def exposed() -> None:
+                await asyncio.sleep(0)
+                raise BudgetExceeded("budget exceeded")
+
+            ctx.register("exposed", exposed)
+
+            with pytest.raises(BudgetExceeded, match="budget exceeded"):
+                await ctx.eval_async("await exposed()")
 
 
 async def test_handle_call_async_host_fn_raises_concurrent_eval_error() -> None:
