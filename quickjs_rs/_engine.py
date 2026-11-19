@@ -762,9 +762,12 @@ class _Instance:
         Returns None when the payload exceeds the guest input cap, so the
         caller falls back to the per-leaf walk.
         """
-        data = json.dumps(
-            value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-        ).encode()
+        text = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        try:
+            data = text.encode()
+        except UnicodeEncodeError:
+            # Lone surrogates aren't valid UTF-8; ASCII JSON escapes them.
+            data = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
         p = self.alloc_write(data)
         out = self.alloc_out()
         try:
@@ -779,7 +782,14 @@ class _Instance:
             self.free(out, 4)
 
     def _new_string(self, s: str) -> int:
-        data = s.encode()
+        try:
+            data = s.encode()
+        except UnicodeEncodeError:
+            # Lone surrogates aren't valid UTF-8; cross as escaped JSON.
+            handle = self._new_from_json(s)
+            if handle is None:
+                raise MarshalError("string exceeds guest input cap") from None
+            return handle
         p = self.alloc_write(data)
         try:
             return int(self.c("new_string", p, len(data)))
@@ -970,6 +980,9 @@ class _Instance:
 
     def _get_string(self, handle: int) -> str:
         st = self.c("get_string", handle)
+        if st == STATUS_JS_ERROR and self.c("to_json", handle) == STATUS_OK:
+            # Lone surrogates aren't valid UTF-8; JSON.stringify escapes them.
+            return str(json.loads(self.take_result()))
         if st != STATUS_OK:
             raise MarshalError(f"get_string status={st}")
         return self.take_result().decode()

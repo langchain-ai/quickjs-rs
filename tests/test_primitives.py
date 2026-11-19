@@ -32,3 +32,25 @@ def test_large_payload_overflow() -> None:
             # a third distinct payload through the same buffer.
             big = 10**100
             assert ctx.eval(f"{big}n") == big
+
+
+def test_lone_surrogates_cross_both_ways() -> None:
+    """JS strings may hold unpaired surrogates (e.g. from JSON.parse); they
+    round-trip losslessly, matching json.loads on the host side."""
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+            ctx.register("echo", lambda s: s, is_async=False)
+            ctx.register("make", lambda: "a\ud800b", is_async=False)
+
+            assert ctx.eval("JSON.parse('\"\\\\ud800\"')") == "\ud800"
+            assert ctx.eval("['\\udc00x', {k: '\\ud83d'}]") == ["\udc00x", {"k": "\ud83d"}]
+            assert ctx.eval("make().charCodeAt(1)") == 0xD800
+            assert ctx.eval("echo('\\udfff') === '\\udfff'") is True
+            assert ctx.eval("echo({v: '\\udfff'}).v.length") == 1
+
+            ctx.globals["g"] = {"k\udc00": ["v\ud800"]}
+            assert ctx.globals["g"] == {"k\udc00": ["v\ud800"]}
+            assert ctx.eval("g['k\\udc00'][0] === 'v\\ud800'") is True
+
+            # Paired surrogates still decode as one code point.
+            assert ctx.eval("'\\ud83d\\ude00'") == "\U0001f600"
