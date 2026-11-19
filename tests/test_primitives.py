@@ -48,9 +48,9 @@ def test_lone_surrogates_cross_both_ways() -> None:
             assert ctx.eval("echo('\\udfff') === '\\udfff'") is True
             assert ctx.eval("echo({v: '\\udfff'}).v.length") == 1
 
-            ctx.globals["k\udc00"] = "v\ud800"
-            assert ctx.globals["k\udc00"] == "v\ud800"
-            assert ctx.eval("globalThis['k\\udc00'] === 'v\\ud800'") is True
+            ctx.globals["g"] = {"k\udc00": ["v\ud800"]}
+            assert ctx.globals["g"] == {"k\udc00": ["v\ud800"]}
+            assert ctx.eval("g['k\\udc00'][0] === 'v\\ud800'") is True
 
             # Paired surrogates still decode as one code point.
             assert ctx.eval("'\\ud83d\\ude00'") == "\U0001f600"
