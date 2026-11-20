@@ -37,3 +37,5 @@ credentials.json
 uv.lock
 poetry.lock
 Pipfile.lock
+
+.DS_Store

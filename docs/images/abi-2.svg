@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="380" viewBox="0 0 860 380" role="img" aria-label="Sequence: to pass bytes in, the host allocates with qjs_alloc, writes, calls the export, then frees with qjs_free; to get bytes out, the export fills the result buffer, the host reads qjs_last_ptr and qjs_last_len, copies, then calls qjs_result_free" fill="none" stroke="currentColor"  font-size="14">
+  <title>Sequence: to pass bytes in, the host allocates with qjs_alloc, writes, calls the export, then frees with qjs_free; to get bytes out, the export fills the result buffer, the host reads qjs_last_ptr and qjs_last_len, copies, then calls qjs_result_free</title>
+  <style>svg{color:#1f2328;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}@media (prefers-color-scheme:dark){svg{color:#e6edf3}}</style>
+  <defs>
+    <marker id="abi-seq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" stroke="none" />
+    </marker>
+  </defs>
+  <text x="200" y="30" fill="currentColor" stroke="none" text-anchor="middle" font-weight="600">Host</text>
+  <text x="660" y="30" fill="currentColor" stroke="none" text-anchor="middle" font-weight="600">Engine</text>
+  <line x1="200" y1="42" x2="200" y2="365" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" />
+  <line x1="660" y1="42" x2="660" y2="365" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" />
+  <text x="20" y="70" fill="currentColor" stroke="none" font-weight="600">In</text>
+  <line x1="200" y1="80" x2="658" y2="80" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="74" fill="currentColor" stroke="none" text-anchor="middle">qjs_alloc(len) → ptr</text>
+  <text x="215" y="108" fill="currentColor" stroke="none" opacity="0.8">write bytes at ptr</text>
+  <line x1="200" y1="130" x2="658" y2="130" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="124" fill="currentColor" stroke="none" text-anchor="middle">new_string(ptr, len) → handle</text>
+  <line x1="200" y1="170" x2="658" y2="170" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="164" fill="currentColor" stroke="none" text-anchor="middle">qjs_free(ptr, len)</text>
+  <line x1="20" y1="195" x2="840" y2="195" stroke-width="1" opacity="0.3" />
+  <text x="20" y="225" fill="currentColor" stroke="none" font-weight="600">Out</text>
+  <line x1="200" y1="235" x2="658" y2="235" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="229" fill="currentColor" stroke="none" text-anchor="middle">get_string(handle) → status</text>
+  <text x="645" y="260" fill="currentColor" stroke="none" text-anchor="end" opacity="0.8">fills the result buffer</text>
+  <line x1="200" y1="285" x2="658" y2="285" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="279" fill="currentColor" stroke="none" text-anchor="middle">qjs_last_ptr(), qjs_last_len()</text>
+  <text x="215" y="313" fill="currentColor" stroke="none" opacity="0.8">bounds-check, copy the bytes out</text>
+  <line x1="200" y1="340" x2="658" y2="340" stroke-width="1.5" marker-end="url(#abi-seq)" />
+  <text x="430" y="334" fill="currentColor" stroke="none" text-anchor="middle">qjs_result_free()</text>
+</svg>
