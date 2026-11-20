@@ -14,6 +14,7 @@ from source on every build, and never committed.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,12 @@ _GUESTS = (
         "quickjs_wasm_transform.wasm",
         _ROOT / "quickjs_rs" / "_transform.wasm",
     ),
+    (
+        "snapshot diff guest",
+        _ROOT / "crates" / "snapshot-diff-wasm",
+        "snapshot_diff_wasm.wasm",
+        _ROOT / "quickjs_rs" / "_diff.wasm",
+    ),
 )
 
 
@@ -47,7 +54,9 @@ def _check_toolchain() -> None:
     try:
         out = subprocess.run(
             ["rustup", "target", "list", "--installed"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
         if _TARGET not in out.split():
             sys.exit(
@@ -60,8 +69,31 @@ def _check_toolchain() -> None:
         pass
 
 
+def _diff_build_environment() -> dict[str, str]:
+    """Reuse QuickJS's downloaded WASI SDK unless compilers are configured."""
+    env = os.environ.copy()
+    if env.get("CC_wasm32_wasip1") and env.get("AR_wasm32_wasip1"):
+        return env
+    suffix = ".exe" if sys.platform == "win32" else ""
+    if env.get("WASI_SDK"):
+        sdk = Path(env["WASI_SDK"])
+    else:
+        build_dir = _ROOT / "crates" / "quickjs-wasm" / "target" / _TARGET / "release" / "build"
+        candidates = sorted(build_dir.glob(f"rquickjs-sys-*/out/wasi-sdk/bin/clang{suffix}"))
+        if not candidates:
+            sys.exit("error: set WASI_SDK or CC_wasm32_wasip1/AR_wasm32_wasip1 for the diff guest")
+        sdk = candidates[0].parent.parent
+    compiler = sdk / "bin" / f"clang{suffix}"
+    archiver = sdk / "bin" / f"llvm-ar{suffix}"
+    if not compiler.is_file() or not archiver.is_file():
+        sys.exit(f"error: WASI SDK is missing clang/llvm-ar: {sdk}")
+    env.setdefault("CC_wasm32_wasip1", str(compiler))
+    env.setdefault("AR_wasm32_wasip1", str(archiver))
+    return env
+
+
 def build() -> list[Path]:
-    """Build both wasm guests and copy them into the package."""
+    """Build and bundle the WASM guests."""
     _check_toolchain()
     bundled: list[Path] = []
     for label, crate_dir, artifact_name, bundle_dest in _GUESTS:
@@ -71,6 +103,7 @@ def build() -> list[Path]:
             ["cargo", "build", "--release", "--target", _TARGET],
             cwd=crate_dir,
             check=True,
+            env=_diff_build_environment() if artifact_name == "snapshot_diff_wasm.wasm" else None,
         )
         if not artifact.exists():
             sys.exit(f"error: expected artifact not produced at {artifact}")
