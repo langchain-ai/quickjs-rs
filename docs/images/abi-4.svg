@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="400" viewBox="0 0 860 400" role="img" aria-label="Sequence of a host call: the script calls the host function; the engine mints handles for this and the arguments and calls host_call; the host reads the name and argument handles, calling engine exports to convert each argument; it runs the Python function and mints a result handle with new_* exports; it returns the handle; the engine takes the result, frees the argument handles and returns to the script" fill="none" stroke="currentColor"  font-size="14">
+  <title>Sequence of a host call: the script calls the host function; the engine mints handles for this and the arguments and calls host_call; the host reads the name and argument handles, calling engine exports to convert each argument; it runs the Python function and mints a result handle with new_* exports; it returns the handle; the engine takes the result, frees the argument handles and returns to the script</title>
+  <style>svg{color:#1f2328;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}@media (prefers-color-scheme:dark){svg{color:#e6edf3}}</style>
+  <defs>
+    <marker id="abi-hc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" stroke="none" />
+    </marker>
+  </defs>
+  <text x="200" y="30" fill="currentColor" stroke="none" text-anchor="middle" font-weight="600">Host</text>
+  <text x="660" y="30" fill="currentColor" stroke="none" text-anchor="middle" font-weight="600">Engine</text>
+  <line x1="200" y1="42" x2="200" y2="385" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" />
+  <line x1="660" y1="42" x2="660" y2="385" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" />
+  <text x="675" y="70" fill="currentColor" stroke="none" opacity="0.8">script calls add(1, 2)</text>
+  <text x="675" y="94" fill="currentColor" stroke="none" opacity="0.8">mint handles for this, 1, 2</text>
+  <line x1="660" y1="120" x2="202" y2="120" stroke-width="1.5" marker-end="url(#abi-hc)" />
+  <text x="430" y="114" fill="currentColor" stroke="none" text-anchor="middle">host_call("add", this, 2, argv)</text>
+  <text x="185" y="148" fill="currentColor" stroke="none" text-anchor="end" opacity="0.8">read name, look it up</text>
+  <line x1="200" y1="175" x2="658" y2="175" stroke-width="1.5" marker-end="url(#abi-hc)" />
+  <text x="430" y="169" fill="currentColor" stroke="none" text-anchor="middle">type_of, get_number (per argument)</text>
+  <text x="185" y="205" fill="currentColor" stroke="none" text-anchor="end" opacity="0.8">run add(1, 2) → 3</text>
+  <line x1="200" y1="232" x2="658" y2="232" stroke-width="1.5" marker-end="url(#abi-hc)" />
+  <text x="430" y="226" fill="currentColor" stroke="none" text-anchor="middle">new_number(3) → result handle</text>
+  <line x1="660" y1="285" x2="202" y2="285" stroke-width="1.5" stroke-dasharray="5 4" marker-start="url(#abi-hc)" />
+  <text x="430" y="279" fill="currentColor" stroke="none" text-anchor="middle">return result handle (or -1)</text>
+  <text x="675" y="320" fill="currentColor" stroke="none" opacity="0.8">take the result handle</text>
+  <text x="675" y="344" fill="currentColor" stroke="none" opacity="0.8">free this and argument handles</text>
+  <text x="675" y="368" fill="currentColor" stroke="none" opacity="0.8">script gets 3</text>
+</svg>

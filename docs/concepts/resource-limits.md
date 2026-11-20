@@ -1,0 +1,149 @@
+# Resource limits
+
+A script can allocate without end, loop forever, or recurse until something breaks. quickjs-rs gives every context a
+memory limit and every eval a timeout. When a script hits either one, the eval raises and the context stays usable.
+
+| Limit | Set with | Default | Raises |
+| --- | --- | --- | --- |
+| Memory | `Runtime(memory_limit=...)` | 64 MiB per context | `MemoryLimitError` |
+| Time | `rt.new_context(timeout=...)`, or `timeout=` on async calls | 5 seconds per eval | `TimeoutError` |
+| Stack | Not enforced, see [recursion](#deep-recursion) | | `wasmtime.Trap` |
+
+## Memory
+
+```python
+from quickjs_rs import MemoryLimitError, Runtime
+
+with Runtime(memory_limit=8 * 1024 * 1024) as rt, rt.new_context() as ctx:
+    try:
+        ctx.eval("const chunks = []; while (true) chunks.push('x'.repeat(100_000) + chunks.length)")
+    except MemoryLimitError:
+        print("out of memory")
+        #> out of memory
+    print(ctx.eval("chunks.length = 0; 1 + 1"))
+    #> 2
+```
+
+The limit counts every allocation the JavaScript engine makes, at its real size. An allocation that would cross the
+limit fails, and the script sees `InternalError: out of memory`. A script can catch that error and free memory. It
+cannot hold more than the limit either way.
+
+`memory_limit=None` removes the limit. Do not do that for untrusted code.
+
+The limit does not cover everything:
+
+- **Memory never shrinks.** WebAssembly memory can grow but not shrink. A context that peaked at 60 MB keeps 60 MB
+  until you close it, even after its garbage is collected. Recycle contexts after heavy runs.
+- **Some memory sits outside the limit.** The engine's own bookkeeping, such as handle storage and conversion
+  buffers, is not counted. No hard cap is set on the WebAssembly memory as a whole.
+- **Python memory is yours.** Values you convert out of the sandbox, and values your host functions build, live in
+  Python.
+
+`rt.memory_usage()` returns the engine's counters, such as `malloc_size` and
+`obj_count`, summed over the runtime's live contexts.
+
+## Time
+
+Each eval gets a time budget: 5 seconds by default. A script that runs past it is stopped, and the eval raises
+`TimeoutError`.
+
+```python
+from quickjs_rs import Runtime, TimeoutError
+
+with Runtime() as rt, rt.new_context(timeout=0.1) as ctx:
+    try:
+        ctx.eval("try { while (true) {} } catch (e) { 'caught' }")
+    except TimeoutError:
+        print("timed out")
+        #> timed out
+    print(ctx.eval("1 + 2"))
+    #> 3
+```
+
+The budget starts when the eval starts. While JavaScript runs, the engine checks it every so often. Once it has run
+out, the engine stops the script without running `catch` or `finally` blocks, so a script cannot keep itself alive.
+The next eval starts with a full budget.
+
+What counts against the budget depends on what is running:
+
+| While this runs | Counts against the timeout | Can be stopped |
+| --- | --- | --- |
+| JavaScript | Yes | Yes |
+| A sync host function or a module loader callback | Yes | No, the script stops after it returns |
+| An awaited async host function | No | Not by the timeout |
+
+The last row means an async script can run much longer than its timeout if it keeps awaiting slow host functions.
+Wrap `eval_async` in `asyncio.timeout()` to bound the whole run. See
+[async evaluation](../concepts/async.md#only-javascript-time-counts).
+
+Set the default with `rt.new_context(timeout=...)`. `eval_async`, `eval_handle_async`, and `await_promise` also take
+`timeout=` for one call.
+
+A runtime keeps one deadline for all of its contexts. Two threads evaluating on contexts of the same runtime at the
+same time overwrite each other's deadline, so use one runtime per thread. See [threads](../concepts/threads.md).
+
+## Deep recursion
+
+The engine's stack check does not work on WebAssembly. Deep recursion runs out of WebAssembly stack and stops the
+instance with a `wasmtime.Trap`:
+
+```python
+import wasmtime
+
+from quickjs_rs import QuickJSError, Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    try:
+        ctx.eval("function recurse() { return recurse() } recurse()")
+    except QuickJSError:
+        print("not raised")
+    except wasmtime.Trap:
+        print("trapped")
+        #> trapped
+```
+
+The trap is contained by the sandbox, but it is not a `QuickJSError`, so code that only catches `QuickJSError` will
+miss it. After a trap, the context's state is not reliable. Close it and make a new one.
+
+## The clock
+
+Precise timers are the raw material of timing side channels. A script that can measure how long something takes can
+learn things it was never handed, and Spectre-style attacks use fine timers to read memory across a sandbox boundary.
+The defense is to take the timer away: keep the clock still while code runs.
+
+Pass `clock` to a `Runtime`, and every clock a script can read calls it instead of the
+real time: `Date`, `performance.now()`, and the seed for `Math.random()`. It returns integer nanoseconds since the
+Unix epoch. This clock only moves between evals, so a script cannot time anything it does:
+
+```python
+import time
+
+from quickjs_rs import Runtime
+
+now = time.time_ns()
+
+
+def clock() -> int:
+    return now
+
+
+with Runtime(clock=clock) as rt, rt.new_context() as ctx:
+    print(ctx.eval("""
+        const t0 = Date.now(), p0 = performance.now();
+        for (let i = 0; i < 1e6; i++);
+        [Date.now() - t0, performance.now() - p0]
+    """))
+    #> [0, 0]
+    now = time.time_ns()
+```
+
+A frozen clock removes the timers quickjs-rs provides. A host function that returns the time, or whose results
+depend on timing, can still leak it.
+
+A fixed clock also makes runs repeatable, because it fixes the `Math.random()` seed. Sibling contexts created under
+the same clock value get the same random numbers. `Math.random()` is never suitable for secrets.
+
+## See also
+
+- [Security model](../concepts/security-model.md): how the limits fit into running untrusted code.
+- [Threat model](../reference/threat-model.md#resource-exhaustion): every known gap, with its status.

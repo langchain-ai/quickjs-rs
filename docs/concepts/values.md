@@ -1,0 +1,156 @@
+# Values
+
+Every value that crosses between Python and JavaScript is copied. Results of `eval`, host-function arguments and
+return values, and `ctx.globals` all convert this way. A few JavaScript values, such as functions and promises, have
+no Python equivalent. For those you get a `Handle` instead.
+
+## Python to JavaScript
+
+```python
+from quickjs_rs import UNDEFINED, Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    ctx.globals["value"] = {
+        "none": None,
+        "missing": UNDEFINED,
+        "big": 2**64,
+        "data": b"\x01\x02",
+        "items": (1, 2.5, "three"),
+    }
+    print(ctx.eval("""
+        Object.entries(value).map(([k, v]) =>
+            `${k}: ${v === undefined ? "undefined" : v?.constructor?.name ?? v}`
+        ).join(", ")
+    """))
+    #> none: null, missing: undefined, big: BigInt, data: Uint8Array, items: Array
+```
+
+| Python | JavaScript | Notes |
+| --- | --- | --- |
+| `None` | `null` | |
+| `quickjs_rs.UNDEFINED` | `undefined` | A falsy singleton. |
+| `bool` | `boolean` | |
+| `int` | `number` | Above 2⁵³ in size, a `BigInt` instead, so no digits are lost. |
+| `float` | `number` | `nan` and `inf` pass through. |
+| `str` | `string` | |
+| `bytes`, `bytearray` | `Uint8Array` | |
+| `list`, `tuple` | `Array` | |
+| `dict` with `str` keys | `Object` | Other key types raise `MarshalError`. |
+| `Handle` | the value it points to | Must belong to the same context. |
+
+Anything else, such as a `set` or a dataclass, raises `MarshalError`. Convert it first.
+
+Every conversion copies the value into the sandbox. A script that changes a list or a `bytearray` you passed in
+changes its own copy, not your Python object:
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    data = bytearray(b"abc")
+    ctx.globals["data"] = data
+    ctx.eval("data[0] = 120")
+    print(data, ctx.eval("data[0]"))
+    #> bytearray(b'abc') 120
+```
+
+## JavaScript to Python
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    print(ctx.eval("[null, true, 3.0, 2.5, 10n ** 20n, 'hi']"))
+    #> [None, True, 3, 2.5, 100000000000000000000, 'hi']
+    print(ctx.eval("new Uint8Array([1, 2, 3])"))
+    #> b'\x01\x02\x03'
+    print(ctx.eval("undefined"))
+    #> None
+```
+
+| JavaScript | Python | Notes |
+| --- | --- | --- |
+| `undefined`, `null` | `None` | |
+| `boolean` | `bool` | |
+| `number` | `int` or `float` | `int` when it is a whole number smaller than 2⁵³, so `3.0` becomes `3`. |
+| `bigint` | `int` | |
+| `string` | `str` | |
+| `Uint8Array`, `ArrayBuffer` | `bytes` | At the top level only. See below. |
+| `Array` | `list` | |
+| other objects | `dict` | Own enumerable string keys. |
+| function, promise, symbol | | Raises `MarshalError`. Use a `Handle`. |
+
+## Nested values follow JSON rules
+
+Arrays and objects come out of JavaScript through `JSON.stringify`, which crosses the boundary once instead of once
+per property. That means values inside a container follow JSON's rules, not the table above:
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    print(ctx.eval("({ fn: () => 1, nan: NaN, gone: undefined, kept: [undefined] })"))
+    #> {'nan': None, 'kept': [None]}
+    print(ctx.eval("({ when: new Date(0), map: new Map([[1, 2]]) })"))
+    #> {'when': '1970-01-01T00:00:00.000Z', 'map': {}}
+    print(ctx.eval("[new Uint8Array([1, 2])]"))
+    #> [{'0': 1, '1': 2}]
+```
+
+Functions and `undefined`-valued keys disappear, `NaN` becomes `None`, a `Date` becomes a string, and a `Map` becomes
+an empty dict. If a script needs to return one of these, convert it in JavaScript first, for example with
+`Object.fromEntries(map)`.
+
+If `JSON.stringify` fails, for example because the value contains a `BigInt`, quickjs-rs falls back to converting
+property by property.
+
+Containers nested more than 128 levels deep raise `MarshalError`. So do cycles.
+
+## Globals
+
+`ctx.globals` reads and writes `globalThis` like a dict:
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    ctx.globals["config"] = {"retries": 3}
+    print(ctx.eval("config.retries + 1"))
+    #> 4
+    print(ctx.globals["config"], "config" in ctx.globals, ctx.globals["nothing"])
+    #> {'retries': 3} True None
+```
+
+`del ctx.globals[key]` is not supported. Run `delete globalThis.key` instead.
+
+## Handles
+
+A `Handle` is a reference to a value that stays inside the sandbox. Use one when a value cannot be converted, or when
+you want to call into it from Python.
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    with ctx.eval_handle("({ greet: (name) => `hi ${name}`, items: [1, 2] })") as obj:
+        print(obj.type_of)
+        #> object
+        with obj.get("greet") as greet, greet.call("Ada") as result:
+            print(result.to_python())
+            #> hi Ada
+        with obj.call_method("greet", "Grace") as result:
+            print(result.to_python())
+            #> hi Grace
+```
+
+- `eval_handle`, `get`, `get_index`, `call`, `call_method`, and `new` each return a new handle.
+- Release a handle with `dispose()` or a `with` block. A handle that is garbage-collected while still open emits a
+  `ResourceWarning`.
+- `to_python(allow_opaque=True)` converts what it can and returns handles for the rest.
+- A handle works only with the context that made it. Using it after it is disposed, after the context closes, or with
+  another context raises `InvalidHandleError`.
+
+## See also
+
+- [Host functions](../concepts/host-functions.md): where most conversions happen.
+- [API reference](../reference/api.md): every `Handle` method.

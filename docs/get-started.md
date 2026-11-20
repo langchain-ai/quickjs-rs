@@ -1,0 +1,137 @@
+# Get started
+
+## Install
+
+With pip:
+
+```sh
+pip install quickjs-rs
+```
+
+With uv:
+
+```sh
+uv add quickjs-rs
+```
+
+quickjs-rs runs anywhere `wasmtime` has a wheel: Linux, macOS, and Windows, on x86_64 and arm64.
+
+## Evaluate a script
+
+A `Runtime` holds the settings its contexts are created with, such as the
+[memory limit](concepts/resource-limits.md#memory) and the [module loader](concepts/modules.md). A `Context` is an
+isolated JavaScript environment with its own globals. Nothing is shared between contexts.
+
+`eval` runs a script and returns the value of its last expression, [converted to Python](concepts/values.md).
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    print(ctx.eval("[1, 2, 3].map((x) => x * 2)"))
+    #> [2, 4, 6]
+    print(ctx.eval("({ name: 'Ada', langs: ['js', 'py'] })"))
+    #> {'name': 'Ada', 'langs': ['js', 'py']}
+```
+
+State stays in the context between calls, the way it does in a REPL:
+
+```python
+from quickjs_rs import Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+    ctx.eval("const greeting = 'hello'")
+    print(ctx.eval("greeting.toUpperCase()"))
+    #> HELLO
+```
+
+Closing the context frees its memory. The `with` blocks do that for you. Because state persists, do not reuse a
+context across users. See the [security model](concepts/security-model.md#contexts-do-not-share-memory).
+
+## Give the script a host function
+
+A script can only reach the outside world through functions you register, called
+[host functions](concepts/host-functions.md). `@ctx.function` installs a Python function as a JavaScript global with the same name.
+
+```python
+from quickjs_rs import Runtime
+
+users = {7: {"id": 7, "name": "Ada"}}
+
+with Runtime() as rt, rt.new_context() as ctx:
+
+    @ctx.function
+    def lookup(user_id: int) -> dict:
+        return users[user_id]
+
+    print(ctx.eval("lookup(7).name"))
+    #> Ada
+```
+
+Arguments and return values are converted on the way across. See [values](concepts/values.md) for the rules.
+
+## Run async code
+
+Host functions that do I/O are usually `async`. Register them the same way and run the script with [`eval_async`](concepts/async.md).
+Each call returns a promise, and the script can `await` it at the top level.
+
+```python
+import asyncio
+
+from quickjs_rs import Runtime
+
+
+async def main() -> None:
+    with Runtime() as rt, rt.new_context(timeout=2.0) as ctx:
+
+        @ctx.function
+        async def search(query: str) -> list[str]:
+            await asyncio.sleep(0.1)
+            return [f"{query}-1", f"{query}-2"]
+
+        hits = await ctx.eval_async("""
+            const [a, b] = await Promise.all([search("cats"), search("dogs")]);
+            [...a, ...b]
+        """)
+        print(hits)
+        #> ['cats-1', 'cats-2', 'dogs-1', 'dogs-2']
+
+
+asyncio.run(main())
+```
+
+The two searches run at the same time, so the script takes about 0.1 seconds, not 0.2. See
+[async host functions](concepts/host-functions.md#async-host-functions).
+
+## Handle failures
+
+A script that throws raises `JSError`. A script that runs past its [timeout](concepts/resource-limits.md#time) raises
+`TimeoutError`. Both are subclasses of `QuickJSError`, and the context is still usable afterwards. See
+[errors](reference/errors.md) for the full list.
+
+```python
+from quickjs_rs import JSError, Runtime, TimeoutError
+
+with Runtime() as rt, rt.new_context(timeout=0.1) as ctx:
+    try:
+        ctx.eval("null.name")
+    except JSError as e:
+        print(e.name, "-", e.message)
+        #> TypeError - cannot read property 'name' of null
+
+    try:
+        ctx.eval("while (true) {}")
+    except TimeoutError:
+        print("timed out")
+        #> timed out
+
+    print(ctx.eval("1 + 1"))
+    #> 2
+```
+
+## Next steps
+
+- [Security model](concepts/security-model.md): Read this before you run untrusted code.
+- [Host functions](concepts/host-functions.md): Arguments, errors, async host functions, and cancellation.
+- [Resource limits](concepts/resource-limits.md): Memory, time, and what each limit does not cover.
+- [Modules and TypeScript](concepts/modules.md): Let scripts `import` code you provide.
