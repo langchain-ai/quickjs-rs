@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="220" viewBox="0 0 860 220" role="img" aria-label="A Python Handle wraps a QjsHandle holding an integer; the integer is the address of a Box of Persistent Value in linear memory; the Persistent holds one reference to the JSValue on the QuickJS heap" fill="none" stroke="currentColor"  font-size="14">
+  <title>A Python Handle wraps a QjsHandle holding an integer; the integer is the address of a Box of Persistent Value in linear memory; the Persistent holds one reference to the JSValue on the QuickJS heap</title>
+  <style>svg{color:#1f2328;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}@media (prefers-color-scheme:dark){svg{color:#e6edf3}}</style>
+  <defs>
+    <marker id="abi-h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" stroke="none" />
+    </marker>
+  </defs>
+  <rect x="20" y="40" width="220" height="110" rx="8" stroke-width="2" />
+  <text x="40" y="68" fill="currentColor" stroke="none" font-weight="600">Python</text>
+  <text x="40" y="94" fill="currentColor" stroke="none" opacity="0.8">Handle → QjsHandle</text>
+  <text x="40" y="118" fill="currentColor" stroke="none" opacity="0.8">raw = 1179664</text>
+  <text x="40" y="140" fill="currentColor" stroke="none" opacity="0.8">disposed = False</text>
+  <rect x="300" y="20" width="540" height="180" rx="8" stroke-width="1.5" stroke-dasharray="6 4" />
+  <text x="320" y="44" fill="currentColor" stroke="none" font-weight="600">Linear memory</text>
+  <rect x="320" y="65" width="230" height="85" rx="6" stroke-width="1.5" />
+  <text x="335" y="90" fill="currentColor" stroke="none">Box&lt;Persistent&lt;Value&gt;&gt;</text>
+  <text x="335" y="114" fill="currentColor" stroke="none" opacity="0.8">at offset 1179664</text>
+  <text x="335" y="136" fill="currentColor" stroke="none" opacity="0.8">holds 1 reference</text>
+  <rect x="610" y="65" width="210" height="85" rx="6" stroke-width="1.5" />
+  <text x="625" y="90" fill="currentColor" stroke="none">JSValue</text>
+  <text x="625" y="114" fill="currentColor" stroke="none" opacity="0.8">QuickJS heap</text>
+  <text x="625" y="136" fill="currentColor" stroke="none" opacity="0.8">refcounted, GC'd</text>
+  <line x1="240" y1="107" x2="318" y2="107" stroke-width="1.5" marker-end="url(#abi-h)" />
+  <line x1="550" y1="107" x2="608" y2="107" stroke-width="1.5" marker-end="url(#abi-h)" />
+  <text x="320" y="185" fill="currentColor" stroke="none" opacity="0.8">free_value(1179664) drops the box and its reference</text>
+</svg>

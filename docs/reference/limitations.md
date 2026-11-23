@@ -1,0 +1,55 @@
+# Limitations
+
+Each item says what happens today and what to do about it.
+
+## Engine
+
+- **Deep recursion traps.** QuickJS's stack check is compiled out for WASI, so deep recursion raises `wasmtime.Trap`,
+  not a `QuickJSError`. Catch the trap and discard the context. See
+  [resource limits](../concepts/resource-limits.md#deep-recursion).
+- **Always strict.** Scripts run in strict mode. The `strict` parameter on the eval methods is ignored.
+- **No web or Node APIs.** There is no `console`, `setTimeout`, `fetch`, `TextEncoder`, or `require`. Provide what you
+  need as [host functions](../concepts/host-functions.md).
+- **Memory never shrinks.** A context keeps its peak memory until it is closed, and its snapshots are that size.
+
+## Values
+
+- **Nested values follow JSON rules.** Inside arrays and objects, functions are dropped, `NaN` becomes `None`, and a
+  `Date` becomes a string. See [values](../concepts/values.md#nested-values-follow-json-rules).
+- **Large nested integers are rounded.** Integer-valued numbers of 2⁵³ or more come back as rounded `int` values when
+  nested. Return exact values as strings or `BigInt`.
+- **`__proto__` keys** in Python dicts set the prototype instead of creating a property.
+- **Sets, dataclasses, and custom classes** cannot be passed to JavaScript. Convert them to lists and dicts first.
+
+## Async
+
+- **Awaited host time does not count toward the timeout.** Bound the whole call with `asyncio.timeout`.
+- **Sync host functions cannot be interrupted.** A host function that blocks holds the eval until it returns.
+- **There is no cap on concurrent host calls.** Limit concurrency inside your host functions.
+- **Sync evals do not run promise callbacks.** They run on the next async eval.
+
+## Threads
+
+- **One deadline per runtime.** Evals on one runtime's contexts from different threads disturb each other's timeouts.
+  Use one runtime per thread.
+- **Contexts have no lock.** Drive each one from a single thread, for example with `ThreadWorker`.
+
+## Snapshots
+
+- **No snapshots after `module=True`.** `create_snapshot` raises `NotImplementedError`. Dynamic `import()` from a
+  script is fine.
+- **No signature.** Images are not signed or encrypted. Protect them yourself.
+- **Same build only.** A snapshot restores only into the exact engine build that created it.
+- **Host functions do not travel.** Register them again after restoring.
+
+## Modules
+
+- **Modules are cached for the life of the context.** Changing what `load` returns does not affect a module the
+  context already imported.
+- **`module=True` evals return `None`.** Read results from globals the module sets.
+
+## Versions
+
+- **quickjs-rs 0.2.6 and earlier undercount memory.** Each allocation counted as about 8 bytes toward
+  `memory_limit`, so a script could hold far more than the limit. Later releases count real sizes
+  ([#58](https://github.com/langchain-ai/quickjs-rs/pull/58)).

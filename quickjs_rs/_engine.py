@@ -343,7 +343,6 @@ class _Instance:
         self,
         *,
         memory_limit: int | None = None,
-        stack_limit: int | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
         # Share the Engine + compiled Module + Linker (see the domain note
@@ -1229,7 +1228,7 @@ class QjsRuntime:
 
     So this class is just the config/factory the existing public API expects: it
     holds what's genuinely shared across the contexts a caller mints from it — the
-    memory/stack limits, the module source registry, the interrupt handler — and
+    memory limit, the module source registry, the interrupt handler — and
     hands each `QjsContext` its OWN isolated wasm instance. Two contexts on the
     same `QjsRuntime` therefore have fully independent globals and cannot leak
     state to each other (they are separate VMs, not a shared heap). The public
@@ -1241,7 +1240,6 @@ class QjsRuntime:
         self,
         *,
         memory_limit: int | None = None,
-        stack_limit: int | None = None,
         transform_flags: int | Callable[[str], int] | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -1249,7 +1247,6 @@ class QjsRuntime:
             raise TypeError("clock must be callable")
         self._clock = clock
         self._memory_limit = memory_limit
-        self._stack_limit = stack_limit
         self._transform_flags = transform_flags
         self._closed = False
         self._interrupt_handler: Callable[[], Any] | None = None
@@ -1263,7 +1260,6 @@ class QjsRuntime:
         with this runtime's module loader + limits + interrupt poll."""
         inst = _Instance(
             memory_limit=self._memory_limit,
-            stack_limit=self._stack_limit,
             clock=self._clock,
         )
         inst.module_normalize = self._module_normalize
@@ -1275,8 +1271,6 @@ class QjsRuntime:
         # guest runtime, which reads these). set_*_limit is idempotent.
         if self._memory_limit is not None:
             inst.c("set_memory_limit", self._memory_limit)
-        if self._stack_limit is not None:
-            inst.c("set_max_stack_size", self._stack_limit)
         self._instances.add(inst)
         return inst
 
