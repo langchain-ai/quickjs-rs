@@ -125,7 +125,8 @@ Exception messages often contain paths, queries, or secrets (X1, TB2, A3).
 
 **Defense:** on failure, the host returns only a failure flag and the engine creates `HostError: Host function failed`.
 No host text is written into JavaScript. Async rejections use the same name and message. The original exception goes
-only to the Python caller.
+only to the Python caller. The one exception is a host function that raises `JSError(name, message)` on purpose: the
+script gets that name and message as written.
 
 **Left over:** values that host functions return are visible to the script. The re-raised exception reaches
 application logs. **Status: Mitigated** on the JavaScript side.

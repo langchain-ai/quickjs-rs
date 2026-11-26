@@ -549,7 +549,17 @@ class _Instance:
             # SYNC host fn.
             if self.sync_dispatch is None:
                 return HOST_CALL_ERROR
-            result = self.sync_dispatch(fn_id, tuple(args))
+            try:
+                result = self.sync_dispatch(fn_id, tuple(args))
+            except JSError as exc:
+                # The dispatcher picked the error JS sees: context.py's
+                # sanitized HostError, or a host fn's deliberate JSError.
+                name, message, _ = exc.args
+                err = self._new_named_error(name, message)
+                if err != NULL_HANDLE:
+                    self.c("throw", err)
+                    self.c("free_value", err)
+                return HOST_CALL_ERROR
             return self.python_to_handle(result)
         except Exception:
             # ANY dispatcher failure → return the error sentinel and let the
@@ -605,7 +615,11 @@ class _Instance:
         """Mint a sanitized HostError handle (name=HostError, fixed message).
         Used for async rejection — same wholesale-sanitized policy as the sync
         path (no host string crosses; the original stays host-side)."""
-        data = b"Host function failed"
+        return self._new_named_error("HostError", "Host function failed")
+
+    def _new_named_error(self, name: str, message: str) -> int:
+        """Mint a JS `Error` handle with `name` and `message`."""
+        data = (message or "").encode()
         p = self.alloc_write(data)
         out = self.alloc_out()
         try:
@@ -614,9 +628,9 @@ class _Instance:
         finally:
             self.free(p, len(data))
             self.free(out, 4)
-        if err != NULL_HANDLE:
+        if err != NULL_HANDLE and name:
             try:
-                nh = self._new_string("HostError")
+                nh = self._new_string(name)
                 try:
                     self._set_prop(err, "name", nh)
                 finally:
@@ -1605,28 +1619,10 @@ class QjsContext:
         self, pending_id: int, name: str, message: str, stack: str | None = None
     ) -> None:
         """Reject the deferred with a JS Error(name, message). context.py passes
-        its already-sanitized ("HostError"/"Host function failed") values here —
-        the deliberate, recognized rejection shape, not a host leak."""
+        its sanitized ("HostError"/"Host function failed") values here, or the
+        name and message of a `JSError` a host fn raised on purpose."""
         inst = self._inst
-        data = (message or "").encode()
-        p = inst.alloc_write(data)
-        out = inst.alloc_out()
-        try:
-            st = inst.c("new_error", p, len(data), out)
-            err = inst.read_i32(out) if st == STATUS_OK else NULL_HANDLE
-        finally:
-            inst.free(p, len(data))
-            inst.free(out, 4)
-        if err != NULL_HANDLE and name:
-            try:
-                nh = inst._new_string(name)
-                try:
-                    inst._set_prop(err, "name", nh)
-                finally:
-                    inst.c("free_value", nh)
-            except Exception:
-                pass
-        inst.reject_deferred(pending_id, err)
+        inst.reject_deferred(pending_id, inst._new_named_error(name, message))
 
     def close(self) -> None:
         if self._closed:
