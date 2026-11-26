@@ -105,7 +105,22 @@ with Runtime() as rt, rt.new_context() as ctx:
         #> amount 500 exceeds the card limit
 ```
 
-To tell the script what went wrong, return a value that says so, such as `{"error": "amount too large"}`.
+To tell the script what went wrong, raise `JSError(name, message)`. The script receives an `Error` with exactly that
+name and message, and an uncaught one raises `JSError` from the eval like any script error. This works the same way for
+`async def` functions.
+
+```python
+from quickjs_rs import JSError, Runtime
+
+with Runtime() as rt, rt.new_context() as ctx:
+
+    @ctx.function
+    def charge(amount: int) -> str:
+        raise JSError("RangeError", "amount too large")
+
+    print(ctx.eval("try { charge(500) } catch (e) { `${e.name}: ${e.message}` }"))
+    #> RangeError: amount too large
+```
 
 ## Async host functions
 

@@ -139,3 +139,38 @@ def test_non_error_throw_coerces_to_jserror() -> None:
             assert n_exc.value.name == "Error"
             assert n_exc.value.message == "42"
             assert n_exc.value.stack is None
+
+
+def test_host_raised_jserror_reaches_js_unsanitized() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            def lookup() -> None:
+                raise JSError("RangeError", "no such id")
+
+            assert ctx.eval("try { lookup() } catch (e) { `${e.name}: ${e.message}` }") == (
+                "RangeError: no such id"
+            )
+            with pytest.raises(JSError) as excinfo:
+                ctx.eval("lookup()")
+            assert type(excinfo.value) is JSError
+            assert (excinfo.value.name, excinfo.value.message) == ("RangeError", "no such id")
+
+
+async def test_async_host_raised_jserror_reaches_js_unsanitized() -> None:
+    with Runtime() as rt:
+        with rt.new_context() as ctx:
+
+            @ctx.function
+            async def lookup() -> None:
+                raise JSError("Error", "timed out")
+
+            caught = await ctx.eval_async(
+                "try { await lookup() } catch (e) { `${e.name}: ${e.message}` }"
+            )
+            assert caught == "Error: timed out"
+            with pytest.raises(JSError) as excinfo:
+                await ctx.eval_async("await lookup()")
+            assert type(excinfo.value) is JSError
+            assert (excinfo.value.name, excinfo.value.message) == ("Error", "timed out")
