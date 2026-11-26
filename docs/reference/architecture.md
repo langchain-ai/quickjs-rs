@@ -99,8 +99,10 @@ A sync eval (`Context.eval`):
 1. Writes an absolute deadline into `Runtime._deadline`.
 2. Strips TypeScript if a transform policy asks for it.
 3. Calls `eval_code`, or `eval_module` for `module=True`.
-4. While JavaScript runs, QuickJS calls its interrupt handler every so often. The handler calls `host_interrupt`, which
-   compares the time with the deadline. Once it has passed, QuickJS throws an error that scripts cannot catch.
+4. While JavaScript runs, QuickJS calls its interrupt handler every so often. The handler compares WASI's monotonic
+   clock with the deadline the host wrote into the engine's `DeadlineSlot`, so no Python runs on the hot loop. A
+   runtime with a host `clock` calls `host_interrupt` instead. Once the deadline has passed, QuickJS throws an error
+   that scripts cannot catch.
 5. On `STATUS_JS_ERROR`, takes the exception with `last_exception` and classifies it (see [errors](../reference/errors.md)).
    Otherwise converts the result to Python.
 6. Clears the deadline.

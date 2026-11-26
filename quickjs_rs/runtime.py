@@ -61,14 +61,25 @@ class Runtime:
         self._contexts: list[Any] = []  # list[Context] once step 2 lands
 
         # Per-eval deadline slot (monotonic-clock absolute time, seconds).
-        # Context writes it before eval, clears it after.
-        self._deadline: float | None = None
+        # Context writes it before eval, clears it after; the setter hands it
+        # to the guest, which checks it without calling back into Python.
+        self.__deadline: float | None = None
 
         def _interrupt() -> bool:
-            d = self._deadline
+            # Hot-loop poll for instances with a host clock only.
+            d = self.__deadline
             return d is not None and time.monotonic() >= d
 
         self._engine_rt.set_interrupt_handler(_interrupt)
+
+    @property
+    def _deadline(self) -> float | None:
+        return self.__deadline
+
+    @_deadline.setter
+    def _deadline(self, deadline: float | None) -> None:
+        self.__deadline = deadline
+        self._engine_rt.set_deadline(deadline)
 
     def __enter__(self) -> Runtime:
         return self

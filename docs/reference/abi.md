@@ -77,7 +77,7 @@ the right instance (see [routing across threads](../reference/architecture.md#ro
 | Import | Signature | Returns |
 | --- | --- | --- |
 | `host_call` | `(name_ptr, name_len, this, argc, argv_ptr) -> i32` | A result handle the engine now owns, or `-1` for failure |
-| `host_interrupt` | `() -> i32` | Non-zero to stop the running script |
+| `host_interrupt` | `() -> i32` | Non-zero to stop the running script. Called only by runtimes with a host `clock`; others check the deadline in `deadline_slot_ptr()`'s slot. |
 | `host_module_normalize` | `(base_ptr, base_len, spec_ptr, spec_len, out_len_ptr) -> i32` | A pointer to the canonical name, with its length written to `out_len_ptr`. `0` refuses. |
 | `host_module_load` | `(name_ptr, name_len, out_len_ptr) -> i32` | A pointer to the module source, with its length written to `out_len_ptr`. `0` means not found. |
 
@@ -185,6 +185,7 @@ result buffer.
 | Export | Signature | Notes |
 | --- | --- | --- |
 | `set_memory_limit` | `(bytes)` | |
+| `deadline_slot_ptr` | `() -> ptr` | Address of the `DeadlineSlot` (`dirty: i32`, `host_poll: i32`, `timeout_ns: i64`, `fired: i32`) the host writes each eval's deadline into, and the engine marks when it interrupts |
 | `run_gc` | `()` | |
 | `compute_memory_usage` | `() -> status` | 26 `i64` fields of `JSMemoryUsage` `→ buf` |
 | `memory` | memory | The linear memory. A snapshot copies it. |

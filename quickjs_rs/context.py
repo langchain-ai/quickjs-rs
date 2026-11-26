@@ -388,12 +388,12 @@ class Context:
           a HostError-named throw without an underlying host raise; an
           actual host raise is unwrapped earlier in _raise_classified.)
         - name == "InternalError" with message "interrupted":
-          TimeoutError. The runtime's only source of interrupts is
-          the wall-clock deadline we install from eval entry; any
-          "interrupted" signal therefore means the deadline elapsed.
-          A defensive guard against misclassification: if somehow the
-          deadline hasn't actually passed, surface as the more
-          general InterruptError instead of lying about a timeout.
+          TimeoutError when the guest reports that its deadline fired.
+          It checks the deadline against its own clock, so the host
+          asks it rather than re-reading `time.monotonic()`, which can
+          be coarser (15.6ms on Windows before Python 3.13). Any other
+          interrupt surfaces as the more general InterruptError
+          instead of a false timeout claim.
         - name == "InternalError" with message "out of memory":
           MemoryLimitError. QuickJS raises this from
           JS_ThrowOutOfMemory when an allocation fails past the
@@ -411,10 +411,10 @@ class Context:
         if name == "InternalError":
             if "interrupted" in message:
                 # Our only interrupt source is the deadline. Prefer
-                # TimeoutError if it actually elapsed; fall back to
+                # TimeoutError if the guest says it fired; fall back to
                 # InterruptError otherwise so misclassification is
                 # loud rather than a false timeout claim.
-                if deadline is not None and time.monotonic() >= deadline:
+                if deadline is not None and self._engine_ctx.deadline_fired:
                     return TimeoutError(message)
                 return InterruptError(message)
             if "out of memory" in message:
