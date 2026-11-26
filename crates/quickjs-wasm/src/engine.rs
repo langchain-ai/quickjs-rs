@@ -49,12 +49,17 @@ pub struct DeadlineSlot {
     host_poll: AtomicI32,
     /// Time left in nanoseconds; negative means no deadline.
     timeout_ns: AtomicI64,
+    /// Set by the guest when it interrupts JS; cleared by the host on each
+    /// new deadline. Tells the host a timeout fired without it re-reading a
+    /// clock that may be coarser than the one the guest checked.
+    fired: AtomicI32,
 }
 
 static DEADLINE_SLOT: DeadlineSlot = DeadlineSlot {
     dirty: AtomicI32::new(0),
     host_poll: AtomicI32::new(0),
     timeout_ns: AtomicI64::new(-1),
+    fired: AtomicI32::new(0),
 };
 
 /// Export: address of the deadline slot in linear memory.
@@ -64,6 +69,14 @@ pub extern "C" fn deadline_slot_ptr() -> *const DeadlineSlot {
 }
 
 fn interrupted() -> bool {
+    let stop = deadline_passed();
+    if stop {
+        DEADLINE_SLOT.fired.store(1, Ordering::Relaxed);
+    }
+    stop
+}
+
+fn deadline_passed() -> bool {
     thread_local! {
         static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
         static HOST_POLL: Cell<bool> = const { Cell::new(false) };

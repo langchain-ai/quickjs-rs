@@ -185,7 +185,7 @@ result buffer.
 | Export | Signature | Notes |
 | --- | --- | --- |
 | `set_memory_limit` | `(bytes)` | |
-| `deadline_slot_ptr` | `() -> ptr` | Address of the `DeadlineSlot` (`dirty: i32`, `host_poll: i32`, `timeout_ns: i64`) the host writes each eval's deadline into |
+| `deadline_slot_ptr` | `() -> ptr` | Address of the `DeadlineSlot` (`dirty: i32`, `host_poll: i32`, `timeout_ns: i64`, `fired: i32`) the host writes each eval's deadline into, and the engine marks when it interrupts |
 | `run_gc` | `()` | |
 | `compute_memory_usage` | `() -> status` | 26 `i64` fields of `JSMemoryUsage` `→ buf` |
 | `memory` | memory | The linear memory. A snapshot copies it. |

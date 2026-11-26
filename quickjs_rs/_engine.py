@@ -380,7 +380,7 @@ class _Instance:
         self.sp = cast(wasmtime.Global, e["__stack_pointer"])
         self._exports = e
         # Host view of the guest's DeadlineSlot (dirty i32, host_poll i32,
-        # timeout_ns i64). Wasmtime reserves a 32-bit memory's whole range up
+        # timeout_ns i64, fired i32). Wasmtime reserves a 32-bit memory's whole range up
         # front, so the base never moves.
         slot = ctypes.addressof(self.mem.data_ptr(self.store).contents) + self.c(
             "deadline_slot_ptr"
@@ -388,6 +388,7 @@ class _Instance:
         self._deadline_dirty = ctypes.c_int32.from_address(slot)
         self._deadline_host_poll = ctypes.c_int32.from_address(slot + 4)
         self._deadline_ns = ctypes.c_int64.from_address(slot + 8)
+        self._deadline_fired = ctypes.c_int32.from_address(slot + 16)
         # Set true once a module-mode eval runs — module snapshot is V1-guarded.
         self.module_touched = False
 
@@ -595,7 +596,13 @@ class _Instance:
         else:
             self._deadline_ns.value = max(0, int((deadline - time.monotonic()) * 1e9))
         self._deadline_host_poll.value = 1 if hosted and deadline is not None else 0
+        self._deadline_fired.value = 0
         self._deadline_dirty.value = 1
+
+    @property
+    def deadline_fired(self) -> bool:
+        """Whether the guest interrupted JS because its deadline passed."""
+        return not self._closed and self._deadline_fired.value != 0
 
     # -- interrupt poll --
     def _host_interrupt(self) -> int:
@@ -1629,6 +1636,10 @@ class QjsContext:
     @property
     def module_touched(self) -> bool:
         return self._inst.module_touched
+
+    @property
+    def deadline_fired(self) -> bool:
+        return self._inst.deadline_fired
 
     def create_snapshot(self) -> bytes:
         """Whole-memory snapshot of this context's wasm instance."""
