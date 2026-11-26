@@ -1,0 +1,301 @@
+# Threat model
+
+This threat model is for security reviewers. It lists what an attacker could go after, how quickjs-rs defends it, and
+what is left for the application to handle. For practical guidance, start with the
+[security model](../concepts/security-model.md).
+
+It covers the WebAssembly design: quickjs-ng compiled to `wasm32-wasip1` and run by wasmtime inside a pure-Python
+package. It replaces the earlier model written for the native extension. Every statement was checked against the code
+on `main`.
+
+## Summary
+
+| ID | Threat | Status |
+| --- | --- | --- |
+| [T1](#t1-engine-memory-corruption) | Engine memory corruption reaches the host | Mitigated |
+| [T2](#t2-wasmtime-bug) | A wasmtime or Cranelift bug crosses the sandbox | Accepted |
+| [T3](#t3-host-function-abuse) | A script abuses a host function | Accepted |
+| [T4](#t4-error-leaks) | Host details leak to the script through errors | Mitigated |
+| [T5](#t5-module-loader-abuse) | A script steers the module loader | Accepted |
+| [T6](#t6-cpu-exhaustion) | CPU exhaustion | Partial |
+| [T7](#t7-memory-exhaustion) | Memory exhaustion | Partial |
+| [T8](#t8-stack-exhaustion) | Stack exhaustion | Partial |
+| [T9](#t9-host-call-fan-out) | Host-call fan-out | Accepted |
+| [T10](#t10-cross-context-leaks) | Data leaks between contexts | Mitigated |
+| [T11](#t11-state-left-behind) | State left behind for the next run | Accepted |
+| [T12](#t12-timeout-interference) | Timeout interference across threads | Accepted |
+| [T13](#t13-snapshot-tampering) | Snapshot tampering or forgery | Accepted |
+| [T14](#t14-snapshot-disclosure) | Snapshot disclosure | Accepted |
+| [T15](#t15-timing) | Timing and clock side channels | Partial |
+| [T16](#t16-typescript-parser-bugs) | TypeScript parser bugs | Mitigated |
+| [T17](#t17-output-to-host-stdio) | Output to host stdout and stderr | Mitigated |
+| [T18](#t18-supply-chain) | Compromised dependency or build | Partial |
+
+- **Mitigated:** the library prevents it.
+- **Partial:** the library limits it, and some risk remains.
+- **Accepted:** by design. The application must handle it.
+
+## Scope
+
+**In scope:** the Python package (`quickjs_rs/`), the engine and transform crates (`crates/quickjs-wasm`,
+`crates/quickjs-wasm-transform`), the boundary between them, snapshots, and the build and release pipeline.
+
+**Out of scope:** host functions and module loaders written by applications (covered here only as guidance), the
+internal correctness of wasmtime, and this docs site.
+
+**Assumptions:**
+
+1. The Python process and the application code that configures quickjs-rs are trusted.
+2. Any source passed to an eval, returned by a module loader, or written by a language model may be fully controlled
+   by an attacker.
+3. Values returned by host functions may be sensitive.
+4. Snapshot bytes are trusted only if the application created them and protected them in storage.
+
+## Assets
+
+| ID | Asset | Why it matters |
+| --- | --- | --- |
+| A1 | The host process | Code execution in the Python process means full compromise of what it can reach. |
+| A2 | Host capabilities | Files, network, databases, and credentials reachable through host functions. |
+| A3 | Data in a context | Host function results, secrets, and user data passed in or produced by the script. |
+| A4 | Other contexts and tenants | Other users' state in the same process. |
+| A5 | Availability | CPU, memory, and event-loop time of the host. |
+| A6 | Integrity of results | Applications act on the values evals return. |
+
+## Attackers
+
+| ID | Attacker | Can do |
+| --- | --- | --- |
+| X1 | Script author | Choose the source code. A malicious user, or a model steered by prompt injection. |
+| X2 | Engine exploiter | X1, plus a working memory-safety exploit against QuickJS, so full control of engine memory. |
+| X3 | Runtime exploiter | X2, plus a working exploit against wasmtime or Cranelift. |
+| X4 | Snapshot tamperer | Change or replace snapshot bytes at rest or in transit. |
+| X5 | Supply-chain attacker | Compromise an upstream crate, the Rust toolchain, wasmtime-py, or the release path. |
+
+## Trust boundaries
+
+| ID | Boundary | Enforced by |
+| --- | --- | --- |
+| TB1 | Engine memory and the host process | WebAssembly memory isolation, and bounds checks on every host read (`_Instance.read`) |
+| TB2 | Script and host functions | Name lookup in a per-context table, value conversion, and error sanitizing (`_Instance._host_call`, `hostfn.rs`) |
+| TB3 | Script and module loader | The host's `normalize` and `load` callbacks, plus size caps (`modules.rs`) |
+| TB4 | Context and context | A separate instance per context, and handle owner checks (`handle.py`) |
+| TB5 | Snapshot bytes and a live context | Header checks only (`_Instance.restore`) |
+| TB6 | Source and the TypeScript stripper | A separate wasm instance per context (`_transform.py`) |
+| TB7 | Upstream code and the shipped wheel | Pinned lockfiles, wasm built from source in CI, RustSec scanning, git-source policy |
+
+## Sandbox escape
+
+### T1: Engine memory corruption
+
+An X2 attacker uses a QuickJS bug to read and write anywhere in engine memory (TB1, A1).
+
+**Defense:** the engine cannot address host memory. The host checks every pointer and length it reads, caps lengths,
+never dereferences an engine pointer itself, and looks up host functions by name in a table. Every engine function
+catches Rust panics and returns a status code.
+
+**Left over:** the attacker controls everything the context computes, including values returned to Python. Treat eval
+results over untrusted code as untrusted (A6). **Status: Mitigated** for A1.
+
+### T2: wasmtime bug
+
+An X3 attacker exploits wasmtime or Cranelift, which run the engine inside the process (TB1, A1).
+
+**Defense:** none inside quickjs-rs, beyond requiring `wasmtime>=45`.
+
+**Left over:** this is the design's remaining escape path. Keep wasmtime current. Add process or container isolation
+for workloads that must assume X3. **Status: Accepted.**
+
+## Host capabilities
+
+### T3: Host function abuse
+
+Any registered function can be called by any code in the context, with any arguments, any number of times (X1, TB2,
+A2).
+
+**Defense:** only names registered on that context can be called. Arguments arrive as plain Python values. Functions,
+symbols, and promises cannot be passed.
+
+**Left over:** whatever a host function can do, the script can do. This is the main risk in programmatic tool calling.
+Applications must validate arguments, apply the end user's permissions, and budget calls. **Status: Accepted.**
+
+### T4: Error leaks
+
+Exception messages often contain paths, queries, or secrets (X1, TB2, A3).
+
+**Defense:** on failure, the host returns only a failure flag and the engine creates `HostError: Host function failed`.
+No host text is written into JavaScript. Async rejections use the same name and message. The original exception goes
+only to the Python caller. The one exception is a host function that raises `JSError(name, message)` on purpose: the
+script gets that name and message as written.
+
+**Left over:** values that host functions return are visible to the script. The re-raised exception reaches
+application logs. **Status: Mitigated** on the JavaScript side.
+
+### T5: Module loader abuse
+
+`normalize(base, specifier)` receives specifiers the attacker chose, including `../` paths (X1, TB3, A2).
+
+**Defense:** there is no built-in loader, so nothing loads unless the application installs one. Names over 4096 bytes
+and sources over 16 MiB are rejected. Returning `None` refuses.
+
+**Left over:** a loader backed by files or a network must apply its own allowlist. Loader callbacks run synchronously
+and cannot be interrupted. **Status: Accepted.**
+
+## Resource exhaustion
+
+### T6: CPU exhaustion
+
+Infinite loops, endless promise callbacks, or slow regular expressions (X1, A5).
+
+**Defense:** each eval has a wall-clock deadline that the engine checks while it runs, including while it runs promise
+callbacks. Scripts cannot catch the interrupt. Each pass of the async loop runs at most 100,000 callbacks. The context
+survives a timeout.
+
+**Left over:** time inside host functions and loader callbacks cannot be interrupted. Awaited host time does not count,
+so a script can keep a run alive by awaiting slow host functions. There is no CPU-time budget. Bound runs with
+`asyncio.timeout`. **Status: Partial.**
+
+### T7: Memory exhaustion
+
+Large strings, arrays, or deep structures (X1, A5).
+
+**Defense:** `memory_limit` (64 MiB by default) is enforced by QuickJS over every allocation it makes. Exceeding it raises an error and the context
+survives. Value conversion stops at depth 128, and engine inputs at 64 MiB.
+
+**Left over:** No wasmtime memory limit is set, so allocations outside QuickJS are not counted. Engine memory
+only grows. `memory_limit=None` removes the bound.
+**Status: Partial.**
+
+### T8: Stack exhaustion
+
+Deep recursion (X1, A5).
+
+**Defense:** the wasm stack is finite, so recursion ends in a wasmtime trap rather than a host stack overflow.
+
+**Left over:** QuickJS's stack check is compiled out for WASI, so the failure is a
+`wasmtime.Trap`, not a `QuickJSError`. Callers that only catch `QuickJSError` miss it. The context's state after a
+trap is not guaranteed. **Status: Partial.**
+
+### T9: Host-call fan-out
+
+One `Promise.all` can start thousands of async host calls, and a loop can make millions of sync calls within the
+timeout (X1, A2, A5).
+
+**Defense:** none in the library. Each async call becomes an asyncio task.
+
+**Left over:** applications must cap concurrency and call counts inside their host functions. **Status: Accepted.**
+
+## Isolation between users
+
+### T10: Cross-context leaks
+
+A script tries to read another context's data (X1, TB4, A3, A4).
+
+**Defense:** every context is a separate wasm instance. There is no shared heap and no API that reaches another
+context. Handles from one context are rejected by another. Tests (`tests/test_isolation.py`) create and use contexts
+on many threads at once.
+
+**Left over:** contexts on one `Runtime` share its loader callbacks, clock, limits, and deadline. Anything those
+callbacks close over is visible to all of them. **Status: Mitigated** for memory. Use one runtime per tenant for the
+rest.
+
+### T11: State left behind
+
+A context reused for a second user keeps the first user's globals, changed prototypes, cached modules, and data (X1,
+A3, A6).
+
+**Defense:** none. State that persists between evals is intended.
+
+**Left over:** create a fresh context, or restore a known snapshot, for each untrusted run. **Status: Accepted.**
+
+### T12: Timeout interference
+
+Contexts on one `Runtime` share one deadline. Evals from different threads on the same runtime can clear or replace
+each other's deadline, leaving a script with no timeout (A5).
+
+**Defense:** the documented rule of one runtime per thread. `ThreadWorker` makes it easy to follow.
+**Status: Accepted.**
+
+## Snapshots
+
+### T13: Snapshot tampering
+
+A changed or forged image is restored (X4, TB5, A1, A6).
+
+**Defense:** restore checks the magic bytes, format version, build ID (the SHA-256 of the engine wasm), image length,
+and stack pointer, in that order, before writing anything.
+
+**Left over:** there is no signature. A crafted image with a valid header is arbitrary engine state. The attacker
+controls every value the context returns, its memory limit (which is part of the image), and which host functions it
+calls with what arguments. The image stays inside the sandbox (T1), but A2 and A6 are exposed. The declared size also
+decides how far memory grows on restore, up to 4 GiB. Applications must sign snapshots, store them under access
+control, and check their size before restoring. **Status: Accepted.**
+
+### T14: Snapshot disclosure
+
+A snapshot holds the whole heap: every string, every host function result, and anything not yet overwritten (A3).
+
+**Defense:** none in the library.
+
+**Left over:** treat a snapshot like the most sensitive data that passed through its context. Encrypt it at rest if
+needed. Do not share one across users. **Status: Accepted.**
+
+## Other channels
+
+### T15: Timing
+
+By default, scripts read real time through `Date.now()` and `performance.now()`, which helps them time host operations
+(X1, A3).
+
+**Defense:** a `clock` callback replaces every clock the engine reads. A clock that only moves between evals leaves a
+script no timer at all. See
+[the clock](../concepts/resource-limits.md#the-clock).
+
+**Left over:** the default is real time. Host functions that return the time, or whose results depend on timing, can
+still leak it. `Math.random()` is not cryptographically secure. **Status: Partial.**
+
+### T16: TypeScript parser bugs
+
+TypeScript is parsed by OXC before QuickJS sees it (X1, TB6).
+
+**Defense:** OXC runs in its own wasm instance per context. A failure recreates the instance and shows up as a module
+load error or `SyntaxError`. **Status: Mitigated.**
+
+### T17: Output to host stdio
+
+The engine's stdout and stderr are the host's (A5).
+
+**Defense:** JavaScript has no function that writes to them. Only engine-level messages, such as a Rust panic message,
+can appear. **Status: Mitigated.**
+
+## Supply chain
+
+### T18: Supply chain
+
+rquickjs and quickjs-ng (C code), OXC, the Rust toolchain, wasmtime-py, and PyPI publishing could be compromised (X5,
+TB7, A1).
+
+**Defense:** the engine wasm is built from source in CI and never committed. Cargo lockfiles pin versions. The
+`dependency-security` workflow runs `cargo audit --deny warnings` and a git-source policy check on the engine's
+lockfile. GitHub Actions are pinned by commit SHA. Upstream C code compiled into the engine is contained by the
+sandbox (T1).
+
+**Left over:** the RustSec scan covers `crates/quickjs-wasm/Cargo.lock` only, not the transform crate. wasmtime-py is a
+range dependency (`>=45`), so installs pick up new releases. **Status: Partial.**
+
+## Investigated and dismissed
+
+- **Forged promise IDs.** Async results are delivered by a 32-bit ID. The engine removes an entry when it settles and
+  rejects unknown IDs, so a stale or forged ID cannot settle another call.
+- **Handles across contexts.** Every handle carries its context, and every operation checks it. Even without the
+  check, a handle is a pointer into one engine's memory and means nothing in another.
+- **Host calls routed to the wrong thread.** Imports find their instance through a thread-local set by the call that
+  is running on that thread. `tests/test_isolation.py` exercises this under concurrency.
+- **Stack pointer in snapshots.** Restore checks that the stack pointer lies within the image.
+
+## Revision history
+
+| Date | Change |
+| --- | --- |
+| 2026-04-23 | First model, for the native PyO3 extension. |
+| 2026-11 | Rewritten for the WebAssembly engine. |

@@ -26,7 +26,7 @@ def _validate_runtime_context(runtime: Runtime, ctx: Any) -> None:
 
 
 class Runtime:
-    """Owns the QuickJS runtime (JS heap, memory/stack limits, interrupt
+    """Owns the QuickJS runtime (JS heap, memory limit, interrupt
     handler). Thin wrapper over ``_engine.QjsRuntime``.
 
     ``clock`` returns integer nanoseconds since the Unix epoch and backs every
@@ -45,14 +45,12 @@ class Runtime:
         self,
         *,
         memory_limit: int | None = 64 * 1024 * 1024,
-        stack_limit: int | None = 1 * 1024 * 1024,
         transform_flags: TransformFlagsProvider | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
         try:
             self._engine_rt = _engine.QjsRuntime(
                 memory_limit=memory_limit,
-                stack_limit=stack_limit,
                 transform_flags=transform_flags,
                 clock=clock,
             )

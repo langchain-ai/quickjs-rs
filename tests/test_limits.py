@@ -78,12 +78,11 @@ def test_async_exception_during_busy_eval_does_not_crash() -> None:
     strict=True,
     reason=(
         "UPSTREAM GAP (quickjs-ng #774): the wasi build compiles OUT QuickJS's "
-        "own stack check (`#if defined(__wasi__)` sets stack_limit=0), so deep "
+        "own stack check (`#if defined(__wasi__)`), so deep "
         "JS recursion exhausts the wasm shadow stack and HARD-TRAPS "
         "('wasm trap: call stack exhausted') before QuickJS can throw a "
-        "catchable InternalError. `set_max_stack_size` has no effect (verified "
-        "down to 64KB). Catchable stack overflow needs a vendored C patch "
-        "restoring the wasi stack check"
+        "catchable InternalError. Catchable stack overflow needs a vendored C "
+        "patch restoring the wasi stack check"
     ),
 )
 def test_stack_overflow_is_jserror_not_memory() -> None:

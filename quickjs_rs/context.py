@@ -398,11 +398,9 @@ class Context:
           MemoryLimitError. QuickJS raises this from
           JS_ThrowOutOfMemory when an allocation fails past the
           memory limit set by JS_SetMemoryLimit.
-        - Everything else, including stack overflow (rquickjs-0.11
-          surfaces it as RangeError "Maximum call stack size
-          exceeded"), falls through to plain JSError. The
-          test_stack_overflow_is_jserror_not_memory tripwire
-          asserts this routing.
+        - Everything else falls through to plain JSError. Deep
+          recursion never gets here: it traps the wasm instance
+          (see the test_stack_overflow_is_jserror_not_memory xfail).
         """
         if name == "HostError":
             cause = self._last_host_exception
@@ -1009,11 +1007,16 @@ class Context:
                 raise
             except BaseException as exc:
                 resolve_ok = False
-                self._last_host_exception = exc
-                # Stable sanitized payload for the JS-visible rejection;
-                # the side-channel carries the original for re-raise at
-                # the eval boundary if JS doesn't catch.
-                err_message = _HOST_ERROR_SANITIZED_MESSAGE
+                if type(exc) is JSError:
+                    # Opt-in: a host fn raising JSError rejects with exactly
+                    # that name and message, like a JS throw.
+                    err_name, err_message = exc.name, exc.message
+                else:
+                    self._last_host_exception = exc
+                    # Stable sanitized payload for the JS-visible rejection;
+                    # the side-channel carries the original for re-raise at
+                    # the eval boundary if JS doesn't catch.
+                    err_message = _HOST_ERROR_SANITIZED_MESSAGE
                 err_stack = None
 
             try:
@@ -1082,5 +1085,8 @@ class Context:
         try:
             return fn(*args)
         except BaseException as exc:
+            if type(exc) is JSError:
+                # Opt-in: a host fn raising JSError throws exactly that in JS.
+                raise _engine.JSError(exc.name, exc.message, None) from None
             self._last_host_exception = exc
             raise _engine.JSError("HostError", _HOST_ERROR_SANITIZED_MESSAGE, None) from None
